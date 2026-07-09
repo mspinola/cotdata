@@ -12,13 +12,13 @@ def _get_adj_kwargs(adjustment: str) -> dict:
     """Back-adjustment selection for norgatedata.price_timeseries.
 
     TOTALRETURN (default) = arithmetic back-adjusted (gap-free, shape-preserving).
-    NONE = unadjusted (for position sizing / absolute price).
+    UNADJUSTED = unadjusted (for position sizing / absolute price).
     """
     import norgatedata
     if adjustment == "backadj":
         return dict()  # TOTALRETURN is the default
     elif adjustment == "unadj":
-        return dict(stock_price_adjustment_setting=norgatedata.StockPriceAdjustmentType.NONE)
+        return dict(stock_price_adjustment_setting=norgatedata.StockPriceAdjustmentType.UNADJUSTED)
     else:
         raise ValueError(f"Unknown adjustment: {adjustment}")
 
