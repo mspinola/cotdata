@@ -38,7 +38,7 @@ export COTDATA_STORE=/path/to/synced/store  # the shared store
 **Producer machine (Windows, Norgate)** — only cotdata + the `norgate` extra:
 
 ```powershell
-uv venv
+uv venv  --python 3.10
 uv pip install -e ".[norgate]"              # from the cotdata repo; pulls norgatedata
 $env:COTDATA_STORE = "C:\path\to\store"      # same store, synced to the Mac
 # fill the two VERIFY blanks in src/cotdata/providers/norgate.py, then:
