@@ -1,21 +1,26 @@
 """Norgate price producer — RUNS ON WINDOWS (Norgate Data Updater running +
 `norgatedata`). The active EOD source: exchange settlement close, deep history,
 arithmetic back-adjusted (gap-free, shape-preserving) continuous contracts.
-
-Migrated from cot-analyzer/scripts/norgate_export.py. Two Norgate-API specifics
-still need confirming against your norgatedata version (marked VERIFY).
 """
 import pandas as pd
 
 from ..registry import REGISTRY, all_symbols
 from .. import store
 
-# VERIFY against norgatedata docs: how futures back-adjustment is selected
-# (distinct symbols vs a price_timeseries kwarg). Fill both so each series is right.
-_ADJ_KWARGS = {
-    "backadj": dict(),   # e.g. '&ES' already back-adjusted by default
-    "unadj":   dict(),   # e.g. dict(stock_price_adjustment_setting=norgatedata.StockPriceAdjustmentType.NONE)
-}
+
+def _get_adj_kwargs(adjustment: str) -> dict:
+    """Back-adjustment selection for norgatedata.price_timeseries.
+
+    TOTALRETURN (default) = arithmetic back-adjusted (gap-free, shape-preserving).
+    NONE = unadjusted (for position sizing / absolute price).
+    """
+    import norgatedata
+    if adjustment == "backadj":
+        return dict()  # TOTALRETURN is the default
+    elif adjustment == "unadj":
+        return dict(stock_price_adjustment_setting=norgatedata.StockPriceAdjustmentType.NONE)
+    else:
+        raise ValueError(f"Unknown adjustment: {adjustment}")
 
 _COLMAP = {
     "Open": "Open", "High": "High", "Low": "Low", "Close": "Close",
@@ -26,13 +31,13 @@ _COLMAP = {
 
 def fetch(internal_symbol: str, adjustment: str, start: str = "1970-01-01") -> pd.DataFrame:
     import norgatedata  # imported lazily; only present on the Windows producer
-    ng_sym = REGISTRY[internal_symbol].norgate
+    ng_sym = REGISTRY[internal_symbol].norgate.lstrip("&")  # Norgate symbols have no & prefix
     df = norgatedata.price_timeseries(
         ng_sym,
         padding_setting=norgatedata.PaddingType.NONE,
         timeseriesformat="pandas-dataframe",
         start_date=start,
-        **_ADJ_KWARGS[adjustment],
+        **_get_adj_kwargs(adjustment),
     )
     df = df.rename(columns=_COLMAP)
     keep = [c for c in _COLMAP.values() if c in df.columns]
