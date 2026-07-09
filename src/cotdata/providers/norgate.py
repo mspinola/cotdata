@@ -11,14 +11,15 @@ from .. import store
 def _get_adj_kwargs(adjustment: str) -> dict:
     """Back-adjustment selection for norgatedata.price_timeseries.
 
-    TOTALRETURN (default) = arithmetic back-adjusted (gap-free, shape-preserving).
-    UNADJUSTED = unadjusted (for position sizing / absolute price).
+    Norgate continuous contracts (&ES) can be adjusted or unadjusted:
+    - backadj: TOTALRETURN = arithmetic back-adjusted (stitched, gap-free, shape-preserving)
+    - unadj: default (no setting) = unadjusted (actual price gaps at rolls)
     """
     import norgatedata
     if adjustment == "backadj":
-        return dict()  # TOTALRETURN is the default
+        return dict(stock_price_adjustment_setting=norgatedata.StockPriceAdjustmentType.TOTALRETURN)
     elif adjustment == "unadj":
-        return dict(stock_price_adjustment_setting=norgatedata.StockPriceAdjustmentType.UNADJUSTED)
+        return dict()  # default = unadjusted (actual gaps at rolls)
     else:
         raise ValueError(f"Unknown adjustment: {adjustment}")
 
