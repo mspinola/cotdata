@@ -111,7 +111,8 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
         if sub.empty:
             print(f"{code}: no rows")
             continue
+        # Index by report date (DatetimeIndex → manifest last_date), keeping the
+        # Legacy column name so a consumer's reset_index() gets the exact schema.
         sub = sub.sort_values(REPORT_DATE).set_index(REPORT_DATE)
-        sub.index.name = "Report_Date"
         store.write_cot(code, sub, source="cftc")
         print(f"{code}: {len(sub):5d} weeks -> store")
