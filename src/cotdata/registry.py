@@ -8,8 +8,7 @@ cot-analyzer/config/params.yaml — the data layer must not carry strategy knobs
 Sources:
   • cftc_code   — cot-analyzer CotSymbolCodeMap
   • asset_class — CotIndexer asset classes
-  • norgate     — '&' + CME root (VERIFY a few against Norgate's symbol
-                  directory; some may differ, e.g. currencies/lumber).
+  • norgate     — '&' + CME root (e.g., "&ES"); required by norgatedata.price_timeseries().
 is_equity is True only for the four equity indices (a fixed classification the
 equity-vs-commodity rules key off; derivable as asset_class == "Equities").
 """

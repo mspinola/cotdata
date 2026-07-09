@@ -31,7 +31,7 @@ _COLMAP = {
 
 def fetch(internal_symbol: str, adjustment: str, start: str = "1970-01-01") -> pd.DataFrame:
     import norgatedata  # imported lazily; only present on the Windows producer
-    ng_sym = REGISTRY[internal_symbol].norgate.lstrip("&")  # Norgate symbols have no & prefix
+    ng_sym = REGISTRY[internal_symbol].norgate  # e.g., "&ES"; price_timeseries needs the &
     df = norgatedata.price_timeseries(
         ng_sym,
         padding_setting=norgatedata.PaddingType.NONE,
