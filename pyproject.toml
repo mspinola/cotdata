@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cotdata"
+version = "0.1.0"
+description = "Canonical data layer for COT/futures strategies — a producer/consumer split over a file-based store."
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=1.5",
+    "pyarrow>=10",
+    "requests>=2.28",       # CFTC COT zips
+    "python-dateutil>=2.8",
+]
+
+[project.optional-dependencies]
+# Producer-only, Windows: the Norgate Data Updater must be installed & running.
+norgate = ["norgatedata"]
+# Dormant provider, retained for the intraday news-failure work + settlement cross-check.
+databento = ["databento>=0.30"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+cotdata-update = "cotdata.update:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
