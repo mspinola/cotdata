@@ -7,7 +7,7 @@ returns the cleaned weekly COT table; the indexer builds indices on top.
 import pandas as pd
 
 from . import store
-from .registry import REGISTRY
+from .registry import REGISTRY, hist_code_scales
 
 _CODE_COL = "CFTC_Contract_Market_Code"   # Legacy schema contract-code column
 
@@ -30,12 +30,16 @@ def get_cot(name: str) -> pd.DataFrame:
     if not sym.hist_codes:
         return primary
     frames = [primary]                    # primary first → wins de-duplication on overlaps
-    for hc in sym.hist_codes:
+    for hc, scale in hist_code_scales(sym.hist_codes):
         h = store.read_cot(hc)
         if h.empty:
             continue
+        h = h.copy()
+        if scale != 1.0:                  # bridge a contract-size change (position/OI counts)
+            num = h.select_dtypes("number").columns
+            h[num] = h[num] * scale
         if _CODE_COL in h.columns:        # present predecessor rows under the primary code
-            h = h.assign(**{_CODE_COL: sym.cftc_code})
+            h[_CODE_COL] = sym.cftc_code
         frames.append(h)
     frames = [f for f in frames if not f.empty]
     if not frames:

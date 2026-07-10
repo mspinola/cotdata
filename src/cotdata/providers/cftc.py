@@ -17,7 +17,7 @@ import pandas as pd
 import requests
 
 from .. import config, store
-from ..registry import all_symbols
+from ..registry import all_symbols, hist_code_scales
 
 URL_PREFIX = "https://www.cftc.gov/files/dea/history/dea_fut_xls_"
 FIRST_YEAR = 1986  # CFTC Legacy futures history start
@@ -93,8 +93,8 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
         want = set(codes)
     else:
         want = {s.cftc_code for s in all_symbols() if s.cftc_code}
-        for s in all_symbols():      # predecessor codes (migrated-exchange history)
-            want.update(s.hist_codes)
+        for s in all_symbols():      # predecessor codes (migrated-contract history)
+            want.update(code for code, _ in hist_code_scales(s.hist_codes))
 
     frames = []
     for year in range(first_year, last_year + 1):
