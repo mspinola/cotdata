@@ -23,10 +23,15 @@ class Symbol:
     asset_class: str
     is_equity: bool
     cftc_code: Optional[str] = None
+    # Predecessor CFTC codes from earlier exchange listings of the SAME contract,
+    # stitched in chronologically behind cftc_code by get_cot (primary wins on
+    # overlaps). Used when a contract migrated exchanges and its COT history is
+    # split across codes (e.g. Russell 2000: CME → ICE → CME).
+    hist_codes: tuple = ()
 
 
-def _s(internal, asset_class, cftc, is_eq=False, norgate=None):
-    return Symbol(internal, norgate or f"&{internal}", asset_class, is_eq, cftc)
+def _s(internal, asset_class, cftc, is_eq=False, norgate=None, hist_codes=()):
+    return Symbol(internal, norgate or f"&{internal}", asset_class, is_eq, cftc, hist_codes)
 
 
 REGISTRY: Dict[str, Symbol] = {s.internal: s for s in [
@@ -34,7 +39,9 @@ REGISTRY: Dict[str, Symbol] = {s.internal: s for s in [
     _s("ES",  "Equities", "13874A", is_eq=True),
     _s("NQ",  "Equities", "209742", is_eq=True),
     _s("YM",  "Equities", "124603", is_eq=True),
-    _s("RTY", "Equities", "239742", is_eq=True),
+    # Russell 2000 e-mini migrated CME→ICE(2008)→CME(2017); the ICE years live
+    # under 23977A. Stitching it fills the 2008-2017 hole in code 239742.
+    _s("RTY", "Equities", "239742", is_eq=True, hist_codes=("23977A",)),
     # ── Metals ───────────────────────────────────────────────────────────────
     _s("GC",  "Metals", "088691"),
     _s("SI",  "Metals", "084691"),

@@ -89,7 +89,12 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
     cached and skip when unchanged). Incremental append is a future optimization.
     """
     last_year = last_year or dt.date.today().year
-    want = set(codes) if codes else {s.cftc_code for s in all_symbols() if s.cftc_code}
+    if codes:
+        want = set(codes)
+    else:
+        want = {s.cftc_code for s in all_symbols() if s.cftc_code}
+        for s in all_symbols():      # predecessor codes (migrated-exchange history)
+            want.update(s.hist_codes)
 
     frames = []
     for year in range(first_year, last_year + 1):
