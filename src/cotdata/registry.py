@@ -8,8 +8,7 @@ cot-analyzer/config/params.yaml — the data layer must not carry strategy knobs
 Sources:
   • cftc_code   — cot-analyzer CotSymbolCodeMap
   • asset_class — CotIndexer asset classes
-  • norgate     — '&' + CME root (VERIFY a few against Norgate's symbol
-                  directory; some may differ, e.g. currencies/lumber).
+  • norgate     — '&' + CME root (e.g., "&ES"); required by norgatedata.price_timeseries().
 is_equity is True only for the four equity indices (a fixed classification the
 equity-vs-commodity rules key off; derivable as asset_class == "Equities").
 """
@@ -24,10 +23,26 @@ class Symbol:
     asset_class: str
     is_equity: bool
     cftc_code: Optional[str] = None
+    # Predecessor CFTC codes from earlier exchange/contract listings of the SAME
+    # instrument, stitched in chronologically behind cftc_code by get_cot (primary
+    # wins on overlaps). Used when a contract migrated and its COT history is split
+    # across codes (e.g. Russell 2000: CME→ICE→CME). Each entry is either a bare
+    # code string (scale 1.0) or a (code, scale) tuple — scale multiplies the
+    # predecessor's position/OI counts to bridge a contract-size change (e.g. lumber
+    # random-length 110k bf → 27.5k bf uses scale 4.0).
+    hist_codes: tuple = ()
 
 
-def _s(internal, asset_class, cftc, is_eq=False, norgate=None):
-    return Symbol(internal, norgate or f"&{internal}", asset_class, is_eq, cftc)
+def _s(internal, asset_class, cftc, is_eq=False, norgate=None, hist_codes=()):
+    return Symbol(internal, norgate or f"&{internal}", asset_class, is_eq, cftc, hist_codes)
+
+
+def hist_code_scales(hist_codes) -> List[tuple]:
+    """Normalize hist_codes entries (str or (code, scale)) → list of (code, scale)."""
+    out = []
+    for h in hist_codes:
+        out.append((h[0], float(h[1])) if isinstance(h, tuple) else (h, 1.0))
+    return out
 
 
 REGISTRY: Dict[str, Symbol] = {s.internal: s for s in [
@@ -35,7 +50,9 @@ REGISTRY: Dict[str, Symbol] = {s.internal: s for s in [
     _s("ES",  "Equities", "13874A", is_eq=True),
     _s("NQ",  "Equities", "209742", is_eq=True),
     _s("YM",  "Equities", "124603", is_eq=True),
-    _s("RTY", "Equities", "239742", is_eq=True),
+    # Russell 2000 e-mini migrated CME→ICE(2008)→CME(2017); the ICE years live
+    # under 23977A. Stitching it fills the 2008-2017 hole in code 239742.
+    _s("RTY", "Equities", "239742", is_eq=True, hist_codes=("23977A",)),
     # ── Metals ───────────────────────────────────────────────────────────────
     _s("GC",  "Metals", "088691"),
     _s("SI",  "Metals", "084691"),
@@ -62,6 +79,7 @@ REGISTRY: Dict[str, Symbol] = {s.internal: s for s in [
     _s("6S",  "Currencies", "092741"),
     _s("6M",  "Currencies", "095741"),
     _s("6N",  "Currencies", "112741"),
+    _s("DX",  "Currencies", "098662"),   # US Dollar Index (ICE) — one clean USD instrument
     # ── Fixed Income ─────────────────────────────────────────────────────────
     _s("ZN",  "Fixed Income", "043602"),
     _s("ZT",  "Fixed Income", "042601"),
@@ -73,7 +91,10 @@ REGISTRY: Dict[str, Symbol] = {s.internal: s for s in [
     _s("CC",  "Softs", "073732"),
     _s("KC",  "Softs", "083731"),
     _s("OJ",  "Softs", "040701"),
-    _s("LBR", "Softs", "058644"),
+    # Lumber migrated random-length (058643, 2004-2023) → new 27.5k-bf lumber
+    # (058644, 2023+). Stitch old at scale 4 (110k/27.5k bf) so the long lookback
+    # has continuous, size-consistent history across the 2023 contract change.
+    _s("LBR", "Softs", "058644", hist_codes=(("058643", 4.0),)),
     # ── Live Stock ───────────────────────────────────────────────────────────
     _s("LE",  "Live Stock", "057642"),
     _s("HE",  "Live Stock", "054642"),

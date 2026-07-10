@@ -7,12 +7,43 @@ returns the cleaned weekly COT table; the indexer builds indices on top.
 import pandas as pd
 
 from . import store
-from .registry import REGISTRY
+from .registry import REGISTRY, hist_code_scales
+
+_CODE_COL = "CFTC_Contract_Market_Code"   # Legacy schema contract-code column
 
 
 def get_cot(name: str) -> pd.DataFrame:
-    """Weekly COT for an internal symbol (or a raw CFTC code). Empty if absent."""
-    code = name
-    if name in REGISTRY and REGISTRY[name].cftc_code:
-        code = REGISTRY[name].cftc_code
-    return store.read_cot(code)
+    """Weekly COT for an internal symbol OR a raw CFTC code. Empty if absent.
+
+    If the resolved symbol declares hist_codes (predecessor exchange listings of
+    the same contract), they're stitched in chronologically to fill gaps the
+    primary code doesn't cover. The primary code wins on overlapping report dates,
+    and the stitched-in rows are relabelled to the primary code so the series
+    presents as a single contract to code-keyed consumers (e.g. CotIndexer).
+    """
+    sym = REGISTRY.get(name)
+    if sym is None:                       # allow lookup by primary CFTC code, not just symbol
+        sym = next((s for s in REGISTRY.values() if s.cftc_code == name), None)
+    if sym is None or not sym.cftc_code:
+        return store.read_cot(name)
+    primary = store.read_cot(sym.cftc_code)
+    if not sym.hist_codes:
+        return primary
+    frames = [primary]                    # primary first → wins de-duplication on overlaps
+    for hc, scale in hist_code_scales(sym.hist_codes):
+        h = store.read_cot(hc)
+        if h.empty:
+            continue
+        h = h.copy()
+        if scale != 1.0:                  # bridge a contract-size change (position/OI counts)
+            num = h.select_dtypes("number").columns
+            h[num] = h[num] * scale
+        if _CODE_COL in h.columns:        # present predecessor rows under the primary code
+            h[_CODE_COL] = sym.cftc_code
+        frames.append(h)
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        return primary
+    combined = pd.concat(frames)
+    combined = combined[~combined.index.duplicated(keep="first")].sort_index()
+    return combined
