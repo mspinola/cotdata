@@ -61,6 +61,7 @@ REGISTRY: Dict[str, Symbol] = {s.internal: s for s in [
     _s("6S",  "Currencies", "092741"),
     _s("6M",  "Currencies", "095741"),
     _s("6N",  "Currencies", "112741"),
+    _s("DX",  "Currencies", "098662"),   # US Dollar Index (ICE) — one clean USD instrument
     # ── Fixed Income ─────────────────────────────────────────────────────────
     _s("ZN",  "Fixed Income", "043602"),
     _s("ZT",  "Fixed Income", "042601"),
