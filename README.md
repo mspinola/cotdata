@@ -67,7 +67,11 @@ df = cotdata.get_prices("ES", adjustment="backadj")   # signals + stops
 sz = cotdata.get_prices("ES", adjustment="unadj")      # position sizing / point value
 cot = cotdata.get_cot("ES")
 ```
-Set `COTDATA_STORE` to the synced store directory.
+Set `COTDATA_STORE` to the synced store directory. `get_cot` transparently **stitches
+predecessor CFTC codes** for contracts that changed exchange or spec (a symbol's
+`hist_codes` in the registry) so you always get one continuous series — e.g. Russell
+2000 (RTY) spans its CME→ICE→CME history, and Lumber bridges the 2023 contract-size
+change (`(code, scale)` entries rescale the older, larger contract).
 
 ## Producer (run on the machine that can reach the source)
 
