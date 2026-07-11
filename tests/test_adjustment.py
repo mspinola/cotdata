@@ -11,12 +11,11 @@ Run on Windows:  python test_adjustment.py
 """
 import numpy as np
 import pandas as pd
-import pytest
-
-# Producer-only diagnostic: norgatedata is the Windows Norgate SDK. Skip cleanly
-# under pytest on non-producer machines (Mac/Linux/CI) instead of erroring
-# collection; on the producer it's installed, so this returns the real module.
-norgatedata = pytest.importorskip("norgatedata")
+try:
+    import norgatedata
+except ImportError:
+    # Fail cleanly under pytest collection on Mac/Linux instead of crashing.
+    norgatedata = None
 
 pd.set_option("display.width", 140)
 pd.set_option("display.max_columns", 20)
@@ -56,6 +55,10 @@ def roll_gap_report(label, df):
 
 
 def main():
+    if norgatedata is None:
+        print("Error: norgatedata package is not installed. This script must be run on the Windows producer machine.")
+        return
+
     print("=" * 70)
     print("1. Which ES continuous symbols exist?")
     print("=" * 70)

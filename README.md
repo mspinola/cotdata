@@ -28,7 +28,7 @@ One can create a unified workspace by cloning all repositories into the same par
 
 ```bash
 uv venv                                     # create .venv
-uv pip install -e ./cotdata                 # install cotdata
+uv pip install -e .                         # install cotdata & all deps
 export COTDATA_STORE=/path/to/synced/store  # the shared store
 ```
 
