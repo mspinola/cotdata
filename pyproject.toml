@@ -14,6 +14,7 @@ dependencies = [
     "python-dateutil>=2.8",
     "packaging",            # required by norgatedata
     "xlrd>=2.0",            # CFTC dea_fut_xls are legacy .xls
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -28,3 +29,6 @@ cotdata-update = "cotdata.update:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+cotdata = ["*.yaml"]
