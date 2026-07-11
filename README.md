@@ -118,3 +118,43 @@ This diagnostic script tests:
 1. **Local Communication**: Verifies that Python can successfully communicate with the Norgate Data Updater running in the background.
 2. **Subscription Access**: Validates that your Norgate subscription is active and has the required CME futures data package enabled.
 3. **Roll Gap Validation**: Mathematically proves whether your Norgate Data Updater is configured globally to return back-adjusted or unadjusted continuous contracts. It hunts for artificial calendar-spread gaps at contract roll dates to ensure you are receiving gap-free, continuous data, which is absolutely vital for accurate stop-loss modeling.
+
+## Data Schemas
+
+The canonical store uses standard Parquet files. When loaded into a pandas DataFrame (e.g., via `pd.read_parquet()`), they conform to the following schemas.
+
+### Price Data (`prices/{symbol}_{adjustment}.parquet`)
+The primary source for price history (Norgate Data). Indexed by tz-naive `Date`.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `Date` | DatetimeIndex | Trading day (tz-naive, normalized to midnight). |
+| `Open` | float | Opening price. |
+| `High` | float | High price. |
+| `Low` | float | Low price. |
+| `Close` | float | Exchange settlement close. |
+| `Volume` | float | Trading volume. |
+| `Open Interest` | float | Total open interest. |
+| `Delivery Month` | float | Expiration month of the active contract (e.g. `202609`). Used to detect contract rolls. |
+
+### COT Data (`cot/{code}.parquet`)
+The primary source for positioning data (CFTC Legacy Futures Report). Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+
+> [!NOTE]
+> **Legacy Reports**: The Legacy reports are broken down by exchange. These reports have a futures only report and a combined futures and options report. Legacy reports break down the reportable open interest positions into two classifications: non-commercial and commercial traders. The `cotdata` pipeline strictly downloads the **Futures-only** reports (located at `https://www.cftc.gov/files/dea/history/dea_fut_xls_{YEAR}.zip`).
+
+> [!NOTE]
+> **Column Subset**: While the raw CFTC `.xls` files contain [well over 100 columns](https://www.cftc.gov/MarketReports/CommitmentsofTraders/HistoricalViewable/cotvariableslegacy.html) (including spreading, concentration ratios, etc.), the producer pipeline explicitly discards them. The parquet files only maintain the exact 10-column subset listed below to keep the file sizes extremely small and strictly focused on what the downstream models require. To include additional data points from the raw reports, simply add the exact CFTC column name to the `TARGET_COLS` list inside `src/cotdata/providers/cftc.py`.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `Report_Date_as_MM_DD_YYYY` | DatetimeIndex | Reporting date (typically Tuesday). |
+| `Market_and_Exchange_Names` | string | Name of the contract and exchange. |
+| `CFTC_Contract_Market_Code` | string | 6-digit CFTC contract code. |
+| `Open_Interest_All` | float | Total open interest for the contract. |
+| `Comm_Positions_Long_All` | float | Commercial Long positions. |
+| `Comm_Positions_Short_All` | float | Commercial Short positions. |
+| `NonComm_Positions_Long_All` | float | Non-Commercial (Large Speculator) Long positions. |
+| `NonComm_Positions_Short_All` | float | Non-Commercial (Large Speculator) Short positions. |
+| `NonRept_Positions_Long_All` | float | Non-Reportable (Small Speculator) Long positions. |
+| `NonRept_Positions_Short_All` | float | Non-Reportable (Small Speculator) Short positions. |
