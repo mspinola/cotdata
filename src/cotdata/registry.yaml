@@ -1,0 +1,105 @@
+Equities:
+  ES:
+    cftc_code: "13874A"
+  NQ:
+    cftc_code: "209742"
+  YM:
+    cftc_code: "124603"
+  RTY:
+    cftc_code: "239742"
+    hist_codes:
+      - "23977A"
+
+Metals:
+  GC:
+    cftc_code: "088691"
+  SI:
+    cftc_code: "084691"
+  HG:
+    cftc_code: "085692"
+  PL:
+    cftc_code: "076651"
+  PA:
+    cftc_code: "075651"
+
+Energies:
+  CL:
+    cftc_code: "067651"
+  RB:
+    cftc_code: "111659"
+  HO:
+    cftc_code: "022651"
+  NG:
+    cftc_code: "023651"
+
+Grains:
+  ZC:
+    cftc_code: "002602"
+  ZS:
+    cftc_code: "005602"
+  ZM:
+    cftc_code: "026603"
+  ZL:
+    cftc_code: "007601"
+  ZW:
+    cftc_code: "001602"
+
+Currencies:
+  6E:
+    cftc_code: "099741"
+  6A:
+    cftc_code: "232741"
+  6B:
+    cftc_code: "096742"
+  6C:
+    cftc_code: "090741"
+  6J:
+    cftc_code: "097741"
+  6S:
+    cftc_code: "092741"
+  6M:
+    cftc_code: "095741"
+  6N:
+    cftc_code: "112741"
+  DX:
+    cftc_code: "098662"
+
+Fixed Income:
+  ZN:
+    cftc_code: "043602"
+  ZT:
+    cftc_code: "042601"
+  ZF:
+    cftc_code: "044601"
+  ZB:
+    cftc_code: "020601"
+
+Softs:
+  SB:
+    cftc_code: "080732"
+  CT:
+    cftc_code: "033661"
+  CC:
+    cftc_code: "073732"
+  KC:
+    cftc_code: "083731"
+  OJ:
+    cftc_code: "040701"
+  LBR:
+    cftc_code: "058644"
+    hist_codes:
+      - ["058643", 4.0]
+
+Live Stock:
+  LE:
+    cftc_code: "057642"
+  HE:
+    cftc_code: "054642"
+  GF:
+    cftc_code: "061641"
+
+Crypto:
+  BTC:
+    cftc_code: "133741"
+  ETH:
+    cftc_code: "146021"
