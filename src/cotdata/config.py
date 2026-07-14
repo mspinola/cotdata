@@ -19,6 +19,10 @@ def prices_dir() -> Path:
     return store_root() / "prices"
 
 
+def metadata_dir() -> Path:
+    return store_root() / "metadata"
+
+
 def cot_legacy_dir() -> Path:
     return store_root() / "cot_legacy"
 

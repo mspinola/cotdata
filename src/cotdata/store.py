@@ -25,6 +25,17 @@ def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
             os.remove(tmp)
 
 
+# ── Metadata ──────────────────────────────────────────────────────────────
+def write_metadata(df: pd.DataFrame, source: str = "norgate") -> None:
+    _atomic_write_parquet(df, config.metadata_dir() / "contract_specs.parquet")
+    _touch_manifest("metadata", "contract_specs", df, source)
+
+
+def read_metadata() -> pd.DataFrame:
+    p = config.metadata_dir() / "contract_specs.parquet"
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
+
+
 # ── Prices ────────────────────────────────────────────────────────────────
 def write_prices(symbol: str, adjustment: str, df: pd.DataFrame, source: str) -> None:
     _atomic_write_parquet(df, config.prices_dir() / f"{symbol}_{adjustment}.parquet")
@@ -75,7 +86,7 @@ def load_manifest() -> dict:
     p = config.manifest_path()
     if p.exists():
         return json.loads(p.read_text())
-    return {"schema_version": config.SCHEMA_VERSION, "prices": {}, "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}}
+    return {"schema_version": config.SCHEMA_VERSION, "metadata": {}, "prices": {}, "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}}
 
 
 def _touch_manifest(kind: str, name: str, df: pd.DataFrame, source: str) -> None:

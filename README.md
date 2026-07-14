@@ -66,6 +66,7 @@ The **store is the API boundary** — not Python imports. Producers write Parque
 `manifest.json`; consumers only read. Nobody touches a vendor SDK at app runtime.
 Swapping a vendor is a producer-only change.
 
+- `metadata/contract_specs.parquet` — Norgate contract specifications (Tick Size, Point Value, Margin).
 - `prices/{symbol}_{adjustment}.parquet` — Open/High/Low/Close/Volume/Open Interest,
   tz-naive `Date` index. `adjustment` ∈ {`backadj`, `unadj`}. Close = exchange settlement.
 - `cot_legacy/{code}.parquet` — weekly CFTC Legacy positioning.
@@ -92,6 +93,7 @@ Set `COTDATA_STORE` to the synced store directory.
 
 ```
 COTDATA_STORE=/store  cotdata-update --prices --symbols ES NQ    # Norgate (Windows)
+COTDATA_STORE=/store  cotdata-update --metadata                  # Norgate Metadata (Windows)
 COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (cross-platform)
 COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggregated (cross-platform)
 COTDATA_STORE=/store  cotdata-update --cot-tff                   # CFTC Traders in Financial Futures (cross-platform)
@@ -178,6 +180,23 @@ The primary source for price history (Norgate Data). Indexed by tz-naive `Date`.
 | `Volume` | float | Trading volume. |
 | `Open Interest` | float | Total open interest. |
 | `Delivery Month` | float | Expiration month of the active contract (e.g. `202609`). Used to detect contract rolls. |
+
+### Contract Specifications (`metadata/contract_specs.parquet`)
+The primary source for contract metadata (Norgate Data). Used for exact point-value risk sizing and transaction cost models.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `Symbol` | string | Internal ticker symbol (e.g., `ES`). |
+| `Norgate_Symbol` | string | Raw Norgate symbol used to query the API (e.g., `&ES_CCB`). |
+| `Name` | string | Full name of the contract. |
+| `Exchange` | string | Name of the listing exchange. |
+| `Group` | string | Norgate asset classification group. |
+| `Contract Size` | float | Size multiplier (e.g., $50 for ES). Also called Point Value. |
+| `Tick Size` | float | Minimum price fluctuation (e.g., 0.25 for ES). |
+| `Tick Value` | float | Dollar value of one tick (`Tick Size` * `Contract Size`). |
+| `Point Value` | float | Same as `Contract Size`. |
+| `Currency` | string | Base currency of the contract. |
+| `Margin` | float | Initial margin requirement (if provided by Norgate). |
 
 ### COT Legacy Data (`cot_legacy/{code}.parquet`)
 The primary source for Legacy positioning data (CFTC Legacy Futures Report). **History starts in 1986.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.

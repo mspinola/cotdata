@@ -76,3 +76,77 @@ def update(symbols=None) -> None:
             print(f"{sym:5s}: {len(out):6d} bars -> store")
         except Exception as e:  # noqa: BLE001
             print(f"{sym:5s}: FAILED — {e}")
+
+
+def get_symbol_metadata(internal_symbol: str) -> dict | None:
+    """Fetch contract specifications for a single continuous futures symbol."""
+    import norgatedata  # imported lazily
+    ng_sym = REGISTRY[internal_symbol].norgate + CCB_SUFFIX
+
+    data = {'Symbol': internal_symbol, 'Norgate_Symbol': ng_sym}
+    try:
+        data['Name'] = norgatedata.security_name(ng_sym)
+    except Exception:
+        data['Name'] = None
+    try:
+        data['Exchange'] = norgatedata.exchange_name(ng_sym)
+    except Exception:
+        data['Exchange'] = None
+    try:
+        data['Group'] = norgatedata.classification_at_level(
+            ng_sym,
+            schemename='NorgateDataFuturesClassification',
+            classificationresulttype='Name',
+            level=1,
+        )
+    except Exception:
+        data['Group'] = None
+    try:
+        data['Contract Size'] = norgatedata.point_value(ng_sym)
+    except Exception:
+        data['Contract Size'] = None
+    try:
+        data['Tick Size'] = norgatedata.tick_size(ng_sym)
+    except Exception:
+        data['Tick Size'] = None
+
+    ts = data['Tick Size']
+    cs = data['Contract Size']
+    data['Tick Value'] = (ts * cs) if (ts is not None and cs is not None) else None
+    data['Point Value'] = cs
+
+    try:
+        data['Currency'] = norgatedata.currency(ng_sym)
+    except Exception:
+        data['Currency'] = None
+    try:
+        data['Margin'] = norgatedata.margin(ng_sym)
+    except Exception:
+        data['Margin'] = None
+
+    return data
+
+
+def update_metadata(symbols=None) -> None:
+    """Fetch and write contract specifications (metadata) to the store."""
+    import concurrent.futures
+    syms = symbols or [s.internal for s in all_symbols()]
+    
+    print(f"Fetching metadata for {len(syms)} symbols...")
+    metadata_rows = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        futs = {pool.submit(get_symbol_metadata, s): s for s in syms}
+        for f in concurrent.futures.as_completed(futs):
+            result = f.result()
+            if result:
+                metadata_rows.append(result)
+
+    if metadata_rows:
+        df = pd.DataFrame(metadata_rows)
+        # Ensure consistent column ordering and sorting
+        df = df.sort_values("Symbol").reset_index(drop=True)
+        store.write_metadata(df, source="norgate")
+        print(f"Successfully wrote metadata for {len(df)} symbols -> store")
+    else:
+        print("No metadata fetched.")

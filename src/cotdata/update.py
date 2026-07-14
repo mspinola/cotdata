@@ -10,6 +10,7 @@ from . import config
 def main() -> None:
     p = argparse.ArgumentParser(description="cotdata producer — fetch sources into the store.")
     p.add_argument("--prices", action="store_true", help="Update Norgate price bars (Windows).")
+    p.add_argument("--metadata", action="store_true", help="Update Norgate contract metadata (Windows).")
     p.add_argument("--cot-legacy", action="store_true", help="Update CFTC COT Legacy (cross-platform).")
     p.add_argument("--cot-disagg", action="store_true", help="Update CFTC COT Disaggregated Futures-Only (cross-platform).")
     p.add_argument("--cot-tff", action="store_true", help="Update Traders in Financial Futures (TFF) COT (cross-platform).")
@@ -19,12 +20,17 @@ def main() -> None:
 
     config.store_root()  # fail fast if COTDATA_STORE unset
     
-    if not (args.prices or args.cot_legacy or args.cot_disagg or args.cot_tff or args.cot_all):
-        p.error("nothing to do — pass --prices, --cot-legacy, --cot-disagg, --cot-tff, or --cot-all")
+    if not (args.prices or args.metadata or args.cot_legacy or args.cot_disagg or args.cot_tff or args.cot_all):
+        p.error("nothing to do — pass --prices, --metadata, --cot-legacy, --cot-disagg, --cot-tff, or --cot-all")
 
-    if args.prices:
+    if args.prices or args.metadata:
         from .providers import norgate
+        
+    if args.prices:
         norgate.update(symbols=args.symbols)
+        
+    if args.metadata:
+        norgate.update_metadata(symbols=args.symbols)
         
     if args.cot_legacy or args.cot_all:
         from .providers import cftc
