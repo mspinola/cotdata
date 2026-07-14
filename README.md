@@ -53,6 +53,8 @@ Swapping a vendor is a producer-only change.
 - `prices/{symbol}_{adjustment}.parquet` — Open/High/Low/Close/Volume/Open Interest,
   tz-naive `Date` index. `adjustment` ∈ {`backadj`, `unadj`}. Close = exchange settlement.
 - `cot_legacy/{code}.parquet` — weekly CFTC Legacy positioning.
+- `cot_disagg/{code}.parquet` — weekly CFTC Disaggregated positioning.
+- `cot_tff/{code}.parquet` — weekly CFTC Traders in Financial Futures positioning.
 - `manifest.json` — per-table `last_date`, `n_rows`, `source`, `updated_at`, `schema_version`.
 
 ## Consumer
@@ -63,6 +65,7 @@ df = cotdata.get_prices("ES", adjustment="backadj")   # USE THIS FOR SIGNALS + S
 sz = cotdata.get_prices("ES", adjustment="unadj")     # USE FOR POSITION SIZING / POINT VALUE
 cot_legacy = cotdata.get_cot("ES", report="legacy")   # USE FOR COMM/NON-COMM
 cot_disagg = cotdata.get_cot("ES", report="disagg")   # USE FOR TRADER COUNTS (MM/SD/OR)
+cot_tff = cotdata.get_cot("ES", report="tff")         # USE FOR TRADER COUNTS (FINANCIALS)
 ```
 
 Set `COTDATA_STORE` to the synced store directory. 
@@ -75,6 +78,8 @@ Set `COTDATA_STORE` to the synced store directory.
 COTDATA_STORE=/store  cotdata-update --prices --symbols ES NQ    # Norgate (Windows)
 COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (cross-platform)
 COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggregated (cross-platform)
+COTDATA_STORE=/store  cotdata-update --cot-tff                   # CFTC Traders in Financial Futures (cross-platform)
+COTDATA_STORE=/store  cotdata-update --cot-all                   # Update all CFTC COT pipelines
 ```
 
 Schedule nightly (prices, after the Norgate Data Updater) and weekly (COT Friday releases).
@@ -121,6 +126,25 @@ This diagnostic script tests:
 2. **Subscription Access**: Validates that your Norgate subscription is active and has the required CME futures data package enabled.
 3. **Roll Gap Validation**: Mathematically proves whether your Norgate Data Updater is configured globally to return back-adjusted or unadjusted continuous contracts. It hunts for artificial calendar-spread gaps at contract roll dates to ensure you are receiving gap-free, continuous data, which is absolutely vital for accurate stop-loss modeling.
 
+## COT Formats Explained
+
+The CFTC publishes positioning data in three distinct formats. `cotdata` manages all three to ensure complete market coverage and the deepest possible historical backtesting.
+
+1. **Legacy Format (1986–Present)**
+   - **Scope:** All markets.
+   - **Categories:** Divides traders broadly into **Commercial** (hedgers) and **Non-Commercial** (large speculators). 
+   - **Use Case:** This is the original format. While its broad categories make it less precise for modern analysis, it is the only format that provides data prior to 2006, making it essential for long-term historical backtesting.
+
+2. **Disaggregated Format (DIS) (2006–Present)**
+   - **Scope:** Physical commodities only (Agriculture, Energy, Metals).
+   - **Categories:** Splits traders into four granular groups: **Producer/Merchant** (classic hedgers), **Swap Dealers** (financial intermediaries), **Managed Money** (hedge funds / CTAs), and **Other Reportables**.
+   - **Use Case:** Provides a much clearer view of the "Smart Money" (Managed Money) in commodity markets.
+
+3. **Traders in Financial Futures (TFF) (2006–Present)**
+   - **Scope:** Financial markets only (Equities, Rates, Currencies).
+   - **Categories:** The financial counterpart to Disaggregated. Splits traders into: **Dealer/Intermediary** (sell-side), **Asset Manager** (pension/mutual funds), **Leveraged Funds** (hedge funds / CTAs), and **Other Reportables**.
+   - **Use Case:** The definitive source for tracking speculative flow (Leveraged Funds) in financial markets.
+
 ## Data Schemas
 
 The canonical store uses standard Parquet files. When loaded into a pandas DataFrame (e.g., via `pd.read_parquet()`), they conform to the following schemas.
@@ -140,7 +164,7 @@ The primary source for price history (Norgate Data). Indexed by tz-naive `Date`.
 | `Delivery Month` | float | Expiration month of the active contract (e.g. `202609`). Used to detect contract rolls. |
 
 ### COT Legacy Data (`cot_legacy/{code}.parquet`)
-The primary source for Legacy positioning data (CFTC Legacy Futures Report). Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+The primary source for Legacy positioning data (CFTC Legacy Futures Report). **History starts in 1986.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
 > **Legacy Reports**: The Legacy reports are broken down by exchange. These reports have a futures only report and a combined futures and options report. Legacy reports break down the reportable open interest positions into two classifications: non-commercial and commercial traders. The `cotdata` pipeline strictly downloads the **Futures-only** reports (located at `https://www.cftc.gov/files/dea/history/dea_fut_xls_{YEAR}.zip`).
@@ -162,7 +186,16 @@ The primary source for Legacy positioning data (CFTC Legacy Futures Report). Ind
 | `NonRept_Positions_Short_All` | float | Non-Reportable (Small Speculator) Short positions. |
 
 ### COT Disaggregated Data (`cot_disagg/{code}.parquet`)
-The primary source for entity-specific positioning and trader counts (CFTC Disaggregated Futures-Only Report, dating back to 2006). Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+The primary source for entity-specific positioning and trader counts (CFTC Disaggregated Futures-Only Report). **History starts in 2006.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
 > **Lossless Image**: Unlike the Legacy schema which filters down to 10 specific columns, the Disaggregated parquets are a **lossless image** of the source CFTC `txt` files. They contain all granular entity groups (Money Manager, Swap Dealer, Producer/Merchant, Other Reportable) and their respective `Traders_*` counts (e.g., `Traders_Tot_All`, `Traders_M_Money_Long_All`). This is the required store for computing Position Size and Clustering metrics.
+
+### COT Traders in Financial Futures (TFF) Data (`cot_tff/{code}.parquet`)
+The primary source for entity-specific positioning and trader counts for Financial markets (CFTC Traders in Financial Futures Futures-Only Report). **History starts in 2006.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+
+> [!NOTE]
+> **Financials Counterpart**: TFF is the exact counterpart to Disaggregated reports, used exclusively for financial markets (Equities, FX, Rates) which do not have Disaggregated reports.
+
+> [!NOTE]
+> **Lossless Image**: Like Disaggregated, TFF parquets are a **lossless image** of the source CFTC `txt` files. They contain the financial entity groups (`Dealer`, `Asset_Mgr`, `Lev_Money`, `Other_Rept`) and their respective `Traders_*` counts. This is the required store for computing Position Size and Clustering metrics for financial assets.

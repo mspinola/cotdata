@@ -29,6 +29,7 @@ class Symbol:
     norgate: str                  # Norgate continuous symbol, e.g. "&ES"
     asset_class: str
     is_equity: bool
+    report_type: str = "disagg"   # "tff" for financials, "disagg" for commodities
     cftc_code: Optional[str] = None
     # Predecessor CFTC codes from earlier exchange/contract listings of the SAME
     # instrument, stitched in chronologically behind cftc_code by get_cot. Each
@@ -102,6 +103,8 @@ def load_registry(yaml_path=None) -> Dict[str, Symbol]:
                 # Derived from the class so the two can't drift; an explicit
                 # is_equity in the YAML still wins if a symbol ever needs it.
                 is_equity=attrs.get("is_equity", asset_class == "Equities"),
+                # Financials use TFF (Traders in Financial Futures), Commodities use Disaggregated
+                report_type=attrs.get("report_type", "tff" if asset_class in ("Equities", "FX", "Rates") else "disagg"),
                 cftc_code=attrs["cftc_code"],
                 hist_codes=_coerce_hist_codes(attrs.get("hist_codes")),
             )

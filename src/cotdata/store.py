@@ -58,13 +58,24 @@ def read_cot_disagg(name: str) -> pd.DataFrame:
     return pd.read_parquet(p) if p.exists() else pd.DataFrame()
 
 
+# ── COT TFF (Traders in Financial Futures) ────────────────────────────────
+def write_cot_tff(name: str, df: pd.DataFrame, source: str) -> None:
+    _atomic_write_parquet(df, config.cot_tff_dir() / f"{name}.parquet")
+    _touch_manifest("cot_tff", name, df, source)
+
+
+def read_cot_tff(name: str) -> pd.DataFrame:
+    p = config.cot_tff_dir() / f"{name}.parquet"
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
+
+
 
 # ── Manifest ──────────────────────────────────────────────────────────────
 def load_manifest() -> dict:
     p = config.manifest_path()
     if p.exists():
         return json.loads(p.read_text())
-    return {"schema_version": config.SCHEMA_VERSION, "prices": {}, "cot_legacy": {}, "cot_disagg": {}}
+    return {"schema_version": config.SCHEMA_VERSION, "prices": {}, "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}}
 
 
 def _touch_manifest(kind: str, name: str, df: pd.DataFrame, source: str) -> None:

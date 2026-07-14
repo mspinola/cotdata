@@ -27,5 +27,9 @@ def cot_disagg_dir() -> Path:
     return store_root() / "cot_disagg"
 
 
+def cot_tff_dir() -> Path:
+    return store_root() / "cot_tff"
+
+
 def manifest_path() -> Path:
     return store_root() / "manifest.json"
