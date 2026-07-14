@@ -8,6 +8,8 @@ BASE symbol '&ES' is UNADJUSTED (shows real calendar-spread gaps at each roll,
 e.g. +146 pts at the 2026-06 Jun→Sep roll). '&ES_CCB' is BACK-ADJUSTED (gaps
 stitched out). A close-based stop needs the gap-free series → we fetch _CCB.
 """
+from __future__ import annotations  # PEP 604 unions (dict | None) on Python 3.9
+
 import pandas as pd
 import numpy as np
 import re

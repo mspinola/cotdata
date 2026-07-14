@@ -7,6 +7,8 @@ cotdata owns only the raw weekly data.
 
 Self-contained — no cot-analyzer imports. Ported from cot-analyzer/src/core/etl.py.
 """
+from __future__ import annotations  # PEP 604 unions (Path | None) on Python 3.9
+
 import datetime as dt
 import io
 import zipfile
