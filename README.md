@@ -183,7 +183,7 @@ The primary source for price history (Norgate Data). Indexed by tz-naive `Date`.
 | `Close` | float | Settlement Close price. |
 | `Volume` | float | Continuous contract trading volume (front-month only). |
 | `Open Interest` | float | Continuous contract open interest. |
-| `Volume_Reconstructed` | float | True market volume (sum of First and Second contract). Note: systematically higher than raw `Volume`, not a drop-in replacement. |
+| `Volume_Reconstructed` | float | True market volume (sum of First and Second contract). Differs from raw `Volume` by symbol — typically higher for products whose rolls spread volume across contracts, but roughly equal or lower for symbols with a near-empty back month (e.g. crypto). Not a drop-in replacement. |
 | `Volume_Source` | string | `reconstructed` if First+Second available, `raw` fallback if not. |
 | `FirstVolume` / `SecondVolume` | float | Trading volume of the specific first and second expiring contracts. |
 | `FirstContract` / `SecondContract` | string | Contract names for the first and second expirations (e.g., `ES-2024H`). |
