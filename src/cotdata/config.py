@@ -4,8 +4,9 @@ from pathlib import Path
 
 # v2 — reconstructed volume promoted: prices carry Volume_Reconstructed /
 # Volume_Source, and get_prices(volume="reconstructed") serves them. The store
-# does not actually carry v2 shape until a full producer pass re-writes it; see
-# docs/plan_promote_reconstructed_volume.md for the rollout order.
+# was migrated by a full producer pass (2026-07-14) and now carries v2 shape;
+# schema_version() reflects the on-disk manifest, so a fresh/partial store can
+# still read <2. See docs/plan_promote_reconstructed_volume.md for the rollout.
 SCHEMA_VERSION = 2
 
 
