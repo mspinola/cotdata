@@ -1,5 +1,9 @@
 # cotdata
 
+[![PyPI version](https://img.shields.io/pypi/v/cotdata.svg)](https://pypi.org/project/cotdata/)
+[![Python versions](https://img.shields.io/pypi/pyversions/cotdata.svg)](https://pypi.org/project/cotdata/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Canonical data layer for the COT / futures-strategy stack. It exists so that quantitative analysis toolset never fetch data directly. They read a shared, file-based store through a stable API.
 
 ```
@@ -18,7 +22,19 @@ Canonical data layer for the COT / futures-strategy stack. It exists so that qua
         └──────────────────┘  └───────────────────┘
 ```
 
-## Workspace setup (uv)
+## Installation
+
+You can install `cotdata` directly from PyPI:
+```bash
+pip install cotdata
+```
+
+If you are running the **producer machine** on Windows to fetch Norgate data, install with the `norgate` extra:
+```bash
+pip install "cotdata[norgate]"
+```
+
+## Development
 
 When using Norgate Data one must run this on a Windows machine as Norgate Updater requires Windows.
 
