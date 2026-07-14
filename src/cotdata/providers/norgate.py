@@ -115,19 +115,25 @@ def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjus
     all_indiv = pd.concat(frames, ignore_index=True)
     all_indiv['Date'] = pd.to_datetime(all_indiv['Date']).dt.tz_localize(None).dt.normalize()
     
-    # 5. Point-in-Time Contract Identification
+    # 5. Contract identification: First / Second = the two HIGHEST-VOLUME contracts
+    # trading that day, NOT the two nearest by expiry. Products with serial months
+    # around a bi-monthly liquid cycle (e.g. GC, SI) carry almost no volume in the
+    # nearest serial month, so an expiry-order pick would sum near-empty contracts
+    # and badly understate true volume. Rank by descending volume; ties break by
+    # nearest expiry (columns are pre-sorted by expiry and the sort is stable);
+    # NaN (contract not trading that day) sorts last.
     pivot = all_indiv.pivot(index="Date", columns="Symbol", values="Volume")
-    
+
     def get_expiry(sym):
         m = pattern.match(sym)
         return pd.Timestamp(year=int(m.group(1)), month=MONTH_CODES[m.group(2)], day=1)
-        
+
     sorted_cols = sorted(pivot.columns, key=get_expiry)
     pivot = pivot[sorted_cols]
-    
+
     vol_array = pivot.values
-    sort_key = np.isnan(vol_array).astype(int)
-    order = np.argsort(sort_key, axis=1, kind='stable')
+    rank_key = np.where(np.isnan(vol_array), -np.inf, vol_array)
+    order = np.argsort(-rank_key, axis=1, kind='stable')
     compressed = np.take_along_axis(vol_array, order, axis=1)
     names_arr = np.array(pivot.columns)
     

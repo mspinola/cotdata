@@ -131,6 +131,52 @@ def test_volume_reconstruction(mock_price_ts, mock_db_symbols, mock_read_prices,
 @mock.patch("cotdata.providers.norgate.store.read_prices")
 @mock.patch("norgatedata.database_symbols", create=True)
 @mock.patch("norgatedata.price_timeseries", create=True)
+def test_reconstruction_picks_by_volume_not_expiry(mock_price_ts, mock_db_symbols, mock_read_prices, mock_write_prices):
+    """First/Second must be the two HIGHEST-VOLUME contracts, not the two nearest by
+    expiry. Models the GC/SI case: the nearest serial month is near-empty while a
+    later contract is dominant. An expiry-order pick would name the empty serial as
+    'First' and understate volume; volume-rank must name the dominant contract."""
+    mock_continuous = pd.DataFrame({
+        "Open": [100.0], "High": [101.0], "Low": [99.0], "Close": [100.5],
+        "Volume": [1000], "Open Interest": [5000], "Delivery Month": [202606],
+    }, index=pd.DatetimeIndex(["2026-07-01"]))
+
+    # ES-2026H (March) = nearest by expiry but near-empty; ES-2026M (June) = dominant.
+    near_empty = pd.DataFrame({"Date": [pd.Timestamp("2026-07-01")], "Volume": [50]})
+    dominant = pd.DataFrame({"Date": [pd.Timestamp("2026-07-01")], "Volume": [900]})
+
+    def mock_ts_side_effect(sym, **kwargs):
+        if sym.endswith("CCB") or "-" not in sym:
+            return mock_continuous.copy()
+        if sym == "ES-2026H":
+            return near_empty.copy()
+        if sym == "ES-2026M":
+            return dominant.copy()
+        return pd.DataFrame()
+
+    mock_price_ts.side_effect = mock_ts_side_effect
+    mock_db_symbols.return_value = ["ES-2026H", "ES-2026M"]
+    mock_read_prices.return_value = pd.DataFrame()
+
+    mock_symbol = mock.Mock()
+    mock_symbol.internal = "ES"
+    with mock.patch("cotdata.providers.norgate.all_symbols", return_value=[mock_symbol]), \
+         mock.patch.dict("cotdata.providers.norgate.REGISTRY", {"ES": mock.Mock(norgate="&ES")}):
+        norgate.update(symbols=["ES"])
+        written_df = mock_write_prices.call_args_list[0][0][2]
+
+        # Dominant (June, 900) is First even though March expires sooner.
+        assert written_df["FirstContract"].iloc[0] == "ES-2026M"
+        assert written_df["FirstVolume"].iloc[0] == 900
+        assert written_df["SecondContract"].iloc[0] == "ES-2026H"
+        assert written_df["SecondVolume"].iloc[0] == 50
+        assert written_df["Volume_Reconstructed"].iloc[0] == 950
+
+
+@mock.patch("cotdata.providers.norgate.store.write_prices")
+@mock.patch("cotdata.providers.norgate.store.read_prices")
+@mock.patch("norgatedata.database_symbols", create=True)
+@mock.patch("norgatedata.price_timeseries", create=True)
 def test_volume_reconstruction_incremental(mock_price_ts, mock_db_symbols, mock_read_prices, mock_write_prices):
     """Verify that _reconstruct_volume preserves old Volume_Source during an incremental run."""
     
