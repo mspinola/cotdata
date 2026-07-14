@@ -33,17 +33,22 @@ _COLMAP = {
 MONTH_CODES = {'F': 1, 'G': 2, 'H': 3, 'J': 4, 'K': 5, 'M': 6, 'N': 7, 'Q': 8, 'U': 9, 'V': 10, 'X': 11, 'Z': 12}
 
 
-def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjustment: str) -> pd.DataFrame:
+def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjustment: str,
+                        full: bool = False) -> pd.DataFrame:
     """Calculate FirstVolume, SecondVolume, and Volume_Reconstructed.
     Uses incremental fetching based on the last successful Volume_Reconstructed date.
     Returns continuous_df with the additive columns attached.
+
+    full=True recomputes the ENTIRE history from scratch, ignoring the incremental
+    window. Needed when the reconstruction *logic* changes (not just new data): the
+    trailing-60-day window would otherwise leave old rows on the previous algorithm.
     """
     import norgatedata
-    
+
     # 1. Gap-aware incremental bounds
     existing_df = store.read_prices(internal_symbol, adjustment)
     last_date = pd.Timestamp("1970-01-01")
-    if "Volume_Reconstructed" in existing_df.columns:
+    if not full and "Volume_Reconstructed" in existing_df.columns:
         valid_dates = existing_df.dropna(subset=["Volume_Reconstructed"]).index
         if len(valid_dates) > 0:
             # Recompute trailing 60 days to catch late data & bridge partial failures
@@ -221,21 +226,26 @@ def _check_roll_gaps(internal_symbol: str, df: pd.DataFrame) -> bool:
     return False
 
 
-def update(symbols=None) -> None:
-    """Fetch + write to the store for the given internal symbols (backadj and unadj)."""
+def update(symbols=None, full: bool = False) -> None:
+    """Fetch + write to the store for the given internal symbols (backadj and unadj).
+
+    full=True forces a complete rebuild of the reconstructed-volume columns rather
+    than the trailing-60-day incremental update — use it after a reconstruction
+    logic change so old rows are recomputed under the new algorithm.
+    """
     syms = symbols or [s.internal for s in all_symbols()]
     for sym in syms:
         try:
             # 1. Back-Adjusted
             out_backadj = fetch(sym, adjustment="backadj")
             _check_roll_gaps(sym, out_backadj)  # sanity: warn if backadj looks unadjusted
-            
+
             # 2. Unadjusted (Raw calendar spreads)
             out_unadj = fetch(sym, adjustment="unadj")
-            
+
             # 3. Volume Reconstruction (Additive)
-            out_backadj = _reconstruct_volume(sym, out_backadj, "backadj")
-            out_unadj = _reconstruct_volume(sym, out_unadj, "unadj")
+            out_backadj = _reconstruct_volume(sym, out_backadj, "backadj", full=full)
+            out_unadj = _reconstruct_volume(sym, out_unadj, "unadj", full=full)
             
             store.write_prices(sym, "backadj", out_backadj, source="norgate")
             store.write_prices(sym, "unadj", out_unadj, source="norgate")

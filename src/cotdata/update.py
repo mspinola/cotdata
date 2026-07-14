@@ -16,6 +16,9 @@ def main() -> None:
     p.add_argument("--cot-tff", action="store_true", help="Update Traders in Financial Futures (TFF) COT (cross-platform).")
     p.add_argument("--cot-all", action="store_true", help="Update all COT pipelines (Legacy, Disagg, TFF).")
     p.add_argument("--symbols", nargs="+", default=None, help="Internal symbols; default = all in registry.")
+    p.add_argument("--full", action="store_true",
+                   help="Full rebuild of reconstructed volume (ignore the incremental "
+                        "60-day window). Use after a reconstruction-logic change.")
     args = p.parse_args()
 
     config.store_root()  # fail fast if COTDATA_STORE unset
@@ -27,7 +30,7 @@ def main() -> None:
         from .providers import norgate
         
     if args.prices:
-        norgate.update(symbols=args.symbols)
+        norgate.update(symbols=args.symbols, full=args.full)
         
     if args.metadata:
         norgate.update_metadata(symbols=args.symbols)

@@ -244,3 +244,49 @@ def test_volume_reconstruction_incremental(mock_price_ts, mock_db_symbols, mock_
         assert written_df.loc["2026-07-01", "Volume_Source"] == "reconstructed"
         assert written_df.loc["2026-07-01", "Volume_Reconstructed"] == 1000
         assert written_df.loc["2026-07-01", "FirstContract"] == "ES-2026U"
+
+
+@mock.patch("cotdata.providers.norgate.store.write_prices")
+@mock.patch("cotdata.providers.norgate.store.read_prices")
+@mock.patch("norgatedata.database_symbols", create=True)
+@mock.patch("norgatedata.price_timeseries", create=True)
+def test_full_rebuild_bypasses_incremental_window(mock_price_ts, mock_db_symbols, mock_read_prices, mock_write_prices):
+    """update(full=True) must recompute from epoch, ignoring the trailing-60-day
+    window — even when the store already carries recent Volume_Reconstructed. The
+    individual-contract fetch should be issued with start_date=1970-01-01."""
+    mock_existing = pd.DataFrame({
+        "Volume": [800],
+        "Volume_Reconstructed": [800],
+        "FirstVolume": [500], "SecondVolume": [300],
+        "FirstContract": ["ES-2026H"], "SecondContract": ["ES-2026M"],
+        "Volume_Source": ["reconstructed"],
+    }, index=pd.DatetimeIndex(["2026-06-01"]))
+    mock_read_prices.return_value = mock_existing.copy()
+
+    mock_continuous = pd.DataFrame({
+        "Open": [10, 10], "High": [10, 10], "Low": [10, 10], "Close": [10, 10],
+        "Volume": [800, 1000], "Open Interest": [0, 0], "Delivery Month": [0, 0],
+    }, index=pd.DatetimeIndex(["2026-06-01", "2026-07-01"]))
+    mock_indiv = pd.DataFrame({"Date": [pd.Timestamp("2026-07-01")], "Volume": [1000]})
+
+    def mock_ts_side_effect(sym, **kwargs):
+        if sym.endswith("CCB") or "-" not in sym:
+            return mock_continuous.copy()
+        if sym == "ES-2026U":
+            return mock_indiv.copy()
+        return pd.DataFrame()
+
+    mock_price_ts.side_effect = mock_ts_side_effect
+    mock_db_symbols.return_value = ["ES-2026U"]
+
+    mock_symbol = mock.Mock()
+    mock_symbol.internal = "ES"
+    with mock.patch("cotdata.providers.norgate.all_symbols", return_value=[mock_symbol]), \
+         mock.patch.dict("cotdata.providers.norgate.REGISTRY", {"ES": mock.Mock(norgate="&ES")}):
+        norgate.update(symbols=["ES"], full=True)
+
+    # Every individual-contract fetch (sym containing '-') must start from epoch.
+    indiv_starts = [c.kwargs.get("start_date") for c in mock_price_ts.call_args_list
+                    if "-" in c.args[0]]
+    assert indiv_starts, "expected at least one individual-contract fetch"
+    assert all(s == "1970-01-01" for s in indiv_starts), indiv_starts
