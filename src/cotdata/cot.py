@@ -13,19 +13,29 @@ _CODE_COL = "CFTC_Contract_Market_Code"   # Legacy schema contract-code column
 
 
 def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
-    """Weekly COT for an internal symbol OR a raw CFTC code. Empty if absent.
+    """Read a symbol's weekly COT history with predecessor code stitching.
 
-    If the resolved symbol declares hist_codes (predecessor exchange listings of
-    the same contract), they're stitched in chronologically to fill gaps the
-    primary code doesn't cover. The primary code wins on overlapping report dates,
-    and the stitched-in rows are relabelled to the primary code so the series
-    presents as a single contract to code-keyed consumers (e.g. CotIndexer).
+    name: the internal pipeline symbol, e.g. 'ES' or 'GC'.
+    report: 'legacy' (default), 'disagg' (commodity futures only), or 'tff' (financial futures only).
+
+    Returns:
+    DataFrame indexed by date. The columns depend on the `report` requested:
+      - legacy: Open_Interest_All, NonComm_Positions_Long_All, Comm_Positions_Long_All, etc.
+      - disagg: Open_Interest_All, Prod_Merc_Positions_Long_All, M_Money_Positions_Long_All, etc.
+      - tff: Open_Interest_All, Dealer_Positions_Long_All, Lev_Money_Positions_Long_All, etc.
+    If no data exists, returns an empty DataFrame.
     """
     sym = REGISTRY.get(name)
     if sym is None:                       # allow lookup by primary CFTC code, not just symbol
         sym = next((s for s in REGISTRY.values() if s.cftc_code == name), None)
     
-    read_fn = store.read_cot_disagg if report == "disagg" else store.read_cot_legacy
+    read_fn = {
+        "legacy": store.read_cot_legacy,
+        "disagg": store.read_cot_disagg,
+        "tff": store.read_cot_tff,
+    }.get(report)
+    if not read_fn:
+        raise ValueError(f"Unknown report type: {report}. Expected 'legacy', 'disagg', or 'tff'")
 
     if sym is None or not sym.cftc_code:
         return read_fn(name)
