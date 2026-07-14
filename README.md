@@ -168,7 +168,7 @@ The CFTC publishes positioning data in three distinct formats. `cotdata` manages
 The canonical store uses standard Parquet files. When loaded into a pandas DataFrame (e.g., via `pd.read_parquet()`), they conform to the following schemas.
 
 ### Price Data (`prices/{symbol}_{adjustment}.parquet`)
-The primary source for price history (Norgate Data). Indexed by tz-naive `Date`.
+The primary source for price history (Norgate Data). Indexed by tz-naive `Date`. The pipeline automatically downloads both the back-adjusted (`backadj`) series for signals/stops and the unadjusted (`unadj`) series for true transaction cost modeling.
 
 | Column | Type | Description |
 |--------|------|-------------|

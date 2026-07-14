@@ -26,10 +26,13 @@ _COLMAP = {
 }
 
 
-def fetch(internal_symbol: str, start: str = "1970-01-01") -> pd.DataFrame:
-    """Fetch Norgate back-adjusted continuous bars: settlement close, gap-free."""
+def fetch(internal_symbol: str, adjustment: str = "backadj", start: str = "1970-01-01") -> pd.DataFrame:
+    """Fetch Norgate continuous bars: settlement close."""
     import norgatedata  # imported lazily; only present on the Windows producer
-    ng_sym = REGISTRY[internal_symbol].norgate + CCB_SUFFIX  # "&ES" → "&ES_CCB"
+    ng_sym = REGISTRY[internal_symbol].norgate
+    if adjustment == "backadj":
+        ng_sym += CCB_SUFFIX
+        
     df = norgatedata.price_timeseries(
         ng_sym,
         padding_setting=norgatedata.PaddingType.NONE,
@@ -66,14 +69,20 @@ def _check_roll_gaps(internal_symbol: str, df: pd.DataFrame) -> bool:
 
 
 def update(symbols=None) -> None:
-    """Fetch + write to the store for the given internal symbols (backadj only)."""
+    """Fetch + write to the store for the given internal symbols (backadj and unadj)."""
     syms = symbols or [s.internal for s in all_symbols()]
     for sym in syms:
         try:
-            out = fetch(sym)
-            _check_roll_gaps(sym, out)  # sanity: warn (don't block) if it looks unadjusted
-            store.write_prices(sym, "backadj", out, source="norgate")
-            print(f"{sym:5s}: {len(out):6d} bars -> store")
+            # 1. Back-Adjusted
+            out_backadj = fetch(sym, adjustment="backadj")
+            _check_roll_gaps(sym, out_backadj)  # sanity: warn if backadj looks unadjusted
+            store.write_prices(sym, "backadj", out_backadj, source="norgate")
+            
+            # 2. Unadjusted (Raw calendar spreads)
+            out_unadj = fetch(sym, adjustment="unadj")
+            store.write_prices(sym, "unadj", out_unadj, source="norgate")
+            
+            print(f"{sym:5s}: {len(out_backadj):6d} backadj, {len(out_unadj):6d} unadj -> store")
         except Exception as e:  # noqa: BLE001
             print(f"{sym:5s}: FAILED — {e}")
 
