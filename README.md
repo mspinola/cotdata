@@ -186,7 +186,7 @@ The primary source for Legacy positioning data (CFTC Legacy Futures Report). **H
 > **Legacy Reports**: The Legacy reports are broken down by exchange. These reports have a futures only report and a combined futures and options report. Legacy reports break down the reportable open interest positions into two classifications: non-commercial and commercial traders. The `cotdata` pipeline strictly downloads the **Futures-only** reports (located at `https://www.cftc.gov/files/dea/history/dea_fut_xls_{YEAR}.zip`).
 
 > [!NOTE]
-> **Column Subset**: While the raw CFTC `.xls` files contain [well over 100 columns](https://www.cftc.gov/MarketReports/CommitmentsofTraders/HistoricalViewable/cotvariableslegacy.html) (including spreading, concentration ratios, etc.), the producer pipeline explicitly discards them. The parquet files only maintain the exact 10-column subset listed below to keep the file sizes extremely small and strictly focused on what the downstream models require. To include additional data points from the raw reports, simply add the exact CFTC column name to the `TARGET_COLS` list inside `src/cotdata/providers/cftc.py`.
+> **Column Subset**: While the raw CFTC `.xls` files contain [well over 100 columns](https://www.cftc.gov/MarketReports/CommitmentsofTraders/HistoricalViewable/cotvariableslegacy.html) (including spreading, concentration ratios, etc.), the producer pipeline explicitly discards them. The parquet files only maintain the exact 15-column subset listed below to keep the file sizes extremely small and strictly focused on what the downstream models require. To include additional data points from the raw reports, simply add the exact CFTC column name to the `TARGET_COLS` list inside `src/cotdata/providers/cftc.py`.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -200,6 +200,11 @@ The primary source for Legacy positioning data (CFTC Legacy Futures Report). **H
 | `NonComm_Positions_Short_All` | float | Non-Commercial (Large Speculator) Short positions. |
 | `NonRept_Positions_Long_All` | float | Non-Reportable (Small Speculator) Long positions. |
 | `NonRept_Positions_Short_All` | float | Non-Reportable (Small Speculator) Short positions. |
+| `Traders_Tot_All` | float | Total number of reportable traders. |
+| `Traders_Comm_Long_All` | float | Number of Commercial Long traders. |
+| `Traders_Comm_Short_All` | float | Number of Commercial Short traders. |
+| `Traders_NonComm_Long_All` | float | Number of Non-Commercial Long traders. |
+| `Traders_NonComm_Short_All` | float | Number of Non-Commercial Short traders. |
 
 ### COT Disaggregated Data (`cot_disagg/{code}.parquet`)
 The primary source for entity-specific positioning and trader counts (CFTC Disaggregated Futures-Only Report). **History starts in 2006.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
