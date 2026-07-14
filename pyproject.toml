@@ -6,6 +6,15 @@ build-backend = "setuptools.build_meta"
 name = "cotdata"
 version = "0.1.0"
 description = "Canonical data layer for COT/futures strategies — a producer/consumer split over a file-based store."
+readme = "README.md"
+authors = [
+    {name = "Matt S.", email = "cotanalyzer@gmail.com"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 requires-python = ">=3.9"
 dependencies = [
     "pandas>=1.5",
@@ -16,6 +25,11 @@ dependencies = [
     "xlrd>=2.0",            # CFTC dea_fut_xls are legacy .xls
     "PyYAML>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mspinola/cotdata"
+Repository = "https://github.com/mspinola/cotdata"
+Issues = "https://github.com/mspinola/cotdata/issues"
 
 [project.optional-dependencies]
 # Producer-only, Windows: the Norgate Data Updater must be installed & running.
