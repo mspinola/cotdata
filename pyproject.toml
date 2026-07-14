@@ -16,12 +16,6 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 requires-python = ">=3.9"
-
-[project.urls]
-Homepage = "https://github.com/mspinola/cotdata"
-Repository = "https://github.com/mspinola/cotdata"
-Issues = "https://github.com/mspinola/cotdata/issues"
-
 dependencies = [
     "pandas>=1.5",
     "pyarrow>=10",
@@ -31,6 +25,11 @@ dependencies = [
     "xlrd>=2.0",            # CFTC dea_fut_xls are legacy .xls
     "PyYAML>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mspinola/cotdata"
+Repository = "https://github.com/mspinola/cotdata"
+Issues = "https://github.com/mspinola/cotdata/issues"
 
 [project.optional-dependencies]
 # Producer-only, Windows: the Norgate Data Updater must be installed & running.
