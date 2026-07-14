@@ -40,7 +40,7 @@ TARGET_COLS = [MARKET_NAME, REPORT_DATE, CONTRACT_CODE, OPEN_INTEREST,
 
 
 def _cache_dir() -> Path:
-    d = config.store_root() / "_cache" / "cot"
+    d = config.store_root() / "_cache" / "cot_legacy"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -116,8 +116,6 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
         if sub.empty:
             print(f"{code}: no rows")
             continue
-        # Index by report date (DatetimeIndex → manifest last_date), keeping the
-        # Legacy column name so a consumer's reset_index() gets the exact schema.
         sub = sub.sort_values(REPORT_DATE).set_index(REPORT_DATE)
-        store.write_cot(code, sub, source="cftc")
+        store.write_cot_legacy(code, sub, source="cftc")
         print(f"{code}: {len(sub):5d} weeks -> store")

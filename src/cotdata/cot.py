@@ -12,7 +12,7 @@ from .registry import REGISTRY, hist_code_scales
 _CODE_COL = "CFTC_Contract_Market_Code"   # Legacy schema contract-code column
 
 
-def get_cot(name: str) -> pd.DataFrame:
+def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
     """Weekly COT for an internal symbol OR a raw CFTC code. Empty if absent.
 
     If the resolved symbol declares hist_codes (predecessor exchange listings of
@@ -24,14 +24,17 @@ def get_cot(name: str) -> pd.DataFrame:
     sym = REGISTRY.get(name)
     if sym is None:                       # allow lookup by primary CFTC code, not just symbol
         sym = next((s for s in REGISTRY.values() if s.cftc_code == name), None)
+    
+    read_fn = store.read_cot_disagg if report == "disagg" else store.read_cot_legacy
+
     if sym is None or not sym.cftc_code:
-        return store.read_cot(name)
-    primary = store.read_cot(sym.cftc_code)
+        return read_fn(name)
+    primary = read_fn(sym.cftc_code)
     if not sym.hist_codes:
         return primary
     frames = [primary]                    # primary first → wins de-duplication on overlaps
     for hc, scale in hist_code_scales(sym.hist_codes):
-        h = store.read_cot(hc)
+        h = read_fn(hc)
         if h.empty:
             continue
         h = h.copy()
