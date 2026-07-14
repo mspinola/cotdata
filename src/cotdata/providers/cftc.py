@@ -118,4 +118,4 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
             continue
         sub = sub.sort_values(REPORT_DATE).set_index(REPORT_DATE)
         store.write_cot_legacy(code, sub, source="cftc")
-        print(f"{code}: {len(sub):5d} weeks -> store")
+        print(f"{code}: {len(sub):5d} weeks (legacy) -> store")
