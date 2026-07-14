@@ -145,7 +145,7 @@ The primary source for price history (Norgate Data). Indexed by tz-naive `Date`.
 | `Delivery Month` | float | Expiration month of the active contract (e.g. `202609`). Used to detect contract rolls. |
 
 ### COT Legacy Data (`cot_legacy/{code}.parquet`)
-The primary source for Legacy positioning data (CFTC Legacy Futures Report). Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+The primary source for Legacy positioning data (CFTC Legacy Futures Report). **History starts in 1986.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
 > **Legacy Reports**: The Legacy reports are broken down by exchange. These reports have a futures only report and a combined futures and options report. Legacy reports break down the reportable open interest positions into two classifications: non-commercial and commercial traders. The `cotdata` pipeline strictly downloads the **Futures-only** reports (located at `https://www.cftc.gov/files/dea/history/dea_fut_xls_{YEAR}.zip`).
@@ -167,13 +167,13 @@ The primary source for Legacy positioning data (CFTC Legacy Futures Report). Ind
 | `NonRept_Positions_Short_All` | float | Non-Reportable (Small Speculator) Short positions. |
 
 ### COT Disaggregated Data (`cot_disagg/{code}.parquet`)
-The primary source for entity-specific positioning and trader counts (CFTC Disaggregated Futures-Only Report, dating back to 2006). Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+The primary source for entity-specific positioning and trader counts (CFTC Disaggregated Futures-Only Report). **History starts in 2006.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
 > **Lossless Image**: Unlike the Legacy schema which filters down to 10 specific columns, the Disaggregated parquets are a **lossless image** of the source CFTC `txt` files. They contain all granular entity groups (Money Manager, Swap Dealer, Producer/Merchant, Other Reportable) and their respective `Traders_*` counts (e.g., `Traders_Tot_All`, `Traders_M_Money_Long_All`). This is the required store for computing Position Size and Clustering metrics.
 
 ### COT Traders in Financial Futures (TFF) Data (`cot_tff/{code}.parquet`)
-The primary source for entity-specific positioning and trader counts for Financial markets (CFTC Traders in Financial Futures Futures-Only Report, dating back to 2006). Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+The primary source for entity-specific positioning and trader counts for Financial markets (CFTC Traders in Financial Futures Futures-Only Report). **History starts in 2006.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
 > **Financials Counterpart**: TFF is the exact counterpart to Disaggregated reports, used exclusively for financial markets (Equities, FX, Rates) which do not have Disaggregated reports.

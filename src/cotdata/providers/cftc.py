@@ -51,10 +51,18 @@ def _standardize_code(val) -> str:
     return s.zfill(6) if s.isdigit() else s
 
 
-def _download_year(year: int):
-    """Download a year's zip to the cache; skip if the server copy isn't newer."""
-    url = f"{URL_PREFIX}{year}.zip"
-    zip_path = _cache_dir() / f"dea_fut_xls_{year}.zip"
+def _download_year(year: int) -> Path | None:
+    # CFTC changed their naming convention in 2004.
+    # 1986 - 2003: deafut_xls_{year}.zip
+    # 2004 - Present: dea_fut_xls_{year}.zip
+    if year < 2004:
+        url = f"https://www.cftc.gov/files/dea/history/deafut_xls_{year}.zip"
+        filename = f"deafut_xls_{year}.zip"
+    else:
+        url = f"{URL_PREFIX}{year}.zip"
+        filename = f"dea_fut_xls_{year}.zip"
+
+    zip_path = _cache_dir() / filename
     try:
         if zip_path.exists():
             head = requests.head(url, timeout=30)
