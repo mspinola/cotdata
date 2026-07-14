@@ -126,6 +126,25 @@ This diagnostic script tests:
 2. **Subscription Access**: Validates that your Norgate subscription is active and has the required CME futures data package enabled.
 3. **Roll Gap Validation**: Mathematically proves whether your Norgate Data Updater is configured globally to return back-adjusted or unadjusted continuous contracts. It hunts for artificial calendar-spread gaps at contract roll dates to ensure you are receiving gap-free, continuous data, which is absolutely vital for accurate stop-loss modeling.
 
+## COT Formats Explained
+
+The CFTC publishes positioning data in three distinct formats. `cotdata` manages all three to ensure complete market coverage and the deepest possible historical backtesting.
+
+1. **Legacy Format (1986–Present)**
+   - **Scope:** All markets.
+   - **Categories:** Divides traders broadly into **Commercial** (hedgers) and **Non-Commercial** (large speculators). 
+   - **Use Case:** This is the original format. While its broad categories make it less precise for modern analysis, it is the only format that provides data prior to 2006, making it essential for long-term historical backtesting.
+
+2. **Disaggregated Format (DIS) (2006–Present)**
+   - **Scope:** Physical commodities only (Agriculture, Energy, Metals).
+   - **Categories:** Splits traders into four granular groups: **Producer/Merchant** (classic hedgers), **Swap Dealers** (financial intermediaries), **Managed Money** (hedge funds / CTAs), and **Other Reportables**.
+   - **Use Case:** Provides a much clearer view of the "Smart Money" (Managed Money) in commodity markets.
+
+3. **Traders in Financial Futures (TFF) (2006–Present)**
+   - **Scope:** Financial markets only (Equities, Rates, Currencies).
+   - **Categories:** The financial counterpart to Disaggregated. Splits traders into: **Dealer/Intermediary** (sell-side), **Asset Manager** (pension/mutual funds), **Leveraged Funds** (hedge funds / CTAs), and **Other Reportables**.
+   - **Use Case:** The definitive source for tracking speculative flow (Leveraged Funds) in financial markets.
+
 ## Data Schemas
 
 The canonical store uses standard Parquet files. When loaded into a pandas DataFrame (e.g., via `pd.read_parquet()`), they conform to the following schemas.
