@@ -34,9 +34,17 @@ NONCOMM_SHORT = "NonComm_Positions_Short_All"
 NONREPT_LONG = "NonRept_Positions_Long_All"
 NONREPT_SHORT = "NonRept_Positions_Short_All"
 
+TRADERS_TOT = "Traders_Tot_All"
+TRADERS_COMM_LONG = "Traders_Comm_Long_All"
+TRADERS_COMM_SHORT = "Traders_Comm_Short_All"
+TRADERS_NONCOMM_LONG = "Traders_NonComm_Long_All"
+TRADERS_NONCOMM_SHORT = "Traders_NonComm_Short_All"
+
 TARGET_COLS = [MARKET_NAME, REPORT_DATE, CONTRACT_CODE, OPEN_INTEREST,
                COMM_LONG, COMM_SHORT, NONCOMM_LONG, NONCOMM_SHORT,
-               NONREPT_LONG, NONREPT_SHORT]
+               NONREPT_LONG, NONREPT_SHORT,
+               TRADERS_TOT, TRADERS_COMM_LONG, TRADERS_COMM_SHORT,
+               TRADERS_NONCOMM_LONG, TRADERS_NONCOMM_SHORT]
 
 
 def _cache_dir() -> Path:
