@@ -8,10 +8,10 @@ Canonical data layer for the COT / futures-strategy stack. It exists so that qua
                        │  writes   │
                        ▼           ▼
         ┌───────────────────────────────────────┐
-        │  CANONICAL STORE   ($COTDATA_STORE)    │
-        │  prices/*.parquet  cot/*.parquet       │   ← synced (rsync / Dropbox / S3)
-        │  manifest.json     (the contract)      │
-        └───────────────────────────────────────┘
+        │  CANONICAL STORE   ($COTDATA_STORE)            │
+        │  prices/*.parquet  cot_legacy/*.parquet        │   ← synced (rsync / Dropbox / S3)
+        │  cot_disagg/*.parquet  manifest.json           │
+        └────────────────────────────────────────────────┘
                        ▲           ▲   reads (offline, cross-platform)
         ┌──────────────┴───┐  ┌────┴──────────────┐
         │   COT analyzer   │  │  analysis toolset │      both:  import cotdata
@@ -52,7 +52,7 @@ Swapping a vendor is a producer-only change.
 
 - `prices/{symbol}_{adjustment}.parquet` — Open/High/Low/Close/Volume/Open Interest,
   tz-naive `Date` index. `adjustment` ∈ {`backadj`, `unadj`}. Close = exchange settlement.
-- `cot/{code}.parquet` — weekly CFTC positioning.
+- `cot_legacy/{code}.parquet` — weekly CFTC Legacy positioning.
 - `manifest.json` — per-table `last_date`, `n_rows`, `source`, `updated_at`, `schema_version`.
 
 ## Consumer
@@ -61,7 +61,8 @@ Swapping a vendor is a producer-only change.
 import cotdata
 df = cotdata.get_prices("ES", adjustment="backadj")   # USE THIS FOR SIGNALS + STOPS
 sz = cotdata.get_prices("ES", adjustment="unadj")     # USE FOR POSITION SIZING / POINT VALUE
-cot = cotdata.get_cot("ES")
+cot_legacy = cotdata.get_cot("ES", report="legacy")   # USE FOR COMM/NON-COMM
+cot_disagg = cotdata.get_cot("ES", report="disagg")   # USE FOR TRADER COUNTS (MM/SD/OR)
 ```
 
 Set `COTDATA_STORE` to the synced store directory. 
@@ -72,7 +73,8 @@ Set `COTDATA_STORE` to the synced store directory.
 
 ```
 COTDATA_STORE=/store  cotdata-update --prices --symbols ES NQ    # Norgate (Windows)
-COTDATA_STORE=/store  cotdata-update --cot                       # CFTC (cross-platform)
+COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (cross-platform)
+COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggregated (cross-platform)
 ```
 
 Schedule nightly (prices, after the Norgate Data Updater) and weekly (COT Friday releases).
@@ -137,8 +139,8 @@ The primary source for price history (Norgate Data). Indexed by tz-naive `Date`.
 | `Open Interest` | float | Total open interest. |
 | `Delivery Month` | float | Expiration month of the active contract (e.g. `202609`). Used to detect contract rolls. |
 
-### COT Data (`cot/{code}.parquet`)
-The primary source for positioning data (CFTC Legacy Futures Report). Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+### COT Legacy Data (`cot_legacy/{code}.parquet`)
+The primary source for Legacy positioning data (CFTC Legacy Futures Report). Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
 > **Legacy Reports**: The Legacy reports are broken down by exchange. These reports have a futures only report and a combined futures and options report. Legacy reports break down the reportable open interest positions into two classifications: non-commercial and commercial traders. The `cotdata` pipeline strictly downloads the **Futures-only** reports (located at `https://www.cftc.gov/files/dea/history/dea_fut_xls_{YEAR}.zip`).
@@ -158,3 +160,9 @@ The primary source for positioning data (CFTC Legacy Futures Report). Indexed by
 | `NonComm_Positions_Short_All` | float | Non-Commercial (Large Speculator) Short positions. |
 | `NonRept_Positions_Long_All` | float | Non-Reportable (Small Speculator) Long positions. |
 | `NonRept_Positions_Short_All` | float | Non-Reportable (Small Speculator) Short positions. |
+
+### COT Disaggregated Data (`cot_disagg/{code}.parquet`)
+The primary source for entity-specific positioning and trader counts (CFTC Disaggregated Futures-Only Report, dating back to 2006). Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+
+> [!NOTE]
+> **Lossless Image**: Unlike the Legacy schema which filters down to 10 specific columns, the Disaggregated parquets are a **lossless image** of the source CFTC `txt` files. They contain all granular entity groups (Money Manager, Swap Dealer, Producer/Merchant, Other Reportable) and their respective `Traders_*` counts (e.g., `Traders_Tot_All`, `Traders_M_Money_Long_All`). This is the required store for computing Position Size and Clustering metrics.

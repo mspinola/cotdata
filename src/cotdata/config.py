@@ -19,8 +19,12 @@ def prices_dir() -> Path:
     return store_root() / "prices"
 
 
-def cot_dir() -> Path:
-    return store_root() / "cot"
+def cot_legacy_dir() -> Path:
+    return store_root() / "cot_legacy"
+
+
+def cot_disagg_dir() -> Path:
+    return store_root() / "cot_disagg"
 
 
 def manifest_path() -> Path:
