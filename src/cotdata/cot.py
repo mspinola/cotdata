@@ -39,12 +39,12 @@ def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
 
     if sym is None or not sym.cftc_code:
         return read_fn(name)
-    primary = read_fn(sym.cftc_code)
+    primary = read_fn(f"{sym.internal}_{sym.cftc_code}")
     if not sym.hist_codes:
         return primary
     frames = [primary]                    # primary first → wins de-duplication on overlaps
     for hc, scale in hist_code_scales(sym.hist_codes):
-        h = read_fn(hc)
+        h = read_fn(f"{sym.internal}_{hc}")
         if h.empty:
             continue
         h = h.copy()

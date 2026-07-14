@@ -90,13 +90,18 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
     codes: iterable of CFTC codes; default = all registry codes.
     Rebuilds the complete per-code table each run.
     """
+    code_to_sym = {}
+    for s in all_symbols():
+        if s.cftc_code:
+            code_to_sym[s.cftc_code] = s.internal
+        for hc, _ in hist_code_scales(s.hist_codes):
+            code_to_sym[hc] = s.internal
+
     last_year = last_year or dt.date.today().year
     if codes:
         want = set(codes)
     else:
-        want = {s.cftc_code for s in all_symbols() if s.cftc_code}
-        for s in all_symbols():      # predecessor codes (migrated-contract history)
-            want.update(code for code, _ in hist_code_scales(s.hist_codes))
+        want = set(code_to_sym.keys())
 
     frames = []
     
@@ -142,5 +147,7 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
         
         # Index by report date (DatetimeIndex → manifest last_date)
         sub = sub.sort_values(REPORT_DATE).set_index(REPORT_DATE)
-        store.write_cot_disagg(code, sub, source="cftc_disagg")
-        print(f"{code}: {len(sub):5d} weeks (disagg) -> store")
+        sym_name = code_to_sym.get(code)
+        file_name = f"{sym_name}_{code}" if sym_name else code
+        store.write_cot_disagg(file_name, sub, source="cftc_disagg")
+        print(f"{file_name}: {len(sub):5d} weeks (disagg) -> store")
