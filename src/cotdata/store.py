@@ -89,6 +89,27 @@ def load_manifest() -> dict:
     return {"schema_version": config.SCHEMA_VERSION, "metadata": {}, "prices": {}, "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}}
 
 
+def schema_version() -> int:
+    """Schema version recorded in the *store's* manifest — the version of the data
+    on disk, which is NOT the same as config.SCHEMA_VERSION (the library's target)
+    until a producer pass has re-written the store. Consumers key cache
+    invalidation on this so a schema bump forces a rebuild."""
+    return int(load_manifest().get("schema_version", 0))
+
+
+def require_schema(min_version: int) -> None:
+    """Fail fast if the store predates a schema the caller depends on. Lets a
+    consumer refuse to run against a stale store rather than silently read the
+    old shape."""
+    v = schema_version()
+    if v < min_version:
+        raise RuntimeError(
+            f"cotdata store schema_version={v} < required {min_version}. "
+            f"Re-run the producer (e.g. norgate.update) to migrate the store — "
+            f"see docs/plan_promote_reconstructed_volume.md."
+        )
+
+
 def _touch_manifest(kind: str, name: str, df: pd.DataFrame, source: str) -> None:
     m = load_manifest()
     last = None
