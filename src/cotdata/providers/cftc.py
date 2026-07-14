@@ -104,13 +104,18 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
     Rebuilds the complete per-code table each run (parse is cheap; downloads are
     cached and skip when unchanged). Incremental append is a future optimization.
     """
+    code_to_sym = {}
+    for s in all_symbols():
+        if s.cftc_code:
+            code_to_sym[s.cftc_code] = s.internal
+        for hc, _ in hist_code_scales(s.hist_codes):
+            code_to_sym[hc] = s.internal
+
     last_year = last_year or dt.date.today().year
     if codes:
         want = set(codes)
     else:
-        want = {s.cftc_code for s in all_symbols() if s.cftc_code}
-        for s in all_symbols():      # predecessor codes (migrated-contract history)
-            want.update(code for code, _ in hist_code_scales(s.hist_codes))
+        want = set(code_to_sym.keys())
 
     frames = []
     for year in range(first_year, last_year + 1):
@@ -133,5 +138,7 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
             print(f"{code}: no rows")
             continue
         sub = sub.sort_values(REPORT_DATE).set_index(REPORT_DATE)
-        store.write_cot_legacy(code, sub, source="cftc")
-        print(f"{code}: {len(sub):5d} weeks (legacy) -> store")
+        sym_name = code_to_sym.get(code)
+        file_name = f"{sym_name}_{code}" if sym_name else code
+        store.write_cot_legacy(file_name, sub, source="cftc")
+        print(f"{file_name}: {len(sub):5d} weeks (legacy) -> store")
