@@ -170,15 +170,23 @@ The canonical store uses standard Parquet files. When loaded into a pandas DataF
 ### Price Data (`prices/{symbol}_{adjustment}.parquet`)
 The primary source for price history (Norgate Data). Indexed by tz-naive `Date`. The pipeline automatically downloads both the back-adjusted (`backadj`) series for signals/stops and the unadjusted (`unadj`) series for true transaction cost modeling.
 
+**Reading reconstructed volume:** the reconstruction columns below are internal storage. Consumers should not read `Volume_Reconstructed` directly — call `get_prices(symbol, volume="reconstructed")` and the `Volume` column is served as reconstructed-with-per-row-raw-fallback, plus a `Volume_Source` column for audit. The default `volume="front"` returns the front-month series unchanged (byte-identical to the pre-v2 API). See `docs/plan_promote_reconstructed_volume.md`.
+
+**Schema versioning:** `schema_version` in `manifest.json` records the on-disk data version (v2 = reconstructed volume promoted). Consumers key cache invalidation on `cotdata.schema_version()` and can guard with `cotdata.require_schema(min_version)`.
+
 | Column | Type | Description |
 |--------|------|-------------|
 | `Date` | DatetimeIndex | Trading day (tz-naive, normalized to midnight). |
 | `Open` | float | Opening price. |
 | `High` | float | High price. |
 | `Low` | float | Low price. |
-| `Close` | float | Exchange settlement close. |
-| `Volume` | float | Trading volume. |
-| `Open Interest` | float | Total open interest. |
+| `Close` | float | Settlement Close price. |
+| `Volume` | float | Continuous contract trading volume (front-month only). |
+| `Open Interest` | float | Continuous contract open interest. |
+| `Volume_Reconstructed` | float | True market volume (sum of First and Second contract). Note: systematically higher than raw `Volume`, not a drop-in replacement. |
+| `Volume_Source` | string | `reconstructed` if First+Second available, `raw` fallback if not. |
+| `FirstVolume` / `SecondVolume` | float | Trading volume of the specific first and second expiring contracts. |
+| `FirstContract` / `SecondContract` | string | Contract names for the first and second expirations (e.g., `ES-2024H`). |
 | `Delivery Month` | float | Expiration month of the active contract (e.g. `202609`). Used to detect contract rolls. |
 
 ### Contract Specifications (`metadata/contract_specs.parquet`)
