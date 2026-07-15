@@ -392,6 +392,23 @@ python tests/test_adjustment.py
 
 It checks: (1) **Local communication** — Python can reach the Norgate Data Updater; (2) **Subscription access** — your subscription includes the required CME futures package; (3) **Roll-gap validation** — proves whether the Updater is returning back-adjusted (gap-free) vs unadjusted continuous contracts, by hunting for calendar-spread gaps at roll dates. Gap-free data is vital for accurate stop-loss modeling.
 
+## Ecosystem
+
+cotdata is the *data* layer of a small, unbundled toolchain — it stops at "clean
+data behind a stable API" on purpose. What you do with that data is a separate,
+swappable step:
+
+- **cotdata** *(this package)* — the *data* layer. One synced store of futures
+  prices and CFTC COT positioning; many readers, no vendor SDK at read time.
+- **[crucible](https://github.com/mspinola/crucible)** — the *edge* layer. Feed a
+  signal built on cotdata frames into crucible and it tells you — with a
+  confidence interval and a p-value — whether the trade-level edge is real, before
+  you open a funded account.
+
+The flow runs one direction: **`cotdata` (data) → your signal → `crucible`
+(edge)**. Neither imports the other, so cotdata stays useful on its own for any
+COT/futures research — crucible is just the most common thing to point at it next.
+
 ## Contributing
 
 Issues and pull requests are welcome. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, and conventions. When filing a bug, include your OS — Norgate features require Windows, while store reads and CFTC COT run anywhere.
