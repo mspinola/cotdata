@@ -163,28 +163,39 @@ schtasks /Create /TN "cotdata prices" /TR "C:\path\run-prices.cmd" /SC DAILY /ST
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "C:\path\run-cot.cmd" /SC DAILY /ST 08:10
 ```
 
-The **Friday release window** needs a *repeating* trigger, which `schtasks` can't express on a weekly schedule (`/ET` and `/DU` are MINUTE/HOURLY only). Create it in PowerShell instead — weekly on Friday at 3:25pm ET, repeating every 5 min for 45 minutes so it catches the ~3:30 release within minutes:
+The **Friday release window** needs a *repeating* trigger, which `schtasks` can't express on a weekly schedule (`/ET` and `/DU` are MINUTE/HOURLY only). Create it in PowerShell instead — weekly on Friday at 3:25pm ET, repeating every 2 min for 45 minutes so it catches the ~3:30 release within a couple of minutes:
 
 ```powershell
 $act = New-ScheduledTaskAction -Execute "C:\path\run-cot.cmd"
 $trg = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Friday -At 3:25PM
 # borrow a repetition pattern (schtasks/New-ScheduledTaskTrigger can't set it directly on a weekly trigger):
 $rep = (New-ScheduledTaskTrigger -Once -At 3:25PM `
-        -RepetitionInterval (New-TimeSpan -Minutes 5) `
+        -RepetitionInterval (New-TimeSpan -Minutes 2) `
         -RepetitionDuration (New-TimeSpan -Minutes 45)).Repetition
 $trg.Repetition = $rep
 Register-ScheduledTask -TaskName "cotdata COT (Fri release)" -Action $act -Trigger $trg
 ```
 
-(Or in the Task Scheduler GUI: New Task → Trigger *Weekly, Friday, 3:25pm* → check *"Repeat task every: 5 minutes for a duration of: 45 minutes."*)
+(Or in the Task Scheduler GUI: New Task → Trigger *Weekly, Friday, 3:25pm* → check *"Repeat task every: 2 minutes for a duration of: 45 minutes."*)
 
 **Event-driven prices with `--require-final`.** cotdata reads two Norgate databases: **Continuous Futures** (the `&ES` / `_CCB` series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Their **Final** prices land ~8:40pm ET (Futures) and ~8:55pm ET (Continuous Futures), but your Norgate Data Updater still has to *pull* them on its next poll. Rather than guess a fixed time, `--require-final` checks `norgatedata.last_database_update_time()` for both databases and only fetches once each has been refreshed at/after `--final-cutoff` (default `20:55` local — set it to your machine's local equivalent of 8:55pm ET). Until then it **defers with a non-zero exit**, so the restart setting below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
 
-**Retry / wait via Task Scheduler:** open each task → **Settings** tab → check *"If the task fails, restart every: 10 minutes, up to 6 times."* This does double duty: it retries transient fetch errors, and — for the price task — it waits out the gap between 8:55pm and NDU actually pulling the Finals (each retry is a cheap `last_database_update_time` check that exits immediately until ready). On a genuine no-session day the retries simply exhaust, harmlessly.
+**Retry / wait via restart-on-failure.** Give each task a *restart on failure* — it does double duty: it retries transient fetch errors, and (for the price task) waits out the gap between 8:55pm and NDU actually pulling the Finals (each retry is a cheap `last_database_update_time` check that exits immediately until ready). On a genuine no-session day the retries simply exhaust, harmlessly. `schtasks` can't set this, so use PowerShell (applies to all three tasks):
+
+```powershell
+$s = New-ScheduledTaskSettingsSet -RestartInterval (New-TimeSpan -Minutes 10) -RestartCount 6
+foreach ($t in "cotdata prices","cotdata COT (Fri release)","cotdata COT (catch-up)") {
+    Set-ScheduledTask -TaskName $t -Settings $s
+}
+```
+
+(GUI equivalent: each task → **Settings** tab → *"If the task fails, restart every: 10 minutes"*, *"Attempt to restart up to: 6 times."*)
+
+**View / manage the jobs** any time in the Windows **Task Scheduler** GUI — press `Win + R` and run `taskschd.msc`, or open *Task Scheduler* from the Start menu — then look under **Task Scheduler Library** for the `cotdata …` tasks.
 
 **Monitoring:** after any run, `status.json` reflects `newest_data.<domain>` and `last_run.symbols_failed` — poll it to confirm the Friday COT actually advanced, or to alert on failures (see [Operations](#operations)).
 
-> The Friday window intentionally over-polls (8 runs, 3:25–4:00pm); idempotency makes every run after the release lands a no-op. If you'd rather actively wait out *late* releases, a wrapper can loop until `status.json`'s `newest_data.cot_legacy` reaches the expected Tuesday — but daily catch-up already covers holiday slips with far less machinery.
+> The Friday window intentionally over-polls (every 2 minutes across a 45-minute window); idempotency makes every run after the release lands a no-op. If you'd rather actively wait out *late* releases, a wrapper can loop until `status.json`'s `newest_data.cot_legacy` reaches the expected Tuesday — but daily catch-up already covers holiday slips with far less machinery.
 
 ## Operations
 
