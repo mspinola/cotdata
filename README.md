@@ -155,8 +155,8 @@ C:\path\to\.venv\Scripts\cotdata-update.exe --cot-all
 (a `run-prices.cmd` is the same with `--prices --metadata`.) Then create three tasks — times are the **machine's local** time; convert from 3:30pm ET if it isn't on Eastern:
 
 ```bat
-:: 1) Prices — nightly, after the Norgate Data Updater's EOD run
-schtasks /Create /TN "cotdata prices" /TR "C:\path\run-prices.cmd" /SC DAILY /ST 18:30
+:: 1) Prices — nightly, AFTER Norgate's Final futures prices land (see timing note below)
+schtasks /Create /TN "cotdata prices" /TR "C:\path\run-prices.cmd" /SC DAILY /ST 21:15
 
 :: 2) COT — Friday release window: poll every 5 min from 3:25 to 4:00pm ET to catch it fast
 schtasks /Create /TN "cotdata COT (Fri release)" /TR "C:\path\run-cot.cmd" /SC WEEKLY /D FRI /ST 15:25 /RI 5 /ET 16:00
@@ -164,6 +164,8 @@ schtasks /Create /TN "cotdata COT (Fri release)" /TR "C:\path\run-cot.cmd" /SC W
 :: 3) COT — daily morning catch-up for holiday-delayed releases and as a safety net
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "C:\path\run-cot.cmd" /SC DAILY /ST 08:10
 ```
+
+**Norgate price timing (why 9:15pm).** cotdata reads two Norgate databases: **Futures Continuous** (the `&ES` / `_CCB` continuous series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Per Norgate's update schedule, **Final** prices land around **8:40pm ET (Futures)** and **8:55pm ET (Futures Continuous)**. Run the price task after both — e.g. ~9:15pm — and after your Norgate Data Updater has actually downloaded them (the schedule is when data is *available*; the local Updater still has to pull it). Earlier runs would capture interim (non-final) prices. Times shown are the machine's local time; convert from ET if needed.
 
 **Retry on transient errors:** open each task in Task Scheduler → **Settings** tab → check *"If the task fails, restart every: 15 minutes, up to 3 times."* Because the CLI only exits non-zero on a genuine fetch failure, this retries network blips and leaves normal no-op runs alone.
 
