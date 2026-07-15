@@ -144,29 +144,41 @@ The goal: **prices daily**, and **COT caught within minutes of its Friday ~3:30p
 - **Idempotent.** `cotdata-update --cot-*` HEAD-checks each CFTC year zip and skips it if unchanged, so re-running is cheap. Running before the release lands is a harmless no-op; the first run *after* it lands picks it up.
 - **Fails loudly.** A run exits non-zero only on a hard fetch error (source unreachable) — *not* when there's simply no new data yet. So Task Scheduler's "restart on failure" retries real errors without firing on ordinary "nothing new" runs.
 
-Point each task at a small wrapper that sets `COTDATA_STORE` and calls the venv's `cotdata-update`. Prices use `--require-final` so they run only once Norgate's **Final** futures prices are in (not interim bars) — `run-prices.cmd`:
+Create **two** wrapper scripts — they run *different* commands. Each sets `COTDATA_STORE` and calls the venv's `cotdata-update`.
+
+> **Replace the `<...>` placeholders with your real paths** — in *both* the wrapper files below *and* the task commands further down. `<STORE>` = your synced store, `<VENV>` = your virtualenv, `<DIR>` = the folder holding these `.cmd` files. Example values: `<STORE>` = `\\Mac\code\cotdata_store`, `<VENV>` = `C:\Users\you\code\cotdata\.venv`.
+
+`run-prices.cmd` — prices (with `--require-final`, so it runs only once Norgate's **Final** prices are in, not interim bars):
 
 ```bat
 @echo off
-set COTDATA_STORE=C:\path\to\store
-C:\path\to\.venv\Scripts\cotdata-update.exe --prices --metadata --require-final
+set COTDATA_STORE=<STORE>
+"<VENV>\Scripts\cotdata-update.exe" --prices --metadata --require-final
 ```
 
-(`run-cot.cmd` is the same with `--cot-all`.) Then create three tasks — times are the **machine's local** time; convert from ET if it isn't on Eastern:
+`run-cot.cmd` — COT (note the **different** command, `--cot-all`):
+
+```bat
+@echo off
+set COTDATA_STORE=<STORE>
+"<VENV>\Scripts\cotdata-update.exe" --cot-all
+```
+
+Then create three tasks — times are the **machine's local** time; convert from ET if it isn't on Eastern:
 
 ```bat
 :: 1) Prices — fire at the Continuous Futures Final (~8:55pm ET); --require-final + restart
 ::    below keep retrying (cheap no-ops) until Norgate has actually pulled the Finals.
-schtasks /Create /TN "cotdata prices" /TR "C:\path\run-prices.cmd" /SC DAILY /ST 20:55
+schtasks /Create /TN "cotdata prices" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55
 
 :: 2) COT — daily morning catch-up for holiday-delayed releases and as a safety net
-schtasks /Create /TN "cotdata COT (catch-up)" /TR "C:\path\run-cot.cmd" /SC DAILY /ST 08:10
+schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
 ```
 
 The **Friday release window** needs a *repeating* trigger, which `schtasks` can't express on a weekly schedule (`/ET` and `/DU` are MINUTE/HOURLY only). Create it in PowerShell instead — weekly on Friday at 3:25pm ET, repeating every 2 min for 45 minutes so it catches the ~3:30 release within a couple of minutes:
 
 ```powershell
-$act = New-ScheduledTaskAction -Execute "C:\path\run-cot.cmd"
+$act = New-ScheduledTaskAction -Execute "<DIR>\run-cot.cmd"
 $trg = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Friday -At 3:25PM
 # borrow a repetition pattern (schtasks/New-ScheduledTaskTrigger can't set it directly on a weekly trigger):
 $rep = (New-ScheduledTaskTrigger -Once -At 3:25PM `
