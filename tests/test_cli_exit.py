@@ -37,3 +37,24 @@ def test_exits_nonzero_when_prices_have_failures(tmp_path, monkeypatch):
         with pytest.raises(SystemExit) as ei:
             update.main()
     assert ei.value.code not in (0, None)
+
+
+def test_require_final_defers_when_not_ready(tmp_path, monkeypatch):
+    _argv(monkeypatch, tmp_path, "--prices", "--require-final")
+    from cotdata import update
+    with mock.patch("cotdata.providers.norgate.finals_ready", return_value=(False, {"Futures": None})), \
+         mock.patch("cotdata.providers.norgate.update") as m_update:
+        with pytest.raises(SystemExit) as ei:
+            update.main()
+    assert ei.value.code not in (0, None)   # non-zero -> scheduler retries
+    m_update.assert_not_called()            # did NOT capture interim prices
+
+
+def test_require_final_runs_when_ready(tmp_path, monkeypatch):
+    _argv(monkeypatch, tmp_path, "--prices", "--require-final")
+    from cotdata import update
+    with mock.patch("cotdata.providers.norgate.finals_ready", return_value=(True, {})), \
+         mock.patch("cotdata.providers.norgate.update",
+                    return_value={"kind": "prices", "symbols_failed": [], "ok": ["ES"]}) as m_update:
+        update.main()                       # must not raise
+    m_update.assert_called_once()

@@ -22,6 +22,14 @@ def main() -> None:
     p.add_argument("--full", action="store_true",
                    help="Full rebuild of reconstructed volume (ignore the incremental "
                         "60-day window). Use after a reconstruction-logic change.")
+    p.add_argument("--require-final", action="store_true",
+                   help="For --prices: only fetch once Norgate's FINAL futures prices are "
+                        "in (last_database_update_time for 'Futures' and 'Continuous Futures' "
+                        ">= --final-cutoff today). Otherwise defer with a non-zero exit so a "
+                        "scheduler retries. Avoids capturing interim (non-final) bars.")
+    p.add_argument("--final-cutoff", default="20:55", metavar="HH:MM",
+                   help="Local time after which Norgate's futures Finals are expected "
+                        "(default 20:55, ≈ Continuous Futures Final in ET).")
     p.add_argument("--check", action="store_true",
                    help="Print store status (row counts, newest data, staleness) from "
                         "the manifest and exit. Read-only, cross-platform, no network.")
@@ -62,11 +70,20 @@ def main() -> None:
     kinds = []
     last_run = None
     failed_kinds = []  # domains that hard-failed → non-zero exit so a scheduler retries
+    deferred = []      # work skipped because inputs aren't ready yet (also non-zero exit)
     if args.prices:
-        last_run = norgate.update(symbols=args.symbols, full=args.full)
-        kinds.append("prices")
-        if last_run and last_run.get("symbols_failed"):
-            failed_kinds.append("prices")
+        ready = True
+        if args.require_final:
+            ready, detail = norgate.finals_ready(args.final_cutoff)
+            if not ready:
+                print(f"prices: Norgate Finals not in yet (--require-final, cutoff "
+                      f"{args.final_cutoff}) — deferring. {detail}")
+                deferred.append("prices")
+        if ready:
+            last_run = norgate.update(symbols=args.symbols, full=args.full)
+            kinds.append("prices")
+            if last_run and last_run.get("symbols_failed"):
+                failed_kinds.append("prices")
 
     if args.metadata:
         norgate.update_metadata(symbols=args.symbols)
@@ -99,15 +116,18 @@ def main() -> None:
     run = dict(last_run or {})
     run["kinds"] = kinds
     run["failed"] = failed_kinds
+    run["deferred"] = deferred
     run["at"] = _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
     path = status.write_status_file(last_run=run)
     print(f"status written -> {path}")
 
-    # Exit non-zero on a hard failure (source unreachable) so Task Scheduler /
-    # cron can retry. "No new data yet" is NOT a failure — the schedule handles
-    # release timing; this exit code is only for genuine fetch errors.
-    if failed_kinds:
-        raise SystemExit(f"cotdata-update: failed — {', '.join(failed_kinds)}")
+    # Exit non-zero so Task Scheduler / cron retries, either on a hard failure
+    # (source unreachable) or when --require-final deferred because the Finals
+    # aren't in yet. Ordinary "no new data yet" is NOT a failure.
+    if failed_kinds or deferred:
+        parts = ([f"failed: {', '.join(failed_kinds)}"] if failed_kinds else []) + \
+                ([f"deferred: {', '.join(deferred)}"] if deferred else [])
+        raise SystemExit("cotdata-update: " + " | ".join(parts))
 
 if __name__ == "__main__":
     main()

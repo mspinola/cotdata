@@ -290,3 +290,20 @@ def test_full_rebuild_bypasses_incremental_window(mock_price_ts, mock_db_symbols
                     if "-" in c.args[0]]
     assert indiv_starts, "expected at least one individual-contract fetch"
     assert all(s == "1970-01-01" for s in indiv_starts), indiv_starts
+
+
+import datetime as _dt
+def test_finals_ready_pure_logic():
+    from cotdata.providers.norgate import _finals_ready
+    now = _dt.datetime(2026, 7, 15, 21, 30)   # 9:30pm local
+    after  = _dt.datetime(2026, 7, 15, 20, 56)  # updated after 20:55 cutoff
+    before = _dt.datetime(2026, 7, 15, 20, 40)  # updated before cutoff
+    # both DBs refreshed after cutoff -> ready
+    ok, _ = _finals_ready({"Futures": after, "Continuous Futures": after}, "20:55", now)
+    assert ok is True
+    # one DB still on pre-cutoff (interim) data -> not ready
+    ng, _ = _finals_ready({"Futures": after, "Continuous Futures": before}, "20:55", now)
+    assert ng is False
+    # missing update time -> not ready
+    nn, _ = _finals_ready({"Futures": None, "Continuous Futures": after}, "20:55", now)
+    assert nn is False
