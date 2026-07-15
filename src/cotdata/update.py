@@ -61,9 +61,12 @@ def main() -> None:
 
     kinds = []
     last_run = None
+    failed_kinds = []  # domains that hard-failed → non-zero exit so a scheduler retries
     if args.prices:
         last_run = norgate.update(symbols=args.symbols, full=args.full)
         kinds.append("prices")
+        if last_run and last_run.get("symbols_failed"):
+            failed_kinds.append("prices")
 
     if args.metadata:
         norgate.update_metadata(symbols=args.symbols)
@@ -71,27 +74,40 @@ def main() -> None:
 
     if args.cot_legacy or args.cot_all:
         from .providers import cftc
-        cftc.update()
+        r = cftc.update()
         kinds.append("cot_legacy")
+        if not (r or {}).get("ok", True):
+            failed_kinds.append("cot_legacy")
 
     if args.cot_disagg or args.cot_all:
         from .providers import cftc_disagg
-        cftc_disagg.update()
+        r = cftc_disagg.update()
         kinds.append("cot_disagg")
+        if not (r or {}).get("ok", True):
+            failed_kinds.append("cot_disagg")
 
     if args.cot_tff or args.cot_all:
         from .providers import cftc_tff
-        cftc_tff.update()
+        r = cftc_tff.update()
         kinds.append("cot_tff")
+        if not (r or {}).get("ok", True):
+            failed_kinds.append("cot_tff")
 
     # Structured heartbeat for downstream tools: rebuild status.json from the now-
     # updated manifest. Pollers detect new data via newest_data[<domain>].
     from . import status
     run = dict(last_run or {})
     run["kinds"] = kinds
+    run["failed"] = failed_kinds
     run["at"] = _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
     path = status.write_status_file(last_run=run)
     print(f"status written -> {path}")
+
+    # Exit non-zero on a hard failure (source unreachable) so Task Scheduler /
+    # cron can retry. "No new data yet" is NOT a failure — the schedule handles
+    # release timing; this exit code is only for genuine fetch errors.
+    if failed_kinds:
+        raise SystemExit(f"cotdata-update: failed — {', '.join(failed_kinds)}")
 
 if __name__ == "__main__":
     main()
