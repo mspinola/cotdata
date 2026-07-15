@@ -1,8 +1,11 @@
 """Producer CLI:  cotdata-update --prices --symbols ES NQ
-                  cotdata-update --cot
+                  cotdata-update --cot-all
+                  cotdata-update --check        # read-only store status
+                  cotdata-update --reconcile    # prune stale manifest ghosts
 Writes to $COTDATA_STORE. Schedule prices nightly (after the Norgate Data
 Updater) and COT weekly (Friday, after the CFTC release)."""
 import argparse
+import datetime as _dt
 
 from . import config
 
@@ -19,33 +22,76 @@ def main() -> None:
     p.add_argument("--full", action="store_true",
                    help="Full rebuild of reconstructed volume (ignore the incremental "
                         "60-day window). Use after a reconstruction-logic change.")
+    p.add_argument("--check", action="store_true",
+                   help="Print store status (row counts, newest data, staleness) from "
+                        "the manifest and exit. Read-only, cross-platform, no network.")
+    p.add_argument("--reconcile", action="store_true",
+                   help="Prune manifest entries whose parquet file is missing (ghosts "
+                        "from old naming), refresh status.json, and exit. Never touches data.")
     args = p.parse_args()
 
     config.store_root()  # fail fast if COTDATA_STORE unset
-    
+
+    if args.check:
+        from . import status
+        status.print_check()
+        return
+
+    if args.reconcile:
+        from . import store, status
+        pruned = store.reconcile_manifest()
+        if not pruned:
+            print("manifest reconcile: nothing to prune (all entries have files).")
+        else:
+            total = sum(len(v) for v in pruned.values())
+            print(f"manifest reconcile: pruned {total} ghost entr{'y' if total == 1 else 'ies'} "
+                  f"with no parquet file:")
+            for domain, names in sorted(pruned.items()):
+                print(f"  {domain}: {len(names)} removed — {', '.join(names[:8])}"
+                      + (f", … (+{len(names) - 8})" if len(names) > 8 else ""))
+            status.write_status_file(last_run={"kinds": ["reconcile"],
+                                               "at": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"})
+        return
+
     if not (args.prices or args.metadata or args.cot_legacy or args.cot_disagg or args.cot_tff or args.cot_all):
-        p.error("nothing to do — pass --prices, --metadata, --cot-legacy, --cot-disagg, --cot-tff, or --cot-all")
+        p.error("nothing to do — pass --check, --prices, --metadata, --cot-legacy, --cot-disagg, --cot-tff, or --cot-all")
 
     if args.prices or args.metadata:
         from .providers import norgate
-        
+
+    kinds = []
+    last_run = None
     if args.prices:
-        norgate.update(symbols=args.symbols, full=args.full)
-        
+        last_run = norgate.update(symbols=args.symbols, full=args.full)
+        kinds.append("prices")
+
     if args.metadata:
         norgate.update_metadata(symbols=args.symbols)
-        
+        kinds.append("metadata")
+
     if args.cot_legacy or args.cot_all:
         from .providers import cftc
         cftc.update()
-        
+        kinds.append("cot_legacy")
+
     if args.cot_disagg or args.cot_all:
         from .providers import cftc_disagg
         cftc_disagg.update()
-        
+        kinds.append("cot_disagg")
+
     if args.cot_tff or args.cot_all:
         from .providers import cftc_tff
         cftc_tff.update()
+        kinds.append("cot_tff")
+
+    # Structured heartbeat for downstream tools: rebuild status.json from the now-
+    # updated manifest. Pollers detect new data via newest_data[<domain>].
+    from . import status
+    run = dict(last_run or {})
+    run["kinds"] = kinds
+    run["at"] = _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    path = status.write_status_file(last_run=run)
+    print(f"status written -> {path}")
 
 if __name__ == "__main__":
     main()
