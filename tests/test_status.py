@@ -36,6 +36,25 @@ def test_summarize_flags_lagging_entry():
     assert lagging[0][2] == 9
 
 
+def test_ignore_lag_suppresses_hist_codes():
+    # RTY's predecessor code is frozen at 2018 but must NOT be flagged as lagging.
+    m = {
+        "schema_version": 2,
+        "cot_legacy": {
+            "RTY_current": {"last_date": "2026-07-07", "n_rows": 100, "updated_at": "x"},
+            "RTY_23977A":  {"last_date": "2018-06-05", "n_rows": 500, "updated_at": "x"},
+            "NQ_current":  {"last_date": "2020-01-01", "n_rows": 100, "updated_at": "x"},
+        },
+    }
+    today = dt.date(2026, 7, 15)
+    # Without the ignore set, both stale entries are flagged.
+    plain = status.summarize(m, today)["domains"]["cot_legacy"]["lagging"]
+    assert {n for n, _, _ in plain} == {"RTY_23977A", "NQ_current"}
+    # With the hist_code suppressed, only the genuinely-stale current code remains.
+    filt = status.summarize(m, today, ignore_lag={"RTY_23977A"})["domains"]["cot_legacy"]["lagging"]
+    assert {n for n, _, _ in filt} == {"NQ_current"}
+
+
 def test_empty_store_report():
     out = status.format_report({"schema_version": 2}, root="/tmp/store", today=dt.date(2026, 7, 15))
     assert "store is empty" in out

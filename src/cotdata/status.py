@@ -31,9 +31,26 @@ def _parse_date(s: Optional[str]) -> Optional[dt.date]:
         return None
 
 
-def summarize(manifest: dict, today: Optional[dt.date] = None) -> dict:
-    """Pure summary of a manifest — one record per non-empty domain."""
+def hist_code_names() -> set:
+    """Entry names for symbols' predecessor (hist_code) COT contracts, e.g.
+    ``RTY_23977A``. These are retired codes, legitimately frozen at an old date,
+    so they should not be flagged as "lagging". Built from the registry."""
+    from .registry import all_symbols, hist_code_scales
+    names = set()
+    for s in all_symbols():
+        for hc, _ in hist_code_scales(s.hist_codes):
+            names.add(f"{s.internal}_{hc}")
+    return names
+
+
+def summarize(manifest: dict, today: Optional[dt.date] = None,
+              ignore_lag: Optional[set] = None) -> dict:
+    """Pure summary of a manifest — one record per non-empty domain.
+
+    ignore_lag: entry names never reported as lagging (e.g. retired hist_codes,
+    which are frozen by design). They still count toward entries/rows/newest."""
     today = today or dt.date.today()
+    ignore_lag = ignore_lag or set()
     out = {"schema_version": manifest.get("schema_version"),
            "today": today.isoformat(), "domains": {}}
     for domain in _DOMAINS:
@@ -46,6 +63,8 @@ def summarize(manifest: dict, today: Optional[dt.date] = None) -> dict:
         lagging = []
         if newest:
             for name, d in dated.items():
+                if name in ignore_lag:
+                    continue
                 behind = (newest - d).days if d else None
                 if behind is not None and behind > _LAG_DAYS:
                     lagging.append((name, entries[name].get("last_date"), behind))
@@ -62,9 +81,10 @@ def summarize(manifest: dict, today: Optional[dt.date] = None) -> dict:
     return out
 
 
-def format_report(manifest: dict, root: str = "", today: Optional[dt.date] = None) -> str:
+def format_report(manifest: dict, root: str = "", today: Optional[dt.date] = None,
+                  ignore_lag: Optional[set] = None) -> str:
     """Human-readable --check report."""
-    s = summarize(manifest, today)
+    s = summarize(manifest, today, ignore_lag=ignore_lag)
     target = config.SCHEMA_VERSION
     sv = s["schema_version"]
     sv_note = "" if sv == target else f"  ⚠ target {target} — run the producer to migrate"
@@ -100,11 +120,12 @@ def format_report(manifest: dict, root: str = "", today: Optional[dt.date] = Non
 def print_check() -> None:
     """Entry point for ``cotdata-update --check``."""
     root = str(config.store_root())
-    print(format_report(store.load_manifest(), root=root))
+    print(format_report(store.load_manifest(), root=root, ignore_lag=hist_code_names()))
 
 
 def build_status_doc(manifest: dict, last_run: Optional[dict] = None,
-                     today: Optional[dt.date] = None) -> dict:
+                     today: Optional[dt.date] = None,
+                     ignore_lag: Optional[set] = None) -> dict:
     """Machine-readable status document written to ``status.json`` after each run.
 
     Contract for external pollers:
@@ -115,7 +136,7 @@ def build_status_doc(manifest: dict, last_run: Optional[dict] = None,
         key on this only to detect "a run happened".
       * ``last_run`` — outcome of the most recent run (kinds, ok/failed counts).
     """
-    s = summarize(manifest, today)
+    s = summarize(manifest, today, ignore_lag=ignore_lag)
     domains = {
         name: {
             "newest_data": d["newest"],
@@ -141,7 +162,8 @@ def build_status_doc(manifest: dict, last_run: Optional[dict] = None,
 def write_status_file(last_run: Optional[dict] = None) -> str:
     """Rebuild status.json from the current manifest, atomically. Called at the end
     of a producer run so pollers see a consistent snapshot."""
-    doc = build_status_doc(store.load_manifest(), last_run=last_run)
+    doc = build_status_doc(store.load_manifest(), last_run=last_run,
+                           ignore_lag=hist_code_names())
     path = status_path()
     tmp = path.with_suffix(".json.tmp")
     tmp.parent.mkdir(parents=True, exist_ok=True)
