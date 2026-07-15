@@ -159,12 +159,24 @@ C:\path\to\.venv\Scripts\cotdata-update.exe --prices --metadata --require-final
 ::    below keep retrying (cheap no-ops) until Norgate has actually pulled the Finals.
 schtasks /Create /TN "cotdata prices" /TR "C:\path\run-prices.cmd" /SC DAILY /ST 20:55
 
-:: 2) COT — Friday release window: poll every 5 min from 3:25 to 4:00pm ET to catch it fast
-schtasks /Create /TN "cotdata COT (Fri release)" /TR "C:\path\run-cot.cmd" /SC WEEKLY /D FRI /ST 15:25 /RI 5 /ET 16:00
-
-:: 3) COT — daily morning catch-up for holiday-delayed releases and as a safety net
+:: 2) COT — daily morning catch-up for holiday-delayed releases and as a safety net
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "C:\path\run-cot.cmd" /SC DAILY /ST 08:10
 ```
+
+The **Friday release window** needs a *repeating* trigger, which `schtasks` can't express on a weekly schedule (`/ET` and `/DU` are MINUTE/HOURLY only). Create it in PowerShell instead — weekly on Friday at 3:25pm ET, repeating every 5 min for 45 minutes so it catches the ~3:30 release within minutes:
+
+```powershell
+$act = New-ScheduledTaskAction -Execute "C:\path\run-cot.cmd"
+$trg = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Friday -At 3:25PM
+# borrow a repetition pattern (schtasks/New-ScheduledTaskTrigger can't set it directly on a weekly trigger):
+$rep = (New-ScheduledTaskTrigger -Once -At 3:25PM `
+        -RepetitionInterval (New-TimeSpan -Minutes 5) `
+        -RepetitionDuration (New-TimeSpan -Minutes 45)).Repetition
+$trg.Repetition = $rep
+Register-ScheduledTask -TaskName "cotdata COT (Fri release)" -Action $act -Trigger $trg
+```
+
+(Or in the Task Scheduler GUI: New Task → Trigger *Weekly, Friday, 3:25pm* → check *"Repeat task every: 5 minutes for a duration of: 45 minutes."*)
 
 **Event-driven prices with `--require-final`.** cotdata reads two Norgate databases: **Continuous Futures** (the `&ES` / `_CCB` series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Their **Final** prices land ~8:40pm ET (Futures) and ~8:55pm ET (Continuous Futures), but your Norgate Data Updater still has to *pull* them on its next poll. Rather than guess a fixed time, `--require-final` checks `norgatedata.last_database_update_time()` for both databases and only fetches once each has been refreshed at/after `--final-cutoff` (default `20:55` local — set it to your machine's local equivalent of 8:55pm ET). Until then it **defers with a non-zero exit**, so the restart setting below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
 
