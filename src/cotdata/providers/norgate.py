@@ -233,7 +233,13 @@ def update(symbols=None, full: bool = False) -> None:
     than the trailing-60-day incremental update — use it after a reconstruction
     logic change so old rows are recomputed under the new algorithm.
     """
+    import time
+    from .. import status
+
     syms = symbols or [s.internal for s in all_symbols()]
+    prior = store.load_manifest().get("prices", {})  # to report per-symbol date deltas
+    t0 = time.time()
+    ok, failed, total_rows, newest = [], [], 0, None
     for sym in syms:
         try:
             # 1. Back-Adjusted
@@ -246,13 +252,23 @@ def update(symbols=None, full: bool = False) -> None:
             # 3. Volume Reconstruction (Additive)
             out_backadj = _reconstruct_volume(sym, out_backadj, "backadj", full=full)
             out_unadj = _reconstruct_volume(sym, out_unadj, "unadj", full=full)
-            
+
             store.write_prices(sym, "backadj", out_backadj, source="norgate")
             store.write_prices(sym, "unadj", out_unadj, source="norgate")
-            
-            print(f"{sym:5s}: {len(out_backadj):6d} backadj, {len(out_unadj):6d} unadj -> store")
+
+            ok.append(sym)
+            total_rows += len(out_backadj) + len(out_unadj)
+            new = str(out_backadj.index.max().date()) if len(out_backadj) else "—"
+            newest = max(newest, new) if newest else new
+            was = (prior.get(f"{sym}_backadj") or {}).get("last_date")
+            delta = new if (was is None or was == new) else f"{was} -> {new}"
+            print(f"{sym:5s}: {len(out_backadj):6d} backadj, {len(out_unadj):6d} unadj  [{delta}]")
         except Exception as e:  # noqa: BLE001
+            failed.append((sym, e))
             print(f"{sym:5s}: FAILED — {e}")
+
+    print(status.run_summary("prices update", ok, failed, total_rows,
+                             time.time() - t0, newest=newest))
 
 
 def get_symbol_metadata(internal_symbol: str) -> dict | None:

@@ -98,9 +98,12 @@ COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (
 COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggregated (cross-platform)
 COTDATA_STORE=/store  cotdata-update --cot-tff                   # CFTC Traders in Financial Futures (cross-platform)
 COTDATA_STORE=/store  cotdata-update --cot-all                   # Update all CFTC COT pipelines
+COTDATA_STORE=/store  cotdata-update --check                     # Store status (read-only, any platform)
 ```
 
 Schedule nightly (prices, after the Norgate Data Updater) and weekly (COT Friday releases).
+
+Each run prints a per-symbol line (row counts and the date advance, e.g. `ES: … [2026-07-13 -> 2026-07-14]`) and a summary footer (OK/failed counts, rows written, elapsed, newest date). `--check` reports current store status from the manifest — per-domain row counts, newest data date, last write, and any entries lagging behind their peers (a partial-run signal) — without touching the network, so it runs anywhere the store is visible.
 
 ## Design rules
 

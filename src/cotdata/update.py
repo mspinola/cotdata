@@ -1,5 +1,6 @@
 """Producer CLI:  cotdata-update --prices --symbols ES NQ
-                  cotdata-update --cot
+                  cotdata-update --cot-all
+                  cotdata-update --check        # read-only store status
 Writes to $COTDATA_STORE. Schedule prices nightly (after the Norgate Data
 Updater) and COT weekly (Friday, after the CFTC release)."""
 import argparse
@@ -19,12 +20,20 @@ def main() -> None:
     p.add_argument("--full", action="store_true",
                    help="Full rebuild of reconstructed volume (ignore the incremental "
                         "60-day window). Use after a reconstruction-logic change.")
+    p.add_argument("--check", action="store_true",
+                   help="Print store status (row counts, newest data, staleness) from "
+                        "the manifest and exit. Read-only, cross-platform, no network.")
     args = p.parse_args()
 
     config.store_root()  # fail fast if COTDATA_STORE unset
-    
+
+    if args.check:
+        from . import status
+        status.print_check()
+        return
+
     if not (args.prices or args.metadata or args.cot_legacy or args.cot_disagg or args.cot_tff or args.cot_all):
-        p.error("nothing to do — pass --prices, --metadata, --cot-legacy, --cot-disagg, --cot-tff, or --cot-all")
+        p.error("nothing to do — pass --check, --prices, --metadata, --cot-legacy, --cot-disagg, --cot-tff, or --cot-all")
 
     if args.prices or args.metadata:
         from .providers import norgate
