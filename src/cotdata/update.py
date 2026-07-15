@@ -1,6 +1,7 @@
 """Producer CLI:  cotdata-update --prices --symbols ES NQ
                   cotdata-update --cot-all
                   cotdata-update --check        # read-only store status
+                  cotdata-update --reconcile    # prune stale manifest ghosts
 Writes to $COTDATA_STORE. Schedule prices nightly (after the Norgate Data
 Updater) and COT weekly (Friday, after the CFTC release)."""
 import argparse
@@ -24,6 +25,9 @@ def main() -> None:
     p.add_argument("--check", action="store_true",
                    help="Print store status (row counts, newest data, staleness) from "
                         "the manifest and exit. Read-only, cross-platform, no network.")
+    p.add_argument("--reconcile", action="store_true",
+                   help="Prune manifest entries whose parquet file is missing (ghosts "
+                        "from old naming), refresh status.json, and exit. Never touches data.")
     args = p.parse_args()
 
     config.store_root()  # fail fast if COTDATA_STORE unset
@@ -31,6 +35,22 @@ def main() -> None:
     if args.check:
         from . import status
         status.print_check()
+        return
+
+    if args.reconcile:
+        from . import store, status
+        pruned = store.reconcile_manifest()
+        if not pruned:
+            print("manifest reconcile: nothing to prune (all entries have files).")
+        else:
+            total = sum(len(v) for v in pruned.values())
+            print(f"manifest reconcile: pruned {total} ghost entr{'y' if total == 1 else 'ies'} "
+                  f"with no parquet file:")
+            for domain, names in sorted(pruned.items()):
+                print(f"  {domain}: {len(names)} removed — {', '.join(names[:8])}"
+                      + (f", … (+{len(names) - 8})" if len(names) > 8 else ""))
+            status.write_status_file(last_run={"kinds": ["reconcile"],
+                                               "at": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"})
         return
 
     if not (args.prices or args.metadata or args.cot_legacy or args.cot_disagg or args.cot_tff or args.cot_all):

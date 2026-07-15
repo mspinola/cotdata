@@ -34,6 +34,35 @@ def test_prices_roundtrip_and_manifest(store_env):
     assert m["prices"]["ES_backadj"]["last_date"] == "2020-01-05"
 
 
+def test_reconcile_prunes_ghosts_keeps_real(store_env):
+    from cotdata import store
+    # a real cot_legacy entry — writes a parquet file AND a manifest entry
+    idx = pd.date_range("2026-01-06", periods=3, freq="7D", name="Report_Date")
+    store.write_cot_legacy("ES_001602", pd.DataFrame({"Open_Interest_All": [1, 2, 3]}, index=idx), source="test")
+
+    # inject a bare-code ghost (no file) and a retired 'cot' domain (no dir/files)
+    m = store.load_manifest()
+    m["cot_legacy"]["001602"] = {"last_date": "2018-06-05", "n_rows": 10, "source": "cftc", "updated_at": "x"}
+    m["cot"] = {"099741": {"last_date": "2018-01-01", "n_rows": 5, "source": "cftc", "updated_at": "x"}}
+    store._write_manifest(m)
+
+    pruned = store.reconcile_manifest()
+    assert pruned["cot_legacy"] == ["001602"]   # bare ghost pruned
+    assert "cot" in pruned                       # dead domain pruned
+
+    m2 = store.load_manifest()
+    assert "ES_001602" in m2["cot_legacy"]       # real prefixed entry kept
+    assert "001602" not in m2["cot_legacy"]      # ghost gone
+    assert "cot" not in m2                        # emptied domain removed
+
+
+def test_reconcile_noop_when_clean(store_env):
+    from cotdata import store
+    idx = pd.date_range("2026-01-06", periods=2, freq="7D", name="Report_Date")
+    store.write_cot_legacy("ES_001602", pd.DataFrame({"x": [1, 2]}, index=idx), source="test")
+    assert store.reconcile_manifest() == {}      # nothing to prune
+
+
 def test_roll_dates_from_delivery_month(store_env):
     from cotdata import store, roll_dates
     store.write_prices("ES", "backadj", _sample(), source="test")

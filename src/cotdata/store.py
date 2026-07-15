@@ -122,7 +122,51 @@ def _touch_manifest(kind: str, name: str, df: pd.DataFrame, source: str) -> None
         "updated_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
     m["schema_version"] = config.SCHEMA_VERSION
+    _write_manifest(m)
+
+
+def _write_manifest(m: dict) -> None:
     tmp = config.manifest_path().with_suffix(".json.tmp")
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(json.dumps(m, indent=2, sort_keys=True))
     os.replace(tmp, config.manifest_path())
+
+
+# domain -> the directory holding its {name}.parquet files
+_DOMAIN_DIRS = {
+    "prices": config.prices_dir,
+    "metadata": config.metadata_dir,
+    "cot_legacy": config.cot_legacy_dir,
+    "cot_disagg": config.cot_disagg_dir,
+    "cot_tff": config.cot_tff_dir,
+}
+
+
+def _domain_dir(domain: str) -> Path:
+    fn = _DOMAIN_DIRS.get(domain)
+    return fn() if fn else (config.store_root() / domain)  # unknown/dead domain
+
+
+def reconcile_manifest() -> dict:
+    """Prune manifest entries whose parquet file is missing — ghosts left by old
+    naming schemes (bare CFTC codes before the ``{symbol}_{code}`` convention, the
+    retired ``cot`` domain, …) — and drop domains left empty. Returns
+    ``{domain: [pruned names]}``.
+
+    Provably safe: only removes bookkeeping for files that do not exist on disk;
+    never deletes or renames data.
+    """
+    m = load_manifest()
+    pruned: dict = {}
+    for domain in [k for k, v in m.items() if isinstance(v, dict)]:
+        d = _domain_dir(domain)
+        gone = [name for name in m[domain] if not (d / f"{name}.parquet").exists()]
+        if gone:
+            for name in gone:
+                del m[domain][name]
+            pruned[domain] = sorted(gone)
+        if not m[domain]:
+            del m[domain]
+    if pruned:
+        _write_manifest(m)
+    return pruned

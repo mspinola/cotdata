@@ -99,7 +99,10 @@ COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggre
 COTDATA_STORE=/store  cotdata-update --cot-tff                   # CFTC Traders in Financial Futures (cross-platform)
 COTDATA_STORE=/store  cotdata-update --cot-all                   # Update all CFTC COT pipelines
 COTDATA_STORE=/store  cotdata-update --check                     # Store status (read-only, any platform)
+COTDATA_STORE=/store  cotdata-update --reconcile                 # Prune stale manifest ghosts (any platform)
 ```
+
+COT tables are stored per code as **`{symbol}_{code}`** (e.g. `RTY_23977A`), so a symbol's current and predecessor (`hist_codes`) contracts are both attributable to it; `get_cot("RTY")` stitches them. `--reconcile` drops manifest entries whose parquet file is missing — bare-code ghosts and retired domains left by older naming schemes — so `--check` and `status.json` show only real, consistently-prefixed entries. It never touches data (only removes bookkeeping for files that don't exist).
 
 Schedule nightly (prices, after the Norgate Data Updater) and weekly (COT Friday releases).
 
