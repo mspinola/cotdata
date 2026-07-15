@@ -105,6 +105,27 @@ Schedule nightly (prices, after the Norgate Data Updater) and weekly (COT Friday
 
 Each run prints a per-symbol line (row counts and the date advance, e.g. `ES: … [2026-07-13 -> 2026-07-14]`) and a summary footer (OK/failed counts, rows written, elapsed, newest date). `--check` reports current store status from the manifest — per-domain row counts, newest data date, last write, and any entries lagging behind their peers (a partial-run signal) — without touching the network, so it runs anywhere the store is visible.
 
+### `status.json` — new-data signal for downstream tools
+
+Every producer run writes `$COTDATA_STORE/status.json` (atomically, alongside the data), so tools that trigger on fresh data can poll one small structured file instead of scanning the store:
+
+```json
+{
+  "generated_at": "2026-07-15T10:15:24Z",
+  "schema_version": 2,
+  "newest_data": { "prices": "2026-07-14", "cot_legacy": "2026-07-07", "cot_disagg": "2026-07-07", "cot_tff": "2026-07-07" },
+  "domains":     { "prices": { "newest_data": "2026-07-14", "last_write": "2026-07-15T10:15:24Z", "entries": 84, "rows": 829096, "lagging": 0 }, "...": {} },
+  "last_run":    { "kinds": ["prices"], "ok": ["ES", "..."], "symbols_failed": [], "rows": 1658000, "seconds": 88, "at": "2026-07-15T10:15:24Z" }
+}
+```
+
+**Polling contract:**
+- To detect **new data**, compare `newest_data.<domain>` (e.g. `newest_data.prices`, `newest_data.cot_legacy`) against your last-seen value. It advances **only when genuinely new daily data arrives** — a no-op run leaves it unchanged.
+- To detect that **a run happened at all** (new data or not), use `generated_at`.
+- `last_run` carries the most recent run's outcome (which domains, per-symbol failures) for alerting.
+
+Prices and each COT report (`cot_legacy`, `cot_disagg`, `cot_tff`) are separate domains, so a price-triggered tool and a COT-triggered tool each watch their own key.
+
 ## Design rules
 
 ### Why Back-Adjusted vs Unadjusted?

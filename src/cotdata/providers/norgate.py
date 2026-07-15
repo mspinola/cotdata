@@ -267,8 +267,13 @@ def update(symbols=None, full: bool = False) -> None:
             failed.append((sym, e))
             print(f"{sym:5s}: FAILED — {e}")
 
-    print(status.run_summary("prices update", ok, failed, total_rows,
-                             time.time() - t0, newest=newest))
+    seconds = round(time.time() - t0, 1)
+    print(status.run_summary("prices update", ok, failed, total_rows, seconds, newest=newest))
+    return {
+        "kind": "prices", "ok": ok, "failed": [(s, str(e)) for s, e in failed],
+        "symbols_failed": [s for s, _ in failed], "rows": total_rows,
+        "seconds": seconds, "newest": newest,
+    }
 
 
 def get_symbol_metadata(internal_symbol: str) -> dict | None:

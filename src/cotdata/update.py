@@ -4,6 +4,7 @@
 Writes to $COTDATA_STORE. Schedule prices nightly (after the Norgate Data
 Updater) and COT weekly (Friday, after the CFTC release)."""
 import argparse
+import datetime as _dt
 
 from . import config
 
@@ -37,24 +38,40 @@ def main() -> None:
 
     if args.prices or args.metadata:
         from .providers import norgate
-        
+
+    kinds = []
+    last_run = None
     if args.prices:
-        norgate.update(symbols=args.symbols, full=args.full)
-        
+        last_run = norgate.update(symbols=args.symbols, full=args.full)
+        kinds.append("prices")
+
     if args.metadata:
         norgate.update_metadata(symbols=args.symbols)
-        
+        kinds.append("metadata")
+
     if args.cot_legacy or args.cot_all:
         from .providers import cftc
         cftc.update()
-        
+        kinds.append("cot_legacy")
+
     if args.cot_disagg or args.cot_all:
         from .providers import cftc_disagg
         cftc_disagg.update()
-        
+        kinds.append("cot_disagg")
+
     if args.cot_tff or args.cot_all:
         from .providers import cftc_tff
         cftc_tff.update()
+        kinds.append("cot_tff")
+
+    # Structured heartbeat for downstream tools: rebuild status.json from the now-
+    # updated manifest. Pollers detect new data via newest_data[<domain>].
+    from . import status
+    run = dict(last_run or {})
+    run["kinds"] = kinds
+    run["at"] = _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    path = status.write_status_file(last_run=run)
+    print(f"status written -> {path}")
 
 if __name__ == "__main__":
     main()

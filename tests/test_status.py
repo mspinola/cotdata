@@ -54,6 +54,36 @@ def test_schema_mismatch_note():
     assert "target" in out  # warns that on-disk schema is behind the library target
 
 
+def test_build_status_doc_flat_map_and_domains():
+    doc = status.build_status_doc(_manifest(), today=dt.date(2026, 7, 15))
+    # flat newest_data map is the primary polling primitive
+    assert doc["newest_data"]["prices"] == "2026-07-14"
+    assert doc["newest_data"]["cot_legacy"] == "2026-07-07"
+    assert doc["domains"]["prices"]["rows"] == 250
+    assert doc["domains"]["prices"]["lagging"] == 1        # NQ is stale
+    assert doc["schema_version"] == 2
+    assert "generated_at" in doc
+
+
+def test_write_status_file_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("COTDATA_STORE", str(tmp_path))
+    from cotdata import store, status as st
+    import json
+    # seed the store manifest via a real write
+    idx = __import__("pandas").date_range("2026-07-10", periods=3, freq="D", name="Date")
+    df = __import__("pandas").DataFrame({"Open": [1, 2, 3], "High": [1, 2, 3], "Low": [1, 2, 3],
+                                         "Close": [1, 2, 3], "Volume": [1, 2, 3],
+                                         "Open Interest": [1, 2, 3]}, index=idx)
+    store.write_prices("ES", "backadj", df, source="test")
+
+    path = st.write_status_file(last_run={"kinds": ["prices"], "ok": ["ES"], "failed": []})
+    assert path.endswith("status.json")
+    doc = json.loads((tmp_path / "status.json").read_text())
+    assert doc["newest_data"]["prices"] == "2026-07-12"
+    assert doc["last_run"]["kinds"] == ["prices"]
+    assert doc["domains"]["prices"]["entries"] == 1
+
+
 def test_run_summary_ok_and_failed():
     line = status.run_summary("prices update", ok=["ES", "NQ"], failed=[("GC", "boom")],
                               total_rows=1234, seconds=12.0, newest="2026-07-14")

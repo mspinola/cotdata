@@ -5,9 +5,17 @@ so ``--check`` runs anywhere the store is visible.
 from __future__ import annotations
 
 import datetime as dt
+import json
+import os
 from typing import Optional
 
 from . import store, config
+
+STATUS_FILENAME = "status.json"
+
+
+def status_path():
+    return config.store_root() / STATUS_FILENAME
 
 # Domains shown by --check, in report order.
 _DOMAINS = ["prices", "metadata", "cot", "cot_legacy", "cot_disagg", "cot_tff"]
@@ -93,6 +101,53 @@ def print_check() -> None:
     """Entry point for ``cotdata-update --check``."""
     root = str(config.store_root())
     print(format_report(store.load_manifest(), root=root))
+
+
+def build_status_doc(manifest: dict, last_run: Optional[dict] = None,
+                     today: Optional[dt.date] = None) -> dict:
+    """Machine-readable status document written to ``status.json`` after each run.
+
+    Contract for external pollers:
+      * ``newest_data[<domain>]`` — the date of the newest daily data for that
+        domain. Advances ONLY when genuinely new data arrives → key on this to
+        detect "there is new data" (e.g. compare prices vs your last-seen date).
+      * ``generated_at`` — refreshed on every producer run (new data or not) →
+        key on this only to detect "a run happened".
+      * ``last_run`` — outcome of the most recent run (kinds, ok/failed counts).
+    """
+    s = summarize(manifest, today)
+    domains = {
+        name: {
+            "newest_data": d["newest"],
+            "last_write": d["last_write"],
+            "entries": d["entries"],
+            "rows": d["rows"],
+            "lagging": len(d["lagging"]),
+        }
+        for name, d in s["domains"].items()
+    }
+    doc = {
+        "generated_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "schema_version": s["schema_version"],
+        # Flat map for dead-simple polling: domain -> newest data date.
+        "newest_data": {name: d["newest_data"] for name, d in domains.items()},
+        "domains": domains,
+    }
+    if last_run is not None:
+        doc["last_run"] = last_run
+    return doc
+
+
+def write_status_file(last_run: Optional[dict] = None) -> str:
+    """Rebuild status.json from the current manifest, atomically. Called at the end
+    of a producer run so pollers see a consistent snapshot."""
+    doc = build_status_doc(store.load_manifest(), last_run=last_run)
+    path = status_path()
+    tmp = path.with_suffix(".json.tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True))
+    os.replace(tmp, path)
+    return str(path)
 
 
 def run_summary(kind: str, ok: list, failed: list, total_rows: int,
