@@ -234,19 +234,31 @@ def _check_roll_gaps(internal_symbol: str, df: pd.DataFrame) -> bool:
     return False
 
 
+def _to_naive_local(t):
+    """norgatedata returns tz-AWARE local datetimes (e.g. ...-04:00); normalize to
+    naive local so we can compare against a naive local cutoff. Naive inputs (older
+    norgatedata) are assumed already local and passed through."""
+    if t is None:
+        return None
+    if t.tzinfo is not None:
+        t = t.astimezone().replace(tzinfo=None)  # → local wall-clock, drop tzinfo
+    return t
+
+
 def _finals_ready(db_times: dict, cutoff: str = DEFAULT_FINAL_CUTOFF, now=None):
     """Pure core of :func:`finals_ready` — testable without norgatedata.
 
-    db_times maps database name → its last-update datetime (local, or None).
-    Ready when every database was refreshed at/after today's `cutoff` (local HH:MM).
-    Returns (ready: bool, detail: dict)."""
+    db_times maps database name → its last-update datetime (tz-aware or naive local,
+    or None). Ready when every database was refreshed at/after today's `cutoff`
+    (local HH:MM). Returns (ready: bool, detail: dict)."""
     now = now or dt.datetime.now()
     h, m = (int(x) for x in cutoff.split(":"))
     cut = now.replace(hour=h, minute=m, second=0, microsecond=0)
     detail, ready = {}, True
     for db, t in db_times.items():
         detail[db] = t.isoformat() if t else None
-        if t is None or t < cut:
+        tt = _to_naive_local(t)
+        if tt is None or tt < cut:
             ready = False
     detail["cutoff"] = cut.isoformat()
     return ready, detail

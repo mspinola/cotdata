@@ -307,3 +307,18 @@ def test_finals_ready_pure_logic():
     # missing update time -> not ready
     nn, _ = _finals_ready({"Futures": None, "Continuous Futures": after}, "20:55", now)
     assert nn is False
+
+
+def test_finals_ready_handles_tz_aware_times():
+    """norgatedata returns tz-aware datetimes (e.g. -04:00); comparing them against
+    a naive cutoff must not raise, and must evaluate by local wall-clock."""
+    from cotdata.providers.norgate import _finals_ready
+    import datetime as d
+    et = d.timezone(d.timedelta(hours=-4))
+    now = d.datetime(2026, 7, 15, 21, 30)                       # 9:30pm naive local
+    after  = d.datetime(2026, 7, 15, 20, 56, tzinfo=et)          # aware, after 20:55
+    before = d.datetime(2026, 7, 15, 6, 12, tzinfo=et)           # aware, morning update
+    ok, _ = _finals_ready({"Futures": after, "Continuous Futures": after}, "20:55", now)
+    assert ok is True
+    ng, _ = _finals_ready({"Futures": after, "Continuous Futures": before}, "20:55", now)
+    assert ng is False
