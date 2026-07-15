@@ -9,3 +9,7 @@ dist/
 # never commit the data store itself
 /store/
 *.parquet
+
+# macOS
+.DS_Store
+**/.DS_Store
