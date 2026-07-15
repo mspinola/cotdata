@@ -1,116 +1,236 @@
 # cotdata
 
+[![CI](https://github.com/mspinola/cotdata/actions/workflows/python-test.yml/badge.svg)](https://github.com/mspinola/cotdata/actions/workflows/python-test.yml)
 [![PyPI version](https://img.shields.io/pypi/v/cotdata.svg)](https://pypi.org/project/cotdata/)
 [![Python versions](https://img.shields.io/pypi/pyversions/cotdata.svg)](https://pypi.org/project/cotdata/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Canonical data layer for the COT / futures-strategy stack. It exists so that quantitative analysis toolset never fetch data directly. They read a shared, file-based store through a stable API.
+**A local, file-based data layer for futures prices and CFTC Commitments of Traders (COT) positioning.**
 
-```
-        PRODUCER  (runs where each source is reachable)
-   Windows: Norgate export        anywhere: CFTC COT download
-                       │  writes   │
-                       ▼           ▼
-        ┌───────────────────────────────────────┐
-        │  CANONICAL STORE   ($COTDATA_STORE)            │
-        │  prices/*.parquet  cot_legacy/*.parquet        │   ← synced (rsync / Dropbox / S3)
-        │  cot_disagg/*.parquet  manifest.json           │
-        └────────────────────────────────────────────────┘
-                       ▲           ▲   reads (offline, cross-platform)
-        ┌──────────────┴───┐  ┌────┴──────────────┐
-        │   COT analyzer   │  │  analysis toolset │      both:  import cotdata
-        └──────────────────┘  └───────────────────┘
-```
+cotdata separates *fetching* data (a "producer" that talks to vendors) from *using* it (any number of "consumers" that just read Parquet through a small, stable API). Point every tool at one synced store, and none of them ever call a vendor SDK at runtime — so the same data feeds your research, backtests, and dashboards identically, on any OS.
 
-## Installation
+- **One store, many readers.** Consumers `import cotdata` and read; they never touch a vendor SDK. Swapping a data vendor is a producer-only change.
+- **Free COT, optional paid prices.** CFTC Commitments of Traders data (1986–present) downloads free from cftc.gov on any OS. Futures prices/specs come from [Norgate](https://norgatedata.com/) (paid, Windows) and are optional.
+- **Cross-platform reads.** Produce on Windows (for Norgate); read anywhere (Mac/Linux/Windows), offline.
+- **Predecessor stitching.** `get_cot()` transparently stitches migrated CFTC codes (e.g. the Russell 2000) and rescales tick-size changes (e.g. Lumber) into one continuous series.
+- **Atomic writes.** Read the store safely even while the producer is downloading and writing.
+- **New-data signal.** Every run writes a structured `status.json` so downstream tools can poll one file to detect fresh data.
 
-You can install `cotdata` directly from PyPI:
+## Data sources at a glance
+
+| Data | Source | Cost | Runs on |
+|------|--------|------|---------|
+| CFTC COT — legacy / disaggregated / TFF | [cftc.gov](https://www.cftc.gov/) | **Free** | any OS |
+| Futures prices + contract specs | [Norgate Data](https://norgatedata.com/) | Paid subscription | **Windows** (producer only) |
+| *Reading the store* (any of the above) | — | Free | any OS |
+
+## Contents
+
+- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Reading data](#reading-data-consumer) · [Producing data](#producing-data-producer) · [Scheduling on Windows](#scheduling-on-windows-task-scheduler) · [Operations](#operations) · [Concepts & design](#concepts--design) · [Reference: schemas](#reference-data-schemas) · [Reference: COT formats](#reference-cot-formats-explained) · [Diagnostics](#diagnostics) · [Contributing](#contributing) · [License](#license)
+
+## Quickstart
+
+The fastest zero-cost path uses free CFTC COT data — no account, any OS:
+
 ```bash
 pip install cotdata
+export COTDATA_STORE=~/cotdata_store          # where the shared store lives
+cotdata-update --cot-legacy                   # free CFTC download (first run pulls history; cached after)
+python -c "import cotdata; print(cotdata.get_cot('ES').tail())"
 ```
 
-If you are running the **producer machine** on Windows to fetch Norgate data, install with the `norgate` extra:
-```bash
-pip install "cotdata[norgate]"
+That downloads the CFTC Legacy COT history and reads the S&P 500 (ES) positioning back out:
+
+```
+                           Open_Interest_All  Comm_Positions_Long_All  Comm_Positions_Short_All  NonComm_Positions_Long_All  NonComm_Positions_Short_All
+Report_Date_as_MM_DD_YYYY
+2026-06-23                           1980254                  1444102                   1531232                      251385                       286833
+2026-06-30                           1967167                  1422155                   1509889                      249934                       287526
+2026-07-07                           1969636                  1435736                   1502199                      244103                       286994
 ```
 
-## Development
+Futures **prices** additionally require a Norgate subscription on Windows — see [Producing data](#producing-data-producer).
 
-When using Norgate Data one must run this on a Windows machine as Norgate Updater requires Windows.
+## How it works
 
-The downstream analysis toolset can run on any machine (Windows, Mac, Linux) as they only need to read data from the canonical store. 
+The **store is the API boundary** — not Python imports. Producers write Parquet + `manifest.json`; consumers only read. Nobody touches a vendor SDK at app runtime, so swapping a vendor is a producer-only change.
 
-One can create a unified workspace by cloning all repositories into the same parent directory, and installing them into a single virtual environment.
+```
+        PRODUCER  —  runs where each source is reachable
+           Norgate export (Windows)      CFTC COT download (any OS)
+                       │                              │
+                       └──────────────┬───────────────┘
+                                      ▼   write parquet + manifest
+        ┌────────────────────────────────────────────────────────────┐
+        │ CANONICAL STORE   ($COTDATA_STORE)                         │
+        │   prices/   cot_legacy/   cot_disagg/   cot_tff/           │
+        │   metadata/   manifest.json   status.json                  │
+        └────────────────────────────────────────────────────────────┘
+                                      │   read  (offline, any OS)
+                       ┌──────────────┴───────────────┐
+                       ▼                              ▼
+             your signal research        your backtest / dashboards
 
-```bash
-uv venv                                     # create .venv
-uv pip install -e .                         # install cotdata & all deps
-export COTDATA_STORE=/path/to/synced/store  # the shared store
+        both just:  import cotdata      ·      store synced via rsync / Dropbox / S3
 ```
 
-**Producer machine (Windows, Norgate)** — only cotdata + the `norgate` extra:
+The store layout:
 
-```powershell
-uv venv  --python 3.10                      # Tested through norgate's supported python versions.
-uv pip install -e ".[norgate]"              # from the cotdata repo; pulls norgatedata
-$env:COTDATA_STORE = "C:\path\to\store"     # Path to output location
-cotdata-update --prices --symbols ES NQ
-```
-
-Use `uv run <cmd>` to run without activating, or activate with
-`source .venv/bin/activate` (Mac) / `.venv\Scripts\activate` (Windows).
-
-## The contract
-
-The **store is the API boundary** — not Python imports. Producers write Parquet +
-`manifest.json`; consumers only read. Nobody touches a vendor SDK at app runtime.
-Swapping a vendor is a producer-only change.
-
-- `metadata/contract_specs.parquet` — Norgate contract specifications (Tick Size, Point Value, Margin).
-- `prices/{symbol}_{adjustment}.parquet` — Open/High/Low/Close/Volume/Open Interest,
-  tz-naive `Date` index. `adjustment` ∈ {`backadj`, `unadj`}. Close = exchange settlement.
-- `cot_legacy/{code}.parquet` — weekly CFTC Legacy positioning.
-- `cot_disagg/{code}.parquet` — weekly CFTC Disaggregated positioning.
-- `cot_tff/{code}.parquet` — weekly CFTC Traders in Financial Futures positioning.
+- `prices/{symbol}_{adjustment}.parquet` — Open/High/Low/Close/Volume/Open Interest, tz-naive `Date` index. `adjustment` ∈ {`backadj`, `unadj`}. Close = exchange settlement.
+- `cot_legacy/{symbol}_{code}.parquet` — weekly CFTC Legacy positioning.
+- `cot_disagg/{symbol}_{code}.parquet` — weekly CFTC Disaggregated positioning.
+- `cot_tff/{symbol}_{code}.parquet` — weekly CFTC Traders in Financial Futures positioning.
+- `metadata/contract_specs.parquet` — Norgate contract specifications (tick size, point value, margin).
 - `manifest.json` — per-table `last_date`, `n_rows`, `source`, `updated_at`, `schema_version`.
+- `status.json` — machine-readable new-data signal for downstream tools (see [Operations](#operations)).
 
-## Consumer
+## Reading data (consumer)
+
+Set `COTDATA_STORE` to the synced store directory, then:
 
 ```python
 import cotdata
-df = cotdata.get_prices("ES", adjustment="backadj")   # USE THIS FOR SIGNALS + STOPS
-sz = cotdata.get_prices("ES", adjustment="unadj")     # USE FOR POSITION SIZING / POINT VALUE
-cot_legacy = cotdata.get_cot("ES", report="legacy")   # USE FOR COMM/NON-COMM
-cot_disagg = cotdata.get_cot("ES", report="disagg")   # USE FOR TRADER COUNTS (MM/SD/OR)
-cot_tff = cotdata.get_cot("ES", report="tff")         # USE FOR TRADER COUNTS (FINANCIALS)
+
+# Prices — pick the adjustment that matches your use:
+signals = cotdata.get_prices("ES", adjustment="backadj")  # signals + stops (gap-free rolls)
+sizing  = cotdata.get_prices("ES", adjustment="unadj")    # position sizing (true dollar prices)
+
+# COT — three CFTC report families:
+legacy  = cotdata.get_cot("ES", report="legacy")   # Commercial / Non-Commercial
+disagg  = cotdata.get_cot("ES", report="disagg")   # Managed Money, Swap Dealers, ... (commodities)
+tff     = cotdata.get_cot("ES", report="tff")      # Leveraged Funds, Asset Managers, ... (financials)
 ```
 
-Set `COTDATA_STORE` to the synced store directory. 
-
-**Predecessor Stitching & Scaling:** The `get_cot()` function doesn't just read a file; it dynamically stitches historical CFTC codes for contracts that migrated exchanges (like the Russell 2000) or rescales data for contracts that changed tick sizes (like Lumber). Downstream models see one clean, continuous asset.
-
-## Producer (run on the machine that can reach the source)
+A price frame (`get_prices("ES", adjustment="backadj").tail(3)`):
 
 ```
-COTDATA_STORE=/store  cotdata-update --prices --symbols ES NQ    # Norgate (Windows)
-COTDATA_STORE=/store  cotdata-update --metadata                  # Norgate Metadata (Windows)
-COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (cross-platform)
-COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggregated (cross-platform)
-COTDATA_STORE=/store  cotdata-update --cot-tff                   # CFTC Traders in Financial Futures (cross-platform)
-COTDATA_STORE=/store  cotdata-update --cot-all                   # Update all CFTC COT pipelines
-COTDATA_STORE=/store  cotdata-update --check                     # Store status (read-only, any platform)
-COTDATA_STORE=/store  cotdata-update --reconcile                 # Prune stale manifest ghosts (any platform)
+               Open     High      Low    Close     Volume  Open Interest
+Date
+2026-07-10  7587.25  7628.75  7552.75  7620.25  1078031.0      1966297.0
+2026-07-13  7607.00  7615.25  7547.25  7563.00  1274520.0      1945908.0
+2026-07-14  7557.00  7613.75  7531.50  7591.25  1139735.0            0.0
 ```
 
-COT tables are stored per code as **`{symbol}_{code}`** (e.g. `RTY_23977A`), so a symbol's current and predecessor (`hist_codes`) contracts are both attributable to it; `get_cot("RTY")` stitches them. `--reconcile` drops manifest entries whose parquet file is missing — bare-code ghosts and retired domains left by older naming schemes — so `--check` and `status.json` show only real, consistently-prefixed entries. It never touches data (only removes bookkeeping for files that don't exist).
+**Predecessor stitching & scaling:** `get_cot()` doesn't just read a file — it stitches historical CFTC codes for contracts that migrated exchanges (e.g. the Russell 2000) and rescales data for contracts that changed tick sizes (e.g. Lumber), so downstream models see one clean, continuous asset.
 
-Schedule nightly (prices, after the Norgate Data Updater) and weekly (COT Friday releases).
+## Producing data (producer)
 
-Each run prints a per-symbol line (row counts and the date advance, e.g. `ES: … [2026-07-13 -> 2026-07-14]`) and a summary footer (OK/failed counts, rows written, elapsed, newest date). `--check` reports current store status from the manifest — per-domain row counts, newest data date, last write, and any entries lagging behind their peers (a partial-run signal) — without touching the network, so it runs anywhere the store is visible.
+Run on the machine that can reach the source. Norgate prices require Windows; CFTC COT runs anywhere.
+
+```bash
+COTDATA_STORE=/store  cotdata-update --prices                    # Norgate prices, ALL registry symbols (Windows)
+COTDATA_STORE=/store  cotdata-update --prices --symbols ES NQ    # ...or a subset
+COTDATA_STORE=/store  cotdata-update --metadata                  # Norgate contract specs (Windows)
+COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (any OS)
+COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggregated (any OS)
+COTDATA_STORE=/store  cotdata-update --cot-tff                   # CFTC Traders in Financial Futures (any OS)
+COTDATA_STORE=/store  cotdata-update --cot-all                   # all three CFTC COT reports
+```
+
+`--prices` with no `--symbols` updates every symbol in the registry; add `--symbols` to scope it. Each run prints a per-symbol line with the date advance (e.g. `ES: … [2026-07-13 -> 2026-07-14]`) and a summary footer (OK/failed counts, rows written, elapsed, newest date). A run **exits non-zero** if a fetch hard-fails (Norgate/CFTC unreachable), so a scheduler can retry — see [Scheduling on Windows](#scheduling-on-windows-task-scheduler).
+
+### Installation for the producer
+
+```bash
+pip install "cotdata[norgate]"     # adds the norgatedata dependency (Windows)
+```
+
+The `norgatedata` package talks locally to the Norgate Data Updater application — there are no API keys. You just need the Updater installed, authenticated, and running.
+
+### Scheduling on Windows (Task Scheduler)
+
+The goal: **prices daily**, and **COT caught within minutes of its Friday ~3:30pm ET release** while surviving holiday delays. Two properties make this simple:
+
+- **Idempotent.** `cotdata-update --cot-*` HEAD-checks each CFTC year zip and skips it if unchanged, so re-running is cheap. Running before the release lands is a harmless no-op; the first run *after* it lands picks it up.
+- **Fails loudly.** A run exits non-zero only on a hard fetch error (source unreachable) — *not* when there's simply no new data yet. So Task Scheduler's "restart on failure" retries real errors without firing on ordinary "nothing new" runs.
+
+Create **two** wrapper scripts — they run *different* commands. Each sets `COTDATA_STORE` and calls the venv's `cotdata-update`.
+
+> **Replace the `<...>` placeholders with your real paths** — in *both* the wrapper files below *and* the task commands further down. `<STORE>` = your synced store, `<VENV>` = your virtualenv, `<DIR>` = the folder holding these `.cmd` files. Example values: `<STORE>` = `\\Mac\code\cotdata_store`, `<VENV>` = `C:\Users\you\code\cotdata\.venv`.
+
+`run-prices.cmd` — prices (with `--require-final`, so it runs only once Norgate's **Final** prices are in, not interim bars):
+
+```bat
+@echo off
+set COTDATA_STORE=<STORE>
+"<VENV>\Scripts\cotdata-update.exe" --prices --metadata --require-final
+```
+
+`run-cot.cmd` — COT (note the **different** command, `--cot-all`):
+
+```bat
+@echo off
+set COTDATA_STORE=<STORE>
+"<VENV>\Scripts\cotdata-update.exe" --cot-all
+```
+
+Then create three tasks — times are the **machine's local** time; convert from ET if it isn't on Eastern:
+
+```bat
+:: 1) Prices — fire at the Continuous Futures Final (~8:55pm ET); --require-final + restart
+::    below keep retrying (cheap no-ops) until Norgate has actually pulled the Finals.
+schtasks /Create /TN "cotdata prices" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55
+
+:: 2) COT — daily morning catch-up for holiday-delayed releases and as a safety net
+schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
+```
+
+The **Friday release window** needs a *repeating* trigger, which `schtasks` can't express on a weekly schedule (`/ET` and `/DU` are MINUTE/HOURLY only). Create it in PowerShell instead — weekly on Friday at 3:25pm ET, repeating every 2 min for 45 minutes so it catches the ~3:30 release within a couple of minutes:
+
+```powershell
+$act = New-ScheduledTaskAction -Execute "<DIR>\run-cot.cmd"
+$trg = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Friday -At 3:25PM
+# borrow a repetition pattern (schtasks/New-ScheduledTaskTrigger can't set it directly on a weekly trigger):
+$rep = (New-ScheduledTaskTrigger -Once -At 3:25PM `
+        -RepetitionInterval (New-TimeSpan -Minutes 2) `
+        -RepetitionDuration (New-TimeSpan -Minutes 45)).Repetition
+$trg.Repetition = $rep
+Register-ScheduledTask -TaskName "cotdata COT (Fri release)" -Action $act -Trigger $trg
+```
+
+(Or in the Task Scheduler GUI: New Task → Trigger *Weekly, Friday, 3:25pm* → check *"Repeat task every: 2 minutes for a duration of: 45 minutes."*)
+
+**Event-driven prices with `--require-final`.** cotdata reads two Norgate databases: **Continuous Futures** (the `&ES` / `_CCB` series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Their **Final** prices land ~8:40pm ET (Futures) and ~8:55pm ET (Continuous Futures), but your Norgate Data Updater still has to *pull* them on its next poll. Rather than guess a fixed time, `--require-final` checks `norgatedata.last_database_update_time()` for both databases and only fetches once each has been refreshed at/after `--final-cutoff` (default `20:55` local — set it to your machine's local equivalent of 8:55pm ET). Until then it **defers with a non-zero exit**, so the restart setting below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
+
+**Retry / wait via restart-on-failure.** Give each task a *restart on failure* — it does double duty: it retries transient fetch errors, and (for the price task) waits out the gap between 8:55pm and NDU actually pulling the Finals (each retry is a cheap `last_database_update_time` check that exits immediately until ready). On a genuine no-session day the retries simply exhaust, harmlessly. `schtasks` can't set this, so use PowerShell (applies to all three tasks):
+
+```powershell
+$s = New-ScheduledTaskSettingsSet -RestartInterval (New-TimeSpan -Minutes 10) -RestartCount 6
+foreach ($t in "cotdata prices","cotdata COT (Fri release)","cotdata COT (catch-up)") {
+    Set-ScheduledTask -TaskName $t -Settings $s
+}
+```
+
+(GUI equivalent: each task → **Settings** tab → *"If the task fails, restart every: 10 minutes"*, *"Attempt to restart up to: 6 times."*)
+
+**View / manage the jobs** any time in the Windows **Task Scheduler** GUI — press `Win + R` and run `taskschd.msc`, or open *Task Scheduler* from the Start menu — then look under **Task Scheduler Library** for the `cotdata …` tasks.
+
+**Monitoring:** after any run, `status.json` reflects `newest_data.<domain>` and `last_run.symbols_failed` — poll it to confirm the Friday COT actually advanced, or to alert on failures (see [Operations](#operations)).
+
+> The Friday window intentionally over-polls (every 2 minutes across a 45-minute window); idempotency makes every run after the release lands a no-op. If you'd rather actively wait out *late* releases, a wrapper can loop until `status.json`'s `newest_data.cot_legacy` reaches the expected Tuesday — but daily catch-up already covers holiday slips with far less machinery.
+
+## Operations
+
+Read-only and maintenance commands, all cross-platform (they work off the store, no network):
+
+```bash
+cotdata-update --check       # store status: row counts, newest data, staleness
+cotdata-update --reconcile   # prune stale manifest entries (see below)
+```
+
+`--check` reports per-domain row counts, newest data date, last write, and any entries lagging behind their peers (a partial-run signal):
+
+```
+domain       entries         rows   newest data      last write (UTC)  behind
+prices            84      829,096    2026-07-14  2026-07-15T10:15:24Z      1d
+cot_legacy        44       70,201    2026-07-07  2026-07-14T04:26:55Z      8d
+...
+✓ all entries current (none lag behind their domain's newest).
+```
 
 ### `status.json` — new-data signal for downstream tools
 
-Every producer run writes `$COTDATA_STORE/status.json` (atomically, alongside the data), so tools that trigger on fresh data can poll one small structured file instead of scanning the store:
+Every producer run writes `$COTDATA_STORE/status.json` (atomically, beside the data), so tools that trigger on fresh data poll one small structured file instead of scanning the store:
 
 ```json
 {
@@ -127,75 +247,54 @@ Every producer run writes `$COTDATA_STORE/status.json` (atomically, alongside th
 - To detect that **a run happened at all** (new data or not), use `generated_at`.
 - `last_run` carries the most recent run's outcome (which domains, per-symbol failures) for alerting.
 
-Prices and each COT report (`cot_legacy`, `cot_disagg`, `cot_tff`) are separate domains, so a price-triggered tool and a COT-triggered tool each watch their own key.
+Prices and each COT report are separate domains, so a price-triggered tool and a COT-triggered tool each watch their own key.
 
-## Design rules
+### `--reconcile` — manifest hygiene
 
-### Why Back-Adjusted vs Unadjusted?
+COT tables are stored per code as **`{symbol}_{code}`** (e.g. `RTY_23977A`), so a symbol's current and predecessor (`hist_codes`) contracts are both attributable to it. `--reconcile` drops manifest entries whose parquet file is missing — bare-code ghosts and retired domains left by older naming schemes — so `--check` and `status.json` show only real, consistently-named entries. It never touches data (only removes bookkeeping for files that don't exist).
 
-Futures contracts expire, forcing traders to "roll" into the next contract, which usually trades at a slightly different price. Simply stitching these contracts together creates artificial price gaps.
+## Concepts & design
 
-- **`backadj` (for signals & stops)**: Uses gap-free arithmetic rolls. This mathematically shifts historical prices backward to align with the new contract, preserving the *true shape* and percentage moves of the market. You must use this for technical indicators, trade signals, and stop-losses to avoid false triggers on rollover gaps.
-- **`unadj` (for position sizing)**: Because back-adjustment shifts historical prices (sometimes into the negative), you cannot use it to calculate true dollar values. You must use `unadj` (raw, real-life) data for that exact day to calculate your true dollar risk and decide exactly how many contracts to buy.
+### Back-adjusted vs unadjusted prices
 
-### Providers & Authentication
+Futures contracts expire, forcing traders to "roll" into the next contract, which usually trades at a slightly different price. Simply stitching contracts together creates artificial price gaps, so cotdata stores two series:
 
-**Norgate Data (Primary)**: 
-There are no API keys to configure in Python. The `norgatedata` Python package communicates locally with the Norgate Data Updater application. You simply need to have the Norgate Data Updater installed, authenticated, and running in the background on your Windows machine.
+- **`backadj` (signals & stops).** Gap-free arithmetic rolls shift historical prices to align with the new contract, preserving the *true shape* and percentage moves. Use this for indicators, signals, and stop-losses to avoid false triggers on rollover gaps.
+- **`unadj` (position sizing).** Back-adjustment shifts historical prices (sometimes negative), so you can't use it for dollar values. Use `unadj` (raw, real-life prices) for that day to compute true dollar risk and contract counts.
 
-**Databento (Dormant/Intraday)**: 
-Databento is kept as a dormant provider because it works well and can be leveraged for intraday data. If you wish to use it, you must provide your API key via the `DATABENTO_API_KEY` environment variable:
+### Providers & authentication
+
+- **Norgate Data (primary prices).** No Python API keys — the `norgatedata` package talks locally to the Norgate Data Updater app, which must be installed, authenticated, and running on Windows.
+- **Databento (dormant / intraday).** Kept as a dormant provider for potential intraday use. If enabled, provide `DATABENTO_API_KEY` via the environment.
+
+### The symbol registry
+
+The supported futures contracts are defined in a YAML registry, so adding a market needs no code:
+
+- **Add a market:** edit `src/cotdata/registry.yaml` under its asset class. The registry handles metadata like `is_equity` and predecessor `hist_codes`.
+- **Centralize it:** set `COTDATA_REGISTRY` to a shared `registry.yaml` (e.g. inside `$COTDATA_STORE`) so producer and consumers use identical asset definitions without a `git pull`.
+
+### Atomic store
+
+The store uses **atomic writes** (write-temp-then-rename). Consumers can safely query via `get_prices` / `get_cot` even while `cotdata-update` is actively downloading and writing.
+
+## Local development
+
 ```bash
-export DATABENTO_API_KEY="your_api_key_here"
+uv venv                                     # create .venv
+uv pip install -e .                         # install cotdata + deps
+export COTDATA_STORE=/path/to/synced/store  # the shared store
+uv run pytest                               # run the tests
 ```
 
-### Parameterizing the Asset List
+On the Windows producer, install the Norgate extra with `uv pip install -e ".[norgate]"` (tested on Python 3.10, within Norgate's supported versions). Use `uv run <cmd>`, or activate with `source .venv/bin/activate` (Mac/Linux) / `.venv\Scripts\activate` (Windows).
 
-The list of supported futures contracts (the symbol registry) is dynamically loaded from a YAML configuration file, making it easy to add new markets without touching any Python code.
+## Reference: Data schemas
 
-- **Adding a Market**: Simply edit `cotdata/src/cotdata/registry.yaml` and add the new market under its respective Asset Class (e.g., Copper or Cocoa). The system natively handles metadata such as `is_equity` and complex `hist_codes` structures.
-- **Environment Override**: The `COTDATA_REGISTRY` environment variable allows you to point to a centralized `registry.yaml` file. For instance, you could place your `registry.yaml` inside your synced `$COTDATA_STORE`. This ensures both your Windows producer and Mac consumer are always looking at the exact same asset definitions, without needing to `git pull` the Python repository.
-
-## Atomic Store
-
-The store uses **atomic writes**. Consumers can safely query the store via `get_prices` or `get_cot` even while `cotdata-update` is actively downloading and writing new data.
-
-## Diagnostics
-
-You can verify your Norgate subscription's data quality and system configuration using the included smoke test script. Run it on your Windows producer machine:
-```bash
-python tests/test_adjustment.py
-```
-This diagnostic script tests:
-1. **Local Communication**: Verifies that Python can successfully communicate with the Norgate Data Updater running in the background.
-2. **Subscription Access**: Validates that your Norgate subscription is active and has the required CME futures data package enabled.
-3. **Roll Gap Validation**: Mathematically proves whether your Norgate Data Updater is configured globally to return back-adjusted or unadjusted continuous contracts. It hunts for artificial calendar-spread gaps at contract roll dates to ensure you are receiving gap-free, continuous data, which is absolutely vital for accurate stop-loss modeling.
-
-## COT Formats Explained
-
-The CFTC publishes positioning data in three distinct formats. `cotdata` manages all three to ensure complete market coverage and the deepest possible historical backtesting.
-
-1. **Legacy Format (1986–Present)**
-   - **Scope:** All markets.
-   - **Categories:** Divides traders broadly into **Commercial** (hedgers) and **Non-Commercial** (large speculators). 
-   - **Use Case:** This is the original format. While its broad categories make it less precise for modern analysis, it is the only format that provides data prior to 2006, making it essential for long-term historical backtesting.
-
-2. **Disaggregated Format (DIS) (2006–Present)**
-   - **Scope:** Physical commodities only (Agriculture, Energy, Metals).
-   - **Categories:** Splits traders into four granular groups: **Producer/Merchant** (classic hedgers), **Swap Dealers** (financial intermediaries), **Managed Money** (hedge funds / CTAs), and **Other Reportables**.
-   - **Use Case:** Provides a much clearer view of the "Smart Money" (Managed Money) in commodity markets.
-
-3. **Traders in Financial Futures (TFF) (2006–Present)**
-   - **Scope:** Financial markets only (Equities, Rates, Currencies).
-   - **Categories:** The financial counterpart to Disaggregated. Splits traders into: **Dealer/Intermediary** (sell-side), **Asset Manager** (pension/mutual funds), **Leveraged Funds** (hedge funds / CTAs), and **Other Reportables**.
-   - **Use Case:** The definitive source for tracking speculative flow (Leveraged Funds) in financial markets.
-
-## Data Schemas
-
-The canonical store uses standard Parquet files. When loaded into a pandas DataFrame (e.g., via `pd.read_parquet()`), they conform to the following schemas.
+The canonical store uses standard Parquet files. Loaded with `pd.read_parquet()`, they conform to the following schemas.
 
 ### Price Data (`prices/{symbol}_{adjustment}.parquet`)
-The primary source for price history (Norgate Data). Indexed by tz-naive `Date`. The pipeline automatically downloads both the back-adjusted (`backadj`) series for signals/stops and the unadjusted (`unadj`) series for true transaction cost modeling.
+Primary price history (Norgate Data), indexed by tz-naive `Date`. The pipeline downloads both the back-adjusted (`backadj`) series for signals/stops and the unadjusted (`unadj`) series for true transaction-cost modeling.
 
 **Reading reconstructed volume:** the reconstruction columns below are internal storage. Consumers should not read `Volume_Reconstructed` directly — call `get_prices(symbol, volume="reconstructed")` and the `Volume` column is served as reconstructed-with-per-row-raw-fallback, plus a `Volume_Source` column for audit. The default `volume="front"` returns the front-month series unchanged (byte-identical to the pre-v2 API). See `docs/plan_promote_reconstructed_volume.md`.
 
@@ -217,7 +316,7 @@ The primary source for price history (Norgate Data). Indexed by tz-naive `Date`.
 | `Delivery Month` | float | Expiration month of the active contract (e.g. `202609`). Used to detect contract rolls. |
 
 ### Contract Specifications (`metadata/contract_specs.parquet`)
-The primary source for contract metadata (Norgate Data). Used for exact point-value risk sizing and transaction cost models.
+Contract metadata (Norgate Data), used for exact point-value risk sizing and transaction cost models.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -233,14 +332,14 @@ The primary source for contract metadata (Norgate Data). Used for exact point-va
 | `Currency` | string | Base currency of the contract. |
 | `Margin` | float | Initial margin requirement (if provided by Norgate). |
 
-### COT Legacy Data (`cot_legacy/{code}.parquet`)
-The primary source for Legacy positioning data (CFTC Legacy Futures Report). **History starts in 1986.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+### COT Legacy Data (`cot_legacy/{symbol}_{code}.parquet`)
+Legacy positioning data (CFTC Legacy Futures Report). **History starts in 1986.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
-> **Legacy Reports**: The Legacy reports are broken down by exchange. These reports have a futures only report and a combined futures and options report. Legacy reports break down the reportable open interest positions into two classifications: non-commercial and commercial traders. The `cotdata` pipeline strictly downloads the **Futures-only** reports (located at `https://www.cftc.gov/files/dea/history/dea_fut_xls_{YEAR}.zip`).
+> **Legacy Reports**: broken down by exchange, with futures-only and combined futures-and-options variants. Legacy classifies reportable open interest into non-commercial and commercial traders. The `cotdata` pipeline strictly downloads the **Futures-only** reports (`https://www.cftc.gov/files/dea/history/dea_fut_xls_{YEAR}.zip`).
 
 > [!NOTE]
-> **Column Subset**: While the raw CFTC `.xls` files contain [well over 100 columns](https://www.cftc.gov/MarketReports/CommitmentsofTraders/HistoricalViewable/cotvariableslegacy.html) (including spreading, concentration ratios, etc.), the producer pipeline explicitly discards them. The parquet files only maintain the exact 15-column subset listed below to keep the file sizes extremely small and strictly focused on what the downstream models require. To include additional data points from the raw reports, simply add the exact CFTC column name to the `TARGET_COLS` list inside `src/cotdata/providers/cftc.py`.
+> **Column Subset**: The raw CFTC `.xls` files contain [well over 100 columns](https://www.cftc.gov/MarketReports/CommitmentsofTraders/HistoricalViewable/cotvariableslegacy.html); the pipeline keeps the focused 15-column subset below to keep files small. To include more, add the exact CFTC column name to `TARGET_COLS` in `src/cotdata/providers/cftc.py`.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -260,17 +359,43 @@ The primary source for Legacy positioning data (CFTC Legacy Futures Report). **H
 | `Traders_NonComm_Long_All` | float | Number of Non-Commercial Long traders. |
 | `Traders_NonComm_Short_All` | float | Number of Non-Commercial Short traders. |
 
-### COT Disaggregated Data (`cot_disagg/{code}.parquet`)
-The primary source for entity-specific positioning and trader counts (CFTC Disaggregated Futures-Only Report). **History starts in 2006.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
+### COT Disaggregated Data (`cot_disagg/{symbol}_{code}.parquet`)
+Entity-specific positioning and trader counts (CFTC Disaggregated Futures-Only Report). **History starts in 2006.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
-> **Lossless Image**: Unlike the Legacy schema which filters down to 10 specific columns, the Disaggregated parquets are a **lossless image** of the source CFTC `txt` files. They contain all granular entity groups (Money Manager, Swap Dealer, Producer/Merchant, Other Reportable) and their respective `Traders_*` counts (e.g., `Traders_Tot_All`, `Traders_M_Money_Long_All`). This is the required store for computing Position Size and Clustering metrics.
+> **Lossless Image**: Unlike the filtered Legacy schema, the Disaggregated parquets are a **lossless image** of the source CFTC `txt` files — all granular entity groups (Money Manager, Swap Dealer, Producer/Merchant, Other Reportable) and their `Traders_*` counts. Required for computing Position Size and Clustering metrics.
 
-### COT Traders in Financial Futures (TFF) Data (`cot_tff/{code}.parquet`)
-The primary source for entity-specific positioning and trader counts for Financial markets (CFTC Traders in Financial Futures Futures-Only Report). **History starts in 2006.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
-
-> [!NOTE]
-> **Financials Counterpart**: TFF is the exact counterpart to Disaggregated reports, used exclusively for financial markets (Equities, FX, Rates) which do not have Disaggregated reports.
+### COT Traders in Financial Futures (TFF) Data (`cot_tff/{symbol}_{code}.parquet`)
+Entity-specific positioning and trader counts for financial markets (CFTC TFF Futures-Only Report). **History starts in 2006.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
-> **Lossless Image**: Like Disaggregated, TFF parquets are a **lossless image** of the source CFTC `txt` files. They contain the financial entity groups (`Dealer`, `Asset_Mgr`, `Lev_Money`, `Other_Rept`) and their respective `Traders_*` counts. This is the required store for computing Position Size and Clustering metrics for financial assets.
+> **Financials Counterpart**: TFF is the exact counterpart to Disaggregated, used for financial markets (Equities, FX, Rates), which have no Disaggregated report.
+
+> [!NOTE]
+> **Lossless Image**: Like Disaggregated, TFF parquets are a **lossless image** of the source CFTC `txt` files — the financial entity groups (`Dealer`, `Asset_Mgr`, `Lev_Money`, `Other_Rept`) and their `Traders_*` counts.
+
+## Reference: COT formats explained
+
+The CFTC publishes positioning data in three formats; `cotdata` manages all three for complete coverage and the deepest history.
+
+1. **Legacy (1986–Present)** — *all markets.* Divides traders into **Commercial** (hedgers) and **Non-Commercial** (large speculators). The only format with pre-2006 data, so it's essential for long-term backtesting.
+2. **Disaggregated / DIS (2006–Present)** — *physical commodities only* (Agriculture, Energy, Metals). Splits traders into **Producer/Merchant**, **Swap Dealers**, **Managed Money**, and **Other Reportables** — a clearer view of "smart money" (Managed Money) in commodities.
+3. **Traders in Financial Futures / TFF (2006–Present)** — *financial markets only* (Equities, Rates, Currencies). Splits traders into **Dealer/Intermediary**, **Asset Manager**, **Leveraged Funds**, and **Other Reportables** — the definitive source for speculative flow (Leveraged Funds) in financials.
+
+## Diagnostics
+
+Verify your Norgate subscription and configuration with the included smoke test, on the Windows producer:
+
+```bash
+python tests/test_adjustment.py
+```
+
+It checks: (1) **Local communication** — Python can reach the Norgate Data Updater; (2) **Subscription access** — your subscription includes the required CME futures package; (3) **Roll-gap validation** — proves whether the Updater is returning back-adjusted (gap-free) vs unadjusted continuous contracts, by hunting for calendar-spread gaps at roll dates. Gap-free data is vital for accurate stop-loss modeling.
+
+## Contributing
+
+Issues and pull requests are welcome. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, and conventions. When filing a bug, include your OS — Norgate features require Windows, while store reads and CFTC COT run anywhere.
+
+## License
+
+Released under the MIT License — see [LICENSE](LICENSE).

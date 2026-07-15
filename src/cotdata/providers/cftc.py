@@ -99,12 +99,16 @@ def _parse_zip(zip_path: Path) -> pd.DataFrame:
     return df
 
 
-def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
+def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> dict:
     """Download + parse CFTC Legacy futures COT; write full per-code history.
 
     codes: iterable of CFTC codes; default = all registry codes.
     Rebuilds the complete per-code table each run (parse is cheap; downloads are
     cached and skip when unchanged). Incremental append is a future optimization.
+
+    Returns a result dict {"kind", "ok", "wrote"}. ``ok`` is False only on a hard
+    failure to fetch the *current* year (the file a new release lands in) — so a
+    scheduler can retry a real outage without treating "no new data yet" as failure.
     """
     code_to_sym = {}
     for s in all_symbols():
@@ -120,20 +124,26 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
         want = set(code_to_sym.keys())
 
     frames = []
+    latest_ok = True
     for year in range(first_year, last_year + 1):
         zp = _download_year(year)
         if zp is None:
+            if year == last_year:
+                latest_ok = False  # couldn't fetch the current year — may have missed a release
             continue
         try:
             frames.append(_parse_zip(zp))
         except Exception as e:  # noqa: BLE001
             print(f"  {year}: parse failed — {e}")
+            if year == last_year:
+                latest_ok = False
 
     if not frames:
         print("cftc: no data parsed")
-        return
+        return {"kind": "cot_legacy", "ok": False, "wrote": 0}
 
     allrows = pd.concat(frames, ignore_index=True)
+    wrote = 0
     for code in sorted(want):
         sub = allrows[allrows[CONTRACT_CODE] == code].copy()
         if sub.empty:
@@ -143,4 +153,6 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
         sym_name = code_to_sym.get(code)
         file_name = f"{sym_name}_{code}" if sym_name else code
         store.write_cot_legacy(file_name, sub, source="cftc")
+        wrote += 1
         print(f"{file_name}: {len(sub):5d} weeks (legacy) -> store")
+    return {"kind": "cot_legacy", "ok": latest_ok, "wrote": wrote}

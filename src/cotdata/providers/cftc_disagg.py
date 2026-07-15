@@ -84,11 +84,12 @@ def _parse_zip(zip_path: Path) -> pd.DataFrame:
     return df
 
 
-def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
+def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> dict:
     """Download + parse CFTC Disaggregated futures COT; write full per-code history.
 
     codes: iterable of CFTC codes; default = all registry codes.
-    Rebuilds the complete per-code table each run.
+    Rebuilds the complete per-code table each run. Returns {"kind", "ok", "wrote"};
+    ``ok`` is False only on a hard failure to fetch the current year.
     """
     code_to_sym = {}
     for s in all_symbols():
@@ -120,34 +121,42 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> None:
                 print(f"  hist_2006_2016 (disagg): parse failed — {e}")
 
     # Fetch individual years for 2017+ (or first_year if it's > 2016)
+    latest_ok = True
     for year in range(max(2017, first_year), last_year + 1):
         zp = _download_url(f"{URL_PREFIX}{year}.zip", f"fut_disagg_txt_{year}.zip")
         if not zp:
+            if year == last_year:
+                latest_ok = False  # couldn't fetch current year — may have missed a release
             continue
         try:
             frames.append(_parse_zip(zp))
         except Exception as e:  # noqa: BLE001
             print(f"  {year} (disagg): parse failed — {e}")
+            if year == last_year:
+                latest_ok = False
 
     if not frames:
         print("cftc_disagg: no data parsed")
-        return
+        return {"kind": "cot_disagg", "ok": False, "wrote": 0}
 
     allrows = pd.concat(frames, ignore_index=True)
-    
+
     # Parquet cannot serialize mixed-type object columns after concat (due to NaNs)
     for col in allrows.select_dtypes(include=['object']).columns:
         if col not in [CONTRACT_CODE, REPORT_DATE]:
             allrows[col] = allrows[col].astype(str)
 
+    wrote = 0
     for code in sorted(want):
         sub = allrows[allrows[CONTRACT_CODE] == code].copy()
         if sub.empty:
             continue
-        
+
         # Index by report date (DatetimeIndex → manifest last_date)
         sub = sub.sort_values(REPORT_DATE).set_index(REPORT_DATE)
         sym_name = code_to_sym.get(code)
         file_name = f"{sym_name}_{code}" if sym_name else code
         store.write_cot_disagg(file_name, sub, source="cftc_disagg")
+        wrote += 1
         print(f"{file_name}: {len(sub):5d} weeks (disagg) -> store")
+    return {"kind": "cot_disagg", "ok": latest_ok, "wrote": wrote}

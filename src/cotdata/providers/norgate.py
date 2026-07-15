@@ -10,6 +10,7 @@ stitched out). A close-based stop needs the gap-free series → we fetch _CCB.
 """
 from __future__ import annotations  # PEP 604 unions (dict | None) on Python 3.9
 
+import datetime as dt
 import pandas as pd
 import numpy as np
 import re
@@ -19,6 +20,13 @@ from ..registry import REGISTRY, all_symbols
 from .. import store
 
 CCB_SUFFIX = "_CCB"  # Norgate "Continuous Contract Back-adjusted"
+
+# Norgate database names (from norgatedata.databases()) that cotdata reads: the
+# continuous series and the individual contracts used for volume reconstruction.
+FINAL_DATABASES = ("Futures", "Continuous Futures")
+# Default local-time cutoff after which Norgate's "Final" futures prices are in
+# (≈ Continuous Futures Final at ~8:55pm ET per Norgate's update schedule).
+DEFAULT_FINAL_CUTOFF = "20:55"
 # If roll-day overnight moves exceed this multiple of the normal-day median, the
 # series looks UNADJUSTED (calendar-spread gaps not stitched). Self-calibrating
 # per symbol, so it works across products with different spread magnitudes.
@@ -224,6 +232,47 @@ def _check_roll_gaps(internal_symbol: str, df: pd.DataFrame) -> bool:
               f"back-adjusted symbol; a close-based stop would false-trigger on roll gaps.")
         return True
     return False
+
+
+def _to_naive_local(t):
+    """norgatedata returns tz-AWARE local datetimes (e.g. ...-04:00); normalize to
+    naive local so we can compare against a naive local cutoff. Naive inputs (older
+    norgatedata) are assumed already local and passed through."""
+    if t is None:
+        return None
+    if t.tzinfo is not None:
+        t = t.astimezone().replace(tzinfo=None)  # → local wall-clock, drop tzinfo
+    return t
+
+
+def _finals_ready(db_times: dict, cutoff: str = DEFAULT_FINAL_CUTOFF, now=None):
+    """Pure core of :func:`finals_ready` — testable without norgatedata.
+
+    db_times maps database name → its last-update datetime (tz-aware or naive local,
+    or None). Ready when every database was refreshed at/after today's `cutoff`
+    (local HH:MM). Returns (ready: bool, detail: dict)."""
+    now = now or dt.datetime.now()
+    h, m = (int(x) for x in cutoff.split(":"))
+    cut = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    detail, ready = {}, True
+    for db, t in db_times.items():
+        detail[db] = t.isoformat() if t else None
+        tt = _to_naive_local(t)
+        if tt is None or tt < cut:
+            ready = False
+    detail["cutoff"] = cut.isoformat()
+    return ready, detail
+
+
+def finals_ready(cutoff: str = DEFAULT_FINAL_CUTOFF, now=None):
+    """True once Norgate has this day's FINAL futures prices — i.e. it has refreshed
+    both the 'Futures' and 'Continuous Futures' databases at/after today's local
+    `cutoff`. Uses norgatedata.last_database_update_time (the local PC time of the
+    last DB refresh). Lets a scheduled run avoid capturing interim (non-final) bars.
+    Returns (ready: bool, detail: dict)."""
+    import norgatedata  # Windows producer only
+    times = {db: norgatedata.last_database_update_time(db) for db in FINAL_DATABASES}
+    return _finals_ready(times, cutoff, now)
 
 
 def update(symbols=None, full: bool = False) -> None:
