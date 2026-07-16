@@ -9,6 +9,12 @@ Equities:
     cftc_code: "239742"
     hist_codes:
       - "23977A"
+  # Held-out generalization markets (never in the deploy selection) — collected here
+  # so the strategy can be scored on them; cot-analyzer flags them role: heldout.
+  EMD:                      # E-mini S&P MidCap 400 (CME)
+    cftc_code: "33874A"
+  NKD:                      # Nikkei 225 ($-denominated, CME)
+    cftc_code: "240741"
 
 Metals:
   GC:
@@ -43,6 +49,18 @@ Grains:
     cftc_code: "007601"
   ZW:
     cftc_code: "001602"
+  # Held-out generalization grains (new symbols, never in the deploy selection).
+  ZO:                       # Oats (CBOT)
+    cftc_code: "004603"
+  KE:                       # KC HRW Wheat (Kansas City, CME)
+    cftc_code: "001612"
+
+# Dairy — a genuinely new asset class for the held-out generalization test: real
+# commercial hedgers, never touched CMR selection. Collected here; cot-analyzer
+# flags it role: heldout.
+Dairy:
+  DC:                       # Class III Milk (CME)
+    cftc_code: "052641"
 
 Currencies:
   6E:
