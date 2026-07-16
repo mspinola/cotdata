@@ -31,6 +31,9 @@ class Symbol:
     is_equity: bool
     report_type: str = "disagg"   # "tff" for financials, "disagg" for commodities
     cftc_code: Optional[str] = None
+    # Optional Yahoo Finance ticker for markets Norgate/databento don't cover (the
+    # yfinance provider prices these; e.g. "EEM"/"EFA" as ETF proxies for MSCI EM/EAFE).
+    yahoo: Optional[str] = None
     # Predecessor CFTC codes from earlier exchange/contract listings of the SAME
     # instrument, stitched in chronologically behind cftc_code by get_cot. Each
     # entry is a bare code string (scale 1.0) or a (code, scale) tuple. Kept as a
@@ -107,6 +110,7 @@ def load_registry(yaml_path=None) -> Dict[str, Symbol]:
                 report_type=attrs.get("report_type", "tff" if asset_class in ("Equities", "FX", "Rates") else "disagg"),
                 cftc_code=attrs["cftc_code"],
                 hist_codes=_coerce_hist_codes(attrs.get("hist_codes")),
+                yahoo=attrs.get("yahoo"),
             )
     return registry
 
