@@ -11,7 +11,7 @@ from cotdata.registry import (
 # ── loading & basic shape ────────────────────────────────────────────────────
 def test_registry_loads_all_symbols():
     symbols = all_symbols()
-    assert len(symbols) == 42, f"Expected 42 symbols, got {len(symbols)}"
+    assert len(symbols) == 47, f"Expected 47 symbols, got {len(symbols)}"
 
 
 def test_basic_symbol_loading():
@@ -49,8 +49,11 @@ def test_hist_code_scales_normalization():
 
 def test_by_asset_class():
     equities = by_asset_class("Equities")
-    assert len(equities) == 4
+    assert len(equities) == 6          # ES NQ YM RTY + held-out EMD, NKD
     assert all(eq.is_equity for eq in equities)
+
+    dairy = by_asset_class("Dairy")    # new held-out class
+    assert [d.internal for d in dairy] == ["DC"]
 
     crypto = by_asset_class("Crypto")
     assert [c.internal for c in crypto] == ["BTC", "ETH"]
@@ -59,7 +62,7 @@ def test_by_asset_class():
 # ── hashability (frozen dataclass must stay hashable, incl. scaled hist_codes) ─
 def test_symbols_are_hashable():
     # Would raise TypeError: unhashable type 'list' if hist_codes held a list.
-    assert len(set(all_symbols())) == 42
+    assert len(set(all_symbols())) == 47
     assert symbol("LBR") in {symbol("LBR")}
     hash(symbol("LBR"))  # scaled hist_codes — the tricky one
 
@@ -148,5 +151,5 @@ def test_golden_identity_checksum():
     (registry.yaml carries FIXED identity only; unintended drift is a bug)."""
     ident = sorted((s.internal, s.cftc_code, s.asset_class) for s in all_symbols())
     digest = hashlib.md5(repr(ident).encode()).hexdigest()
-    assert digest == "e14ab3bad0f67741a95f721d4eff5ada", (
+    assert digest == "427c5d59ee4a2e5a09fd7dc6f8b5103a", (
         "registry identity facts changed; update the expected checksum if intended")
