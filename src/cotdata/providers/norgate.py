@@ -375,13 +375,20 @@ def get_symbol_metadata(internal_symbol: str) -> dict | None:
 
 
 def update_metadata(symbols=None) -> None:
-    """Fetch and write contract specifications (metadata) to the store."""
+    """Fetch and write contract specifications (metadata) to the store.
+
+    A scoped run (`symbols` given) UPSERTS by Symbol into the existing
+    contract_specs table — rows for markets NOT in the request are preserved
+    (contract specs share one table, so a plain write would drop them). With no
+    `symbols`, regenerate the full registry and replace the table.
+    """
     import concurrent.futures
+    scoped = symbols is not None
     syms = symbols or [s.internal for s in all_symbols()]
-    
+
     print(f"Fetching metadata for {len(syms)} symbols...")
     metadata_rows = []
-    
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         futs = {pool.submit(get_symbol_metadata, s): s for s in syms}
         for f in concurrent.futures.as_completed(futs):
@@ -393,7 +400,11 @@ def update_metadata(symbols=None) -> None:
         df = pd.DataFrame(metadata_rows)
         # Ensure consistent column ordering and sorting
         df = df.sort_values("Symbol").reset_index(drop=True)
-        store.write_metadata(df, source="norgate")
-        print(f"Successfully wrote metadata for {len(df)} symbols -> store")
+        if scoped:
+            store.upsert_metadata(df, source="norgate")
+            print(f"Upserted metadata for {len(df)} symbols -> store (unlisted markets preserved)")
+        else:
+            store.write_metadata(df, source="norgate")
+            print(f"Successfully wrote metadata for {len(df)} symbols -> store")
     else:
         print("No metadata fetched.")

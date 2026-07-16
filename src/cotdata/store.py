@@ -26,9 +26,28 @@ def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
 
 
 # ── Metadata ──────────────────────────────────────────────────────────────
+# Unlike prices/COT (one parquet per symbol), contract specs live in ONE table
+# keyed by Symbol. So a *scoped* refresh must upsert (see upsert_metadata) — a
+# plain write_metadata would replace the whole table and drop unlisted markets.
 def write_metadata(df: pd.DataFrame, source: str = "norgate") -> None:
     _atomic_write_parquet(df, config.metadata_dir() / "contract_specs.parquet")
     _touch_manifest("metadata", "contract_specs", df, source)
+
+
+def upsert_metadata(df: pd.DataFrame, source: str = "norgate") -> None:
+    """Merge `df` into the existing contract_specs table by ``Symbol``: rows for
+    symbols present in `df` are replaced/added; rows for symbols NOT in `df` are
+    kept. Use for a scoped (subset-of-symbols) refresh so it never drops the
+    contract specs of markets that weren't in the request. Use write_metadata to
+    replace the whole table (a full registry regeneration)."""
+    existing = read_metadata()
+    if not existing.empty and "Symbol" in existing.columns:
+        keep = existing[~existing["Symbol"].isin(df["Symbol"])]
+        merged = pd.concat([keep, df], ignore_index=True)
+    else:
+        merged = df
+    merged = merged.sort_values("Symbol").reset_index(drop=True)
+    write_metadata(merged, source=source)
 
 
 def read_metadata() -> pd.DataFrame:
