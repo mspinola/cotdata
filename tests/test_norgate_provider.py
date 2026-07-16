@@ -292,6 +292,52 @@ def test_full_rebuild_bypasses_incremental_window(mock_price_ts, mock_db_symbols
     assert all(s == "1970-01-01" for s in indiv_starts), indiv_starts
 
 
+def test_scoped_update_metadata_upserts_preserving_others(tmp_path, monkeypatch):
+    """`update_metadata(symbols=[...])` must UPSERT by Symbol into the existing
+    contract_specs — the data-loss regression where a 5-symbol run replaced the
+    whole 42-market table. Untouched markets survive; requested ones are refreshed.
+    Exercises the real store round-trip through a tmp COTDATA_STORE."""
+    monkeypatch.setenv("COTDATA_STORE", str(tmp_path))
+    from cotdata import store
+
+    # Pre-existing full table (stand-in for the 42 markets already on disk)
+    store.write_metadata(
+        pd.DataFrame({"Symbol": ["ES", "NQ", "DC"], "Tick Size": [0.25, 0.25, 0.01]}),
+        source="seed",
+    )
+
+    def fake_meta(sym):
+        return {"Symbol": sym, "Tick Size": 99.0}  # sentinel refreshed value
+
+    with mock.patch("cotdata.providers.norgate.get_symbol_metadata", side_effect=fake_meta):
+        norgate.update_metadata(symbols=["DC"])
+
+    df = store.read_metadata().set_index("Symbol")
+    assert set(df.index) == {"ES", "NQ", "DC"}   # ES/NQ preserved — not dropped
+    assert df.loc["DC", "Tick Size"] == 99.0      # DC refreshed
+    assert df.loc["ES", "Tick Size"] == 0.25      # untouched market unchanged
+
+
+def test_full_update_metadata_replaces_table(tmp_path, monkeypatch):
+    """`update_metadata()` with no symbols regenerates the whole registry and
+    REPLACES the table (drops symbols no longer produced)."""
+    monkeypatch.setenv("COTDATA_STORE", str(tmp_path))
+    from cotdata import store
+
+    store.write_metadata(
+        pd.DataFrame({"Symbol": ["OLD"], "Tick Size": [1.0]}), source="seed",
+    )
+
+    sym_a = mock.Mock(internal="ES")
+    sym_b = mock.Mock(internal="NQ")
+    with mock.patch("cotdata.providers.norgate.all_symbols", return_value=[sym_a, sym_b]), \
+         mock.patch("cotdata.providers.norgate.get_symbol_metadata",
+                    side_effect=lambda s: {"Symbol": s, "Tick Size": 1.0}):
+        norgate.update_metadata()  # no symbols → full replace
+
+    assert set(store.read_metadata()["Symbol"]) == {"ES", "NQ"}  # OLD gone
+
+
 import datetime as _dt
 def test_finals_ready_pure_logic():
     from cotdata.providers.norgate import _finals_ready

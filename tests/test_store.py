@@ -133,6 +133,38 @@ def test_invalid_volume_arg_raises(store_env):
         get_prices("ES", "backadj", volume="bogus")
 
 
+def _specs(symbols, tick=1.0):
+    """Minimal contract_specs frame (Symbol-keyed, RangeIndex — as norgate writes)."""
+    return pd.DataFrame({"Symbol": symbols, "Tick Size": [tick] * len(symbols)})
+
+
+def test_upsert_metadata_preserves_unlisted_symbols(store_env):
+    """A scoped upsert must keep rows for symbols not in the incoming frame — the
+    data-loss regression: writing 5 symbols must not drop the other 42."""
+    from cotdata import store
+
+    store.write_metadata(_specs(["ES", "NQ", "DC", "ZO", "KE"]), source="test")
+
+    # Scoped refresh of only DC + a brand-new symbol
+    store.upsert_metadata(_specs(["DC", "EMD"], tick=9.9), source="norgate")
+
+    df = store.read_metadata()
+    assert set(df["Symbol"]) == {"ES", "NQ", "DC", "ZO", "KE", "EMD"}  # none dropped
+    # DC replaced with the new value; untouched markets keep their original
+    assert df.set_index("Symbol").loc["DC", "Tick Size"] == 9.9
+    assert df.set_index("Symbol").loc["ES", "Tick Size"] == 1.0
+    assert df.set_index("Symbol").loc["EMD", "Tick Size"] == 9.9  # new row added
+    # manifest reflects the union, not just the 2 upserted rows
+    assert store.load_manifest()["metadata"]["contract_specs"]["n_rows"] == 6
+
+
+def test_upsert_metadata_on_empty_store_writes_all(store_env):
+    """Upsert against an empty store behaves like a plain write."""
+    from cotdata import store
+    store.upsert_metadata(_specs(["ES", "NQ"]), source="norgate")
+    assert set(store.read_metadata()["Symbol"]) == {"ES", "NQ"}
+
+
 def test_schema_version_and_require_schema(store_env):
     from cotdata import store, schema_version, require_schema
     import cotdata.config as cfg
