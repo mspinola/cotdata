@@ -15,6 +15,15 @@ Equities:
     cftc_code: "33874A"
   NKD:                      # Nikkei 225 ($-denominated, CME)
     cftc_code: "240741"
+  # MSCI international indices — the liquid out-of-selection held-out markets. Priced
+  # off their ETF proxies via Yahoo (Norgate/databento don't cover them; ETFs have no
+  # roll gaps). COT is the real futures positioning (ICE Futures U.S.).
+  MME:                      # MSCI Emerging Markets Index (ICE) — priced via EEM
+    cftc_code: "244042"
+    yahoo: "EEM"
+  MFS:                      # MSCI EAFE Index (ICE) — priced via EFA
+    cftc_code: "244041"
+    yahoo: "EFA"
 
 Metals:
   GC:

@@ -36,6 +36,8 @@ Issues = "https://github.com/mspinola/cotdata/issues"
 norgate = ["norgatedata"]
 # Dormant provider, retained for the intraday news-failure work + settlement cross-check.
 databento = ["databento>=0.30"]
+
+yahoo = ["yfinance"]
 dev = ["pytest>=7"]
 
 [project.scripts]
