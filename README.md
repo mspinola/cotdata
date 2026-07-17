@@ -76,7 +76,7 @@ The **store is the API boundary** — not Python imports. Producers write Parque
 
 The store layout:
 
-- `prices/{symbol}_{adjustment}.parquet` — Open/High/Low/Close/Volume/Open Interest, tz-naive `Date` index. `adjustment` ∈ {`backadj`, `unadj`}. Close = exchange settlement.
+- `prices/{symbol}_{adjustment}.parquet` — Open/High/Low/Close/Volume/Open Interest, tz-naive `Date` index. `adjustment` ∈ {`backadj`, `unadj`} on disk; `propadj` is a third view **derived on read** (not stored). Close = exchange settlement.
 - `cot_legacy/{symbol}_{code}.parquet` — weekly CFTC Legacy positioning.
 - `cot_disagg/{symbol}_{code}.parquet` — weekly CFTC Disaggregated positioning.
 - `cot_tff/{symbol}_{code}.parquet` — weekly CFTC Traders in Financial Futures positioning.
@@ -94,6 +94,7 @@ import cotdata
 # Prices — pick the adjustment that matches your use:
 signals = cotdata.get_prices("ES", adjustment="backadj")  # signals + stops (gap-free rolls)
 sizing  = cotdata.get_prices("ES", adjustment="unadj")    # position sizing (true dollar prices)
+milk    = cotdata.get_prices("DC", adjustment="propadj")  # ratio-adjusted: strictly positive, %-return preserving
 
 # COT — three CFTC report families:
 legacy  = cotdata.get_cot("ES", report="legacy")   # Commercial / Non-Commercial
@@ -257,10 +258,17 @@ COT tables are stored per code as **`{symbol}_{code}`** (e.g. `RTY_23977A`), so 
 
 ### Back-adjusted vs unadjusted prices
 
-Futures contracts expire, forcing traders to "roll" into the next contract, which usually trades at a slightly different price. Simply stitching contracts together creates artificial price gaps, so cotdata stores two series:
+Futures contracts expire, forcing traders to "roll" into the next contract, which usually trades at a slightly different price. Simply stitching contracts together creates artificial price gaps, so cotdata stores two series and derives a third:
 
-- **`backadj` (signals & stops).** Gap-free arithmetic rolls shift historical prices to align with the new contract, preserving the *true shape* and percentage moves. Use this for indicators, signals, and stop-losses to avoid false triggers on rollover gaps.
+- **`backadj` (signals & stops).** Gap-free *arithmetic* (additive) rolls shift historical prices to align with the new contract, preserving *absolute* daily point moves. Use this for indicators, signals, and stop-losses to avoid false triggers on rollover gaps.
 - **`unadj` (position sizing).** Back-adjustment shifts historical prices (sometimes negative), so you can't use it for dollar values. Use `unadj` (raw, real-life prices) for that day to compute true dollar risk and contract counts.
+- **`propadj` (proportional / ratio adjustment — strictly positive).** Derived on read from `unadj` + `backadj`; preserves daily *percentage* returns and never goes non-positive. Use it for **low-priced, long-history contracts where additive back-adjustment accumulates roll gaps below zero** and breaks price-based stops and R-multiples. See *Class III Milk (DC)* below.
+
+#### Why `propadj` exists — Class III Milk (DC)
+
+Norgate publishes continuous futures in only two forms: unadjusted and **additive** back-adjusted (`_CCB`) — there is no native ratio-adjusted series. Additive adjustment subtracts each roll's calendar spread from all prior history, and for a low-priced, seasonal, ~29-year contract like **DC (Class III Milk, ~$15–20/cwt)** those gaps accumulate past zero: **46.7% of `DC_backadj` closes are ≤ 0** (range −9.83 to 23.09). A price-based stop, an R-multiple, or a percentage return is meaningless on a non-positive series, so CMR cannot use DC's `backadj` at all — even though DC is the flagship *new-asset-class* (Dairy) held-out generalization market.
+
+`propadj` salvages it. Because the additive series `B` and unadjusted series `U` differ by an offset `O = B − U` that steps only at rolls, each roll's calendar spread is recoverable (`s = O[r−1] − O[r]`) and convertible to a multiplicative roll ratio `k = (U[r−1] + s)/U[r−1]`. Scaling each historical segment by the cumulative product of `k` (most-recent segment anchored to actual prices) yields a series that is **strictly positive over the full 1997–2026 history** (DC range 4.68–25.01), preserves within-segment percentage returns exactly, and is sign-identical to `backadj` on every day including rolls. It is a pure function of two already-stored series, so it needs no producer re-run — `get_prices("DC", adjustment="propadj")` works today. Recommendation: **CMR reads DC (and any similarly low-priced contract) with `adjustment="propadj"`.** Restricting DC to its positive-price era (2011→present, ~15y) or dropping it were the fallbacks; neither is needed.
 
 ### Providers & authentication
 
