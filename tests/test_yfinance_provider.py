@@ -1,11 +1,20 @@
-"""Hermetic tests for the yfinance price provider — no network, no store writes.
+"""Hermetic tests for the yfinance price provider — no network, no store writes, and
+no real yfinance dependency (it's an optional [yahoo] extra, absent in CI).
 
-Mocks yfinance.download (so no Yahoo call) and store.write_prices (so nothing is
-written), and checks the provider normalizes Yahoo's (field, ticker) MultiIndex frame
-to the store's Open/High/Low/Close/Volume + DatetimeIndex('Date') shape, for both the
-backadj and unadj adjustments."""
+Injects a stub `yfinance` module into sys.modules (the provider does `import yfinance`
+lazily inside _fetch) and mocks store.write_prices, then checks the provider normalizes
+Yahoo's (field, ticker) MultiIndex frame to the store's Open/High/Low/Close/Volume +
+DatetimeIndex('Date') shape for both the backadj and unadj adjustments."""
+import sys
+import types
+
 import pandas as pd
-import pytest
+
+
+def _install_fake_yfinance(monkeypatch, download):
+    mod = types.ModuleType("yfinance")
+    mod.download = download
+    monkeypatch.setitem(sys.modules, "yfinance", mod)
 
 
 def _fake_yahoo_frame():
@@ -19,11 +28,10 @@ def _fake_yahoo_frame():
 
 
 def test_yfinance_update_normalizes_and_writes_both_adjustments(monkeypatch):
-    import yfinance
     from cotdata import store
     from cotdata.providers import yfinance as yprov
 
-    monkeypatch.setattr(yfinance, "download", lambda *a, **k: _fake_yahoo_frame())
+    _install_fake_yfinance(monkeypatch, lambda *a, **k: _fake_yahoo_frame())
     written = {}
     monkeypatch.setattr(store, "write_prices",
                         lambda sym, adj, df, source: written.__setitem__((sym, adj), (df, source)))
@@ -47,8 +55,7 @@ def test_yfinance_update_skips_symbols_without_ticker(monkeypatch):
 
 
 def test_yfinance_update_reports_empty_as_failure(monkeypatch):
-    import yfinance
     from cotdata.providers import yfinance as yprov
-    monkeypatch.setattr(yfinance, "download", lambda *a, **k: pd.DataFrame())
+    _install_fake_yfinance(monkeypatch, lambda *a, **k: pd.DataFrame())
     res = yprov.update(symbols=["MME"])
     assert res["wrote"] == 0 and res["ok"] is False
