@@ -24,6 +24,18 @@ def test_basic_symbol_loading():
     assert es.hist_codes == ()
 
 
+def test_yahoo_only_market_has_no_norgate_symbol():
+    """MSCI MME/MFS are priced off ETF proxies (EEM/EFA); Norgate carries no series
+    for them, so norgate is None (registry `norgate: null`) — that's the signal the
+    Norgate producer filters on. A defaulted '&MME' would send it fetching a
+    nonexistent &MME_CCB."""
+    for s in ("MME", "MFS"):
+        assert symbol(s).norgate is None, s
+        assert symbol(s).yahoo in ("EEM", "EFA")
+    # Norgate-covered markets still default to '&<internal>'.
+    assert symbol("ES").norgate == "&ES"
+
+
 def test_symbol_with_simple_hist_codes():
     rty = symbol("RTY")
     assert rty.asset_class == "Equities"

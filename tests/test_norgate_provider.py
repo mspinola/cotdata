@@ -338,6 +338,41 @@ def test_full_update_metadata_replaces_table(tmp_path, monkeypatch):
     assert set(store.read_metadata()["Symbol"]) == {"ES", "NQ"}  # OLD gone
 
 
+def test_metadata_skips_symbols_without_norgate_coverage(tmp_path, monkeypatch):
+    """Yahoo-only markets (registry norgate=None, e.g. MME/MFS) must be skipped by
+    the Norgate metadata producer — never fetched, never written as null rows. The
+    regression: `&MME_CCB not found` spam + all-null spec rows in contract_specs."""
+    monkeypatch.setenv("COTDATA_STORE", str(tmp_path))
+    from cotdata import store
+
+    sym_es = mock.Mock(internal="ES", norgate="&ES")
+    sym_mme = mock.Mock(internal="MME", norgate=None)   # no Norgate coverage
+    called = []
+
+    def fake_meta(sym):
+        called.append(sym)
+        return {"Symbol": sym, "Tick Size": 1.0}
+
+    with mock.patch("cotdata.providers.norgate.all_symbols",
+                    return_value=[sym_es, sym_mme]), \
+         mock.patch.dict("cotdata.providers.norgate.REGISTRY",
+                         {"ES": sym_es, "MME": sym_mme}), \
+         mock.patch("cotdata.providers.norgate.get_symbol_metadata",
+                    side_effect=fake_meta):
+        norgate.update_metadata()  # full run
+
+    assert called == ["ES"]                                   # MME never fetched
+    assert set(store.read_metadata()["Symbol"]) == {"ES"}     # no null MME row
+
+
+def test_covered_filter_drops_none_norgate():
+    """Unit: _norgate_covered keeps only symbols whose registry norgate is truthy."""
+    with mock.patch.dict("cotdata.providers.norgate.REGISTRY",
+                         {"ES": mock.Mock(norgate="&ES"),
+                          "MME": mock.Mock(norgate=None)}):
+        assert norgate._norgate_covered(["ES", "MME"]) == ["ES"]
+
+
 import datetime as _dt
 def test_finals_ready_pure_logic():
     from cotdata.providers.norgate import _finals_ready

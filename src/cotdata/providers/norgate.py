@@ -275,6 +275,23 @@ def finals_ready(cutoff: str = DEFAULT_FINAL_CUTOFF, now=None):
     return _finals_ready(times, cutoff, now)
 
 
+def _norgate_covered(symbols):
+    """Resolve requested internal symbols to those Norgate actually carries.
+
+    Yahoo-only markets (registry `norgate: null` — e.g. the MSCI MME/MFS indices
+    priced off ETF proxies) have no `&SYM_CCB` continuous series. Fetching them
+    errors on every field and, for metadata, silently writes null-filled rows, so
+    drop them here (with a note) rather than hitting Norgate for a symbol it can't
+    serve. The yfinance provider prices these instead."""
+    requested = symbols or [s.internal for s in all_symbols()]
+    covered = [s for s in requested if REGISTRY[s].norgate]
+    skipped = [s for s in requested if not REGISTRY[s].norgate]
+    if skipped:
+        print(f"  skipping {len(skipped)} symbol(s) with no Norgate coverage "
+              f"(priced elsewhere): {', '.join(skipped)}")
+    return covered
+
+
 def update(symbols=None, full: bool = False) -> None:
     """Fetch + write to the store for the given internal symbols (backadj and unadj).
 
@@ -285,7 +302,7 @@ def update(symbols=None, full: bool = False) -> None:
     import time
     from .. import status
 
-    syms = symbols or [s.internal for s in all_symbols()]
+    syms = _norgate_covered(symbols)
     prior = store.load_manifest().get("prices", {})  # to report per-symbol date deltas
     t0 = time.time()
     ok, failed, total_rows, newest = [], [], 0, None
@@ -384,7 +401,7 @@ def update_metadata(symbols=None) -> None:
     """
     import concurrent.futures
     scoped = symbols is not None
-    syms = symbols or [s.internal for s in all_symbols()]
+    syms = _norgate_covered(symbols)
 
     print(f"Fetching metadata for {len(syms)} symbols...")
     metadata_rows = []
