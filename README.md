@@ -304,7 +304,7 @@ The canonical store uses standard Parquet files. Loaded with `pd.read_parquet()`
 ### Price Data (`prices/{symbol}_{adjustment}.parquet`)
 Primary price history (Norgate Data), indexed by tz-naive `Date`. The pipeline downloads both the back-adjusted (`backadj`) series for signals/stops and the unadjusted (`unadj`) series for true transaction-cost modeling.
 
-**Reading reconstructed volume:** the reconstruction columns below are internal storage. Consumers should not read `Volume_Reconstructed` directly — call `get_prices(symbol, volume="reconstructed")` and the `Volume` column is served as reconstructed-with-per-row-raw-fallback, plus a `Volume_Source` column for audit. The default `volume="front"` returns the front-month series unchanged (byte-identical to the pre-v2 API). See `docs/plan_promote_reconstructed_volume.md`.
+**Reading reconstructed volume:** the reconstruction columns below are internal storage. Consumers should not read `Volume_Reconstructed` directly — call `get_prices(symbol, volume="reconstructed")` and the `Volume` column is served as reconstructed-with-per-row-raw-fallback, plus a `Volume_Source` column for audit. The default `volume="front"` returns the front-month series unchanged (byte-identical to the pre-v2 API).
 
 **Schema versioning:** `schema_version` in `manifest.json` records the on-disk data version (v2 = reconstructed volume promoted). Consumers key cache invalidation on `cotdata.schema_version()` and can guard with `cotdata.require_schema(min_version)`.
 

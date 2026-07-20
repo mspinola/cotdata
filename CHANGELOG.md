@@ -16,4 +16,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   R-multiples unusable; `propadj` yields a strictly-positive DC series
   (4.68–25.01) over the full 1997–2026 history. Recommended for low-priced,
   long-history contracts. Derived from already-stored series — no producer
-  re-run or schema change required. ([#23](https://github.com/mspinola/cotdata/pull/23))
+  re-run or schema change required.
+  ([#23](https://github.com/mspinola/cotdata/pull/23), [#26](https://github.com/mspinola/cotdata/pull/26))
+- **Yahoo Finance price provider** (`cotdata-update --prices-yahoo`) — a
+  cross-platform, research-grade price source for registry symbols carrying a
+  `yahoo` ticker, so markets Norgate/databento don't cover can still be priced
+  off ETF proxies. Adds the MSCI EM (MME→EEM) and EAFE (MFS→EFA) held-out
+  generalization markets. ([#24](https://github.com/mspinola/cotdata/pull/24))
+
+### Fixed
+- **Fail fast when the Norgate service (NDU) is unreachable** — the producer now
+  probes `norgatedata.status()` before fetching and aborts with a clear error and
+  a non-zero exit. Previously norgatedata retried each call 10x then called bare
+  `sys.exit()`, which exits **0** (a scheduled run looked "successful" while
+  writing nothing and never retried) and raised `SystemExit` past the per-symbol
+  handler, killing the run on the first symbol.
+- **Never persist all-null contract-spec rows** — if Norgate returns nothing for
+  every spec field of a covered symbol (a transient failure), `--metadata` now
+  skips it with a warning instead of writing a null row or, on a scoped upsert,
+  overwriting good existing specs with nulls.
+- **Skip Yahoo-only markets in the Norgate producer** — MME/MFS have no Norgate
+  continuous series, so `--prices`/`--metadata` were erroring on `&MME_CCB` /
+  `&MFS_CCB` and silently writing all-null contract-spec rows. They are now
+  marked `norgate: null` in the registry and skipped by the Norgate producer.
+  ([#27](https://github.com/mspinola/cotdata/pull/27))
+- **Scoped metadata refresh no longer drops other markets** — a
+  `--metadata --symbols …` run now UPSERTs by `Symbol` into `contract_specs`
+  instead of replacing the whole table, so specs for markets outside the request
+  survive. ([#25](https://github.com/mspinola/cotdata/pull/25))

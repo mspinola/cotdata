@@ -40,6 +40,12 @@ _COLMAP = {
 
 MONTH_CODES = {'F': 1, 'G': 2, 'H': 3, 'J': 4, 'K': 5, 'M': 6, 'N': 7, 'Q': 8, 'U': 9, 'V': 10, 'X': 11, 'Z': 12}
 
+# Contract-spec fields fetched per symbol (everything in a metadata row except the
+# Symbol/Norgate_Symbol identifiers). If Norgate returns nothing for ALL of these,
+# the row is junk — skip it rather than persist an all-null spec row.
+_SPEC_FIELDS = ("Name", "Exchange", "Group", "Contract Size", "Tick Size",
+                "Tick Value", "Point Value", "Currency", "Margin")
+
 
 def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjustment: str,
                         full: bool = False) -> pd.DataFrame:
@@ -292,6 +298,30 @@ def _norgate_covered(symbols):
     return covered
 
 
+def _require_norgate_service() -> None:
+    """Fail fast, with a clear message and a normal exception, if the Norgate Data
+    Updater (NDU) service isn't reachable — BEFORE any fetch.
+
+    Why this matters: norgatedata retries each data call 10x and then calls bare
+    ``sys.exit()``, which (a) exits with code 0, so a scheduled producer run looks
+    "successful" while writing nothing and never triggers the scheduler's retry,
+    and (b) raises SystemExit — not caught by the per-symbol ``except Exception`` —
+    so the whole run dies on the first symbol. ``norgatedata.status()`` is a safe
+    probe (haltonerror=False, maxretries=1 → returns False instead of exiting)."""
+    import norgatedata
+    try:
+        reachable = bool(norgatedata.status())
+    except BaseException:  # noqa: BLE001 — never let the probe itself take us down
+        reachable = False
+    if not reachable:
+        raise RuntimeError(
+            "Norgate Data service is not reachable — is the Norgate Data Updater "
+            "(NDU) running and authenticated? cotdata prices/metadata are produced "
+            "on Windows with NDU running. Aborting before fetch (non-zero exit so a "
+            "scheduler retries)."
+        )
+
+
 def update(symbols=None, full: bool = False) -> None:
     """Fetch + write to the store for the given internal symbols (backadj and unadj).
 
@@ -302,6 +332,7 @@ def update(symbols=None, full: bool = False) -> None:
     import time
     from .. import status
 
+    _require_norgate_service()  # abort cleanly if NDU is down (see helper docstring)
     syms = _norgate_covered(symbols)
     prior = store.load_manifest().get("prices", {})  # to report per-symbol date deltas
     t0 = time.time()
@@ -401,6 +432,7 @@ def update_metadata(symbols=None) -> None:
     """
     import concurrent.futures
     scoped = symbols is not None
+    _require_norgate_service()  # abort cleanly if NDU is down (see helper docstring)
     syms = _norgate_covered(symbols)
 
     print(f"Fetching metadata for {len(syms)} symbols...")
@@ -410,8 +442,16 @@ def update_metadata(symbols=None) -> None:
         futs = {pool.submit(get_symbol_metadata, s): s for s in syms}
         for f in concurrent.futures.as_completed(futs):
             result = f.result()
-            if result:
-                metadata_rows.append(result)
+            if not result:
+                continue
+            # A covered symbol whose specs all came back None is a transient Norgate
+            # failure, not real data — skip rather than persist a null row (and, on a
+            # scoped upsert, rather than overwrite good existing specs with nulls).
+            if all(result.get(k) is None for k in _SPEC_FIELDS):
+                print(f"  ⚠️  {result.get('Symbol')}: all specs empty (Norgate "
+                      f"returned nothing) — skipping to avoid a null row")
+                continue
+            metadata_rows.append(result)
 
     if metadata_rows:
         df = pd.DataFrame(metadata_rows)
