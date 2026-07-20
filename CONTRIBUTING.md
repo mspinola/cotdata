@@ -14,28 +14,57 @@ Thank you for your interest in contributing to `cotdata`! This project provides 
 
 ## Development Setup
 
-This project uses `uv` (or standard `pip` environments) for dependency management.
+This project uses `uv` for fast, reliable dependency management. Standard `pip` venv also works if preferred.
 
-1. **Clone the repository:**
+### Using `uv` (Recommended)
+
+1. **Install uv** (if needed):
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+   See [uv documentation](https://docs.astral.sh/uv/) for other installation methods.
+
+2. **Clone the repository:**
    ```bash
    git clone https://github.com/your-username/cotdata.git
    cd cotdata
    ```
 
-2. **Set up a virtual environment and install dev dependencies:**
+3. **Create and activate a virtual environment:**
    ```bash
    uv venv
+   source .venv/bin/activate  # Mac/Linux
+   # OR
+   .venv\Scripts\activate     # Windows (cmd)
+   # OR
+   .venv\Scripts\Activate.ps1 # Windows (PowerShell)
+   ```
+
+4. **Install the package in development mode with dev dependencies:**
+   ```bash
    uv pip install -e ".[dev]"
    ```
-   *Note: If you are on Windows and intend to work on the Norgate integration, you should install the Norgate extras: `uv pip install -e ".[dev,norgate]"`.*
+   If you're on Windows and working on the Norgate integration:
+   ```bash
+   uv pip install -e ".[dev,norgate]"
+   ```
 
-3. **Set the temporary datastore:**
-   For local development, you should point the store to a local temporary folder to avoid overwriting your live data:
+5. **Set the temporary datastore for local testing:**
    ```bash
    export COTDATA_STORE=/tmp/cotdata_test_store  # Mac/Linux
    # OR
    $env:COTDATA_STORE = "C:\temp\cotdata_test_store"  # Windows
    ```
+
+### Using standard pip + venv
+
+If you prefer not to install `uv`:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # Mac/Linux / Windows (bash)
+pip install -e ".[dev]"
+export COTDATA_STORE=/tmp/cotdata_test_store  # Set your test store
+```
 
 ## Running Tests
 

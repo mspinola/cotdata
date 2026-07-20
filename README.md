@@ -26,7 +26,7 @@ cotdata separates *fetching* data (a "producer" that talks to vendors) from *usi
 
 ## Contents
 
-- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Reading data](#reading-data-consumer) · [Producing data](#producing-data-producer) · [Scheduling on Windows](#scheduling-on-windows-task-scheduler) · [Operations](#operations) · [Concepts & design](#concepts--design) · [Reference: schemas](#reference-data-schemas) · [Reference: COT formats](#reference-cot-formats-explained) · [Diagnostics](#diagnostics) · [Contributing](#contributing) · [License](#license)
+- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Reading data](#reading-data-consumer) · [Producing data](#producing-data-producer) · [Scheduling on Windows](#scheduling-on-windows-task-scheduler) · [Operations](#operations) · [Concepts & design](#concepts--design) · [Reference: schemas](#reference-data-schemas) · [Reference: COT formats](#reference-cot-formats-explained) · [Diagnostics](#diagnostics) · [Development](#development) · [Contributing](#contributing) · [License](#license)
 
 ## Quickstart
 
@@ -416,6 +416,14 @@ swappable step:
 The flow runs one direction: **`cotdata` (data) → your signal → `crucible`
 (edge)**. Neither imports the other, so cotdata stays useful on its own for any
 COT/futures research — crucible is just the most common thing to point at it next.
+
+## Development
+
+Want to contribute or work on cotdata locally? See [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Virtual environment setup with `uv` or standard `pip`
+- Running the test suite
+- Platform-specific notes (Norgate is Windows-only; CFTC parsing runs anywhere)
+- Code style guidelines
 
 ## Contributing
 
