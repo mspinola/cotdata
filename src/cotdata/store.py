@@ -124,8 +124,7 @@ def require_schema(min_version: int) -> None:
     if v < min_version:
         raise RuntimeError(
             f"cotdata store schema_version={v} < required {min_version}. "
-            f"Re-run the producer (e.g. norgate.update) to migrate the store — "
-            f"see docs/plan_promote_reconstructed_volume.md."
+            f"Re-run the producer (e.g. norgate.update) to migrate the store."
         )
 
 
