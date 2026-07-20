@@ -25,6 +25,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   generalization markets. ([#24](https://github.com/mspinola/cotdata/pull/24))
 
 ### Fixed
+- **Fail fast when the Norgate service (NDU) is unreachable** — the producer now
+  probes `norgatedata.status()` before fetching and aborts with a clear error and
+  a non-zero exit. Previously norgatedata retried each call 10x then called bare
+  `sys.exit()`, which exits **0** (a scheduled run looked "successful" while
+  writing nothing and never retried) and raised `SystemExit` past the per-symbol
+  handler, killing the run on the first symbol.
+- **Never persist all-null contract-spec rows** — if Norgate returns nothing for
+  every spec field of a covered symbol (a transient failure), `--metadata` now
+  skips it with a warning instead of writing a null row or, on a scoped upsert,
+  overwriting good existing specs with nulls.
 - **Skip Yahoo-only markets in the Norgate producer** — MME/MFS have no Norgate
   continuous series, so `--prices`/`--metadata` were erroring on `&MME_CCB` /
   `&MFS_CCB` and silently writing all-null contract-spec rows. They are now

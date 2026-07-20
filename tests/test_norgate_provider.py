@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import pytest
 from unittest import mock
 
 # Mock norgatedata so we can import and test norgate on any OS
@@ -8,6 +9,7 @@ import types
 mock_norgatedata = types.ModuleType("norgatedata")
 mock_norgatedata.PaddingType = mock.Mock()
 mock_norgatedata.PaddingType.NONE = "NONE"
+mock_norgatedata.status = mock.Mock(return_value=True)  # NDU reachable (preflight)
 sys.modules["norgatedata"] = mock_norgatedata
 
 from cotdata.providers import norgate
@@ -336,6 +338,45 @@ def test_full_update_metadata_replaces_table(tmp_path, monkeypatch):
         norgate.update_metadata()  # no symbols → full replace
 
     assert set(store.read_metadata()["Symbol"]) == {"ES", "NQ"}  # OLD gone
+
+
+def test_update_aborts_fast_when_ndu_unreachable(monkeypatch):
+    """When NDU is down, update() must raise BEFORE any fetch — not fall into
+    norgatedata's 10x-retry + bare sys.exit() (which exits 0 and defeats scheduler
+    retry). norgatedata.status() returning False is the trip wire."""
+    monkeypatch.setattr(mock_norgatedata, "status", mock.Mock(return_value=False))
+    with pytest.raises(RuntimeError, match="Norgate Data service is not reachable"):
+        norgate.update(symbols=["ES"])
+
+
+def test_update_metadata_aborts_fast_when_ndu_unreachable(monkeypatch):
+    monkeypatch.setattr(mock_norgatedata, "status", mock.Mock(return_value=False))
+    with pytest.raises(RuntimeError, match="Norgate Data service is not reachable"):
+        norgate.update_metadata(symbols=["ES"])
+
+
+def test_metadata_skips_all_null_spec_rows(tmp_path, monkeypatch):
+    """A COVERED symbol whose specs all come back None (a transient Norgate failure,
+    not the MME/MFS no-coverage case) must be skipped — never written as a null row,
+    and on a scoped upsert never used to overwrite good existing specs."""
+    monkeypatch.setenv("COTDATA_STORE", str(tmp_path))
+    from cotdata import store
+
+    sym_es = mock.Mock(internal="ES", norgate="&ES")
+    sym_nq = mock.Mock(internal="NQ", norgate="&NQ")
+
+    def fake_meta(sym):
+        base = {"Symbol": sym, "Norgate_Symbol": f"&{sym}_CCB"}
+        if sym == "NQ":                                   # all specs empty → junk
+            return {**base, **{k: None for k in norgate._SPEC_FIELDS}}
+        return {**base, **{k: None for k in norgate._SPEC_FIELDS}, "Tick Size": 0.25}
+
+    with mock.patch("cotdata.providers.norgate.all_symbols", return_value=[sym_es, sym_nq]), \
+         mock.patch.dict("cotdata.providers.norgate.REGISTRY", {"ES": sym_es, "NQ": sym_nq}), \
+         mock.patch("cotdata.providers.norgate.get_symbol_metadata", side_effect=fake_meta):
+        norgate.update_metadata()  # full run
+
+    assert set(store.read_metadata()["Symbol"]) == {"ES"}   # NQ null row skipped
 
 
 def test_metadata_skips_symbols_without_norgate_coverage(tmp_path, monkeypatch):
