@@ -20,10 +20,12 @@ Equities:
   # roll gaps). COT is the real futures positioning (ICE Futures U.S.).
   MME:                      # MSCI Emerging Markets Index (ICE) — priced via EEM
     cftc_code: "244042"
+    norgate: null           # no Norgate continuous series — priced off the ETF proxy
     yahoo: "EEM"
   MFS:                      # MSCI EAFE Index (ICE) — priced via EFA
     cftc_code: "244041"
-    yahoo: "EFA"
+    norgate: null           # (Norgate doesn't carry MSCI intl indices) — skip in the
+    yahoo: "EFA"            #  Norgate producer; the yfinance provider prices these
 
 Metals:
   GC:

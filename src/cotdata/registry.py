@@ -26,7 +26,9 @@ from typing import Dict, List, Optional
 @dataclass(frozen=True)
 class Symbol:
     internal: str                 # pipeline root, e.g. "ES"
-    norgate: str                  # Norgate continuous symbol, e.g. "&ES"
+    norgate: Optional[str]        # Norgate continuous symbol, e.g. "&ES"; None when
+                                  # Norgate has no series (norgate: null in YAML) —
+                                  # the Norgate producer skips these (priced elsewhere)
     asset_class: str
     is_equity: bool
     report_type: str = "disagg"   # "tff" for financials, "disagg" for commodities
