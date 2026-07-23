@@ -114,11 +114,24 @@ def run_batch_backfill(symbols: list) -> None:
                 df_clean.to_parquet(_cache_dir() / f"{internal_sym}_daily.parquet")
 
 
-def fetch_daily_ohlc(symbol: str, start_date: str = "2000-01-01",
-                     force_refresh: bool = False, price_type: str = "close") -> pd.DataFrame:
+def fetch_daily_ohlc(symbol: str, force_refresh: bool = False,
+                     price_type: str = "close") -> pd.DataFrame:
     """Daily OHLC + Open Interest via Databento (GLBX.MDP3 ohlcv-1d + statistics),
     append-only cache; yfinance fallback for _DATABENTO_UNSUPPORTED. price_type
-    'settlement' pulls stat_type 3 dated by ts_ref."""
+    'settlement' pulls stat_type 3 dated by ts_ref.
+
+    Always maintains a FROM-INCEPTION cache (2000-01-01, clamped to the GLBX.MDP3
+    floor 2010-06-06 on first fetch) and incrementally tops it up from the last
+    cached date on every call — there is no bounded/windowed fetch. A `start_date`
+    parameter used to sit here but was dead: every code path ignored it (cold cache
+    always started at 2000-01-01; warm cache always resumed at last_date+1), so a
+    caller passing it to bound a fetch silently got a full-history pull instead, at
+    full API cost. Removed rather than wired in, since nothing in this workspace
+    was relying on it working (grep confirmed the only real caller,
+    update_all_daily_prices, never passed it) — better an explicit TypeError for a
+    future caller than another silent full-history surprise. A genuinely bounded
+    fetch, if one is ever needed, should be a new function with its own test
+    proving the bound is honored, not this parameter reinstated."""
     import databento as db
     display_sym = symbol
     _pt_suffix = "" if price_type == "close" else f"_{price_type}"
