@@ -25,18 +25,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   generalization markets. ([#24](https://github.com/mspinola/cotdata/pull/24))
 
 ### Fixed
-- **Removed the dead `start_date` parameter from `databento.fetch_daily_ohlc`**
-  (dormant provider). It was silently ignored on every code path — a cold cache
-  always backfilled from 2000-01-01 (clamped to the GLBX.MDP3 floor
-  2010-06-06) and a warm cache always resumed from `last_date + 1 day`
-  regardless of what was passed — so a caller trying to bound a fetch (e.g.
-  "just the last 3 months") got a full-history pull instead, at full Databento
-  API cost, with no error or warning. No caller in this workspace relied on it
-  working (the function's only real caller never passed it), so it is removed
-  rather than wired in: an explicit `TypeError` for anyone who passes it now
-  beats another silent full-history surprise. `fetch_daily_ohlc` always
-  maintains a from-inception, incrementally-updated cache; a genuinely bounded
-  fetch would need a new function with its own test proving the bound holds.
+- **`databento.fetch_daily_ohlc`'s `start_date` parameter now actually does
+  something** (dormant provider). It was previously silently ignored on every
+  code path — a cold cache always backfilled from 2000-01-01 and a warm cache
+  always resumed from `last_date + 1 day` regardless of what was passed — so a
+  caller trying to bound a fetch (e.g. "just the last 3 months") got a
+  full-history pull instead, at full Databento API cost, with no error or
+  warning. Now: on a **cold** cache (a symbol's first-ever fetch) `start_date`
+  narrows the fetch floor, so a narrow first-time query is actually cheap. On
+  a **warm** cache it does *not* narrow the incremental fetch — the top-up
+  always resumes from the cache's own `last_date + 1`, so a later, narrower
+  `start_date` can never silently truncate a cache other callers already rely
+  on being complete — but the *returned* frame is still filtered to
+  `>= start_date` either way. The on-disk cache always persists the full
+  series regardless of `start_date`; only the fetch cost (cold cache) and the
+  return value (always) are affected.
 - **Fail fast when the Norgate service (NDU) is unreachable** — the producer now
   probes `norgatedata.status()` before fetching and aborts with a clear error and
   a non-zero exit. Previously norgatedata retried each call 10x then called bare
