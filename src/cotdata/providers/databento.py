@@ -22,6 +22,7 @@ import sys
 import time
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -114,11 +115,41 @@ def run_batch_backfill(symbols: list) -> None:
                 df_clean.to_parquet(_cache_dir() / f"{internal_sym}_daily.parquet")
 
 
-def fetch_daily_ohlc(symbol: str, start_date: str = "2000-01-01",
+def fetch_daily_ohlc(symbol: str, start_date: Optional[str] = None,
                      force_refresh: bool = False, price_type: str = "close") -> pd.DataFrame:
     """Daily OHLC + Open Interest via Databento (GLBX.MDP3 ohlcv-1d + statistics),
     append-only cache; yfinance fallback for _DATABENTO_UNSUPPORTED. price_type
-    'settlement' pulls stat_type 3 dated by ts_ref."""
+    'settlement' pulls stat_type 3 dated by ts_ref.
+
+    The cache is always a single, from-inception, append-only series per
+    symbol+price_type, shared across every caller — that is what makes repeated
+    calls cheap. `start_date` therefore means two different things depending on
+    whether it is the FIRST call for a symbol or not, and both are deliberate:
+
+    * **Cold cache (symbol never fetched before):** `start_date` clamps the fetch
+      floor (still no lower than the GLBX.MDP3 history floor 2010-06-06), so a
+      narrow first-time query — e.g. "just the last 3 months" — actually costs a
+      narrow API pull, not a from-2000 one.
+    * **Warm cache (symbol already has some history):** `start_date` does NOT
+      change what gets fetched — the top-up always resumes from the cache's
+      `last_date + 1 day`, exactly as before. Letting a later, narrower
+      `start_date` shrink the fetch would silently truncate a cache other
+      callers already rely on being complete. `start_date` still filters what is
+      RETURNED to this call, just not what is fetched or persisted.
+
+    In both cases the returned frame never contains rows before `start_date` — the
+    filter is applied uniformly to whatever the cache ends up holding. `None`
+    (the default) is unbounded: full cached history, unfiltered, unchanged
+    behaviour from before this parameter existed.
+
+    One consequence of the "warm cache never shrinks its floor" rule: if a symbol's
+    cache was FIRST populated by a narrow `start_date` (e.g. "since 2024"), a later
+    call asking for `start_date="2010-01-01"` will NOT backfill 2010-2023 — the
+    cache only ever grows forward. Not a concern for the one real caller today
+    (`update_all_daily_prices`, which never passes `start_date` and always wants
+    full history), but worth knowing before relying on this for a symbol multiple
+    call sites touch with different windows.
+    """
     import databento as db
     display_sym = symbol
     _pt_suffix = "" if price_type == "close" else f"_{price_type}"
@@ -135,24 +166,33 @@ def fetch_daily_ohlc(symbol: str, start_date: str = "2000-01-01",
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to read cache for %s: %s", display_sym, e)
 
+    def _filtered(df: pd.DataFrame) -> pd.DataFrame:
+        if start_date and not df.empty:
+            return df[df.index >= pd.Timestamp(start_date)]
+        return df
+
     if local_df.empty:
-        fetch_start = "2000-01-01"
+        # Cold cache: start_date narrows the fetch floor (still API-cost-bounded
+        # by the GLBX floor below), so a first-time narrow query is actually cheap.
+        fetch_start = start_date if start_date else "2000-01-01"
     else:
+        # Warm cache: start_date does NOT narrow this — see the docstring. It only
+        # affects the return-value filter below.
         last_date = local_df.index.max()
         today = pd.Timestamp.now().normalize()
         if last_date >= today - pd.Timedelta(days=1):
-            return local_df
+            return _filtered(local_df)
         if "--fast" in sys.argv:
-            return local_df
+            return _filtered(local_df)
         now = time.time()
         if not force_refresh and (now - _API_LAST_CHECKED.get(symbol, 0) < 3600):
-            return local_df
+            return _filtered(local_df)
         _API_LAST_CHECKED[symbol] = now
         fetch_start = (last_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
     fetch_end = (pd.Timestamp.now() - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     if pd.Timestamp(fetch_start) >= pd.Timestamp(fetch_end):
-        return local_df
+        return _filtered(local_df)
 
     new_df = pd.DataFrame()
     db_key = os.environ.get("DATABENTO_API_KEY")
@@ -245,12 +285,12 @@ def fetch_daily_ohlc(symbol: str, start_date: str = "2000-01-01",
     if not local_df.empty and not new_df.empty:
         new_df = new_df[new_df.index > local_df.index.max()]
     if new_df.empty:
-        return local_df
+        return _filtered(local_df)
     new_df = new_df.dropna(subset=["Close"])
     combined = pd.concat([local_df, new_df]) if not local_df.empty else new_df
     combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-    combined.to_parquet(cache_path)
-    return combined
+    combined.to_parquet(cache_path)          # cache always persists the FULL series
+    return _filtered(combined)               # start_date only shapes what's returned
 
 
 def update_all_daily_prices(force_refresh: bool = False) -> None:
