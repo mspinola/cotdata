@@ -1,8 +1,8 @@
 """cotdata — canonical data layer (see README). Public consumer API."""
-from .prices import get_prices, roll_dates
 from .cot import get_cot
-from .registry import symbol, all_symbols, REGISTRY, Symbol
-from .store import load_manifest, schema_version, require_schema
+from .prices import get_prices, roll_dates
+from .registry import REGISTRY, Symbol, all_symbols, symbol
+from .store import load_manifest, require_schema, schema_version
 
 __version__ = "0.1.0"
 __all__ = [

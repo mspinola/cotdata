@@ -1,9 +1,9 @@
 """Canonical store I/O: atomic Parquet writes + a manifest. The store is the
 contract between producers (write) and consumers (read)."""
+import datetime as dt
 import json
 import os
 import tempfile
-import datetime as dt
 from pathlib import Path
 
 import pandas as pd

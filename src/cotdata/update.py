@@ -49,7 +49,7 @@ def main() -> None:
         return
 
     if args.reconcile:
-        from . import store, status
+        from . import status, store
         pruned = store.reconcile_manifest()
         if not pruned:
             print("manifest reconcile: nothing to prune (all entries have files).")

@@ -15,7 +15,7 @@ import pytest
 mock_databento = types.ModuleType("databento")
 sys.modules["databento"] = mock_databento
 
-from cotdata.providers import databento as dbprov
+from cotdata.providers import databento as dbprov  # noqa: E402,I001 (import after sys.modules mock injection above)
 
 
 def _client(ohlcv_df, stats_df):

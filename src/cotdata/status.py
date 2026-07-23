@@ -9,7 +9,7 @@ import json
 import os
 from typing import Optional
 
-from . import store, config
+from . import config, store
 
 STATUS_FILENAME = "status.json"
 
