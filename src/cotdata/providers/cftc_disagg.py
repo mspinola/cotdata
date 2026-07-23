@@ -5,7 +5,6 @@ and detailed entity columns), and writes per-code weekly positioning tables to
 the store via store.write_cot_disagg().
 """
 import datetime as dt
-import io
 import zipfile
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -60,10 +59,10 @@ def _parse_zip(zip_path: Path) -> pd.DataFrame:
         with zf.open(zf.namelist()[0]) as fh:
             # The .txt files are actually CSVs. low_memory=False prevents dtype warnings.
             df = pd.read_csv(fh, low_memory=False)
-            
+
     # Strip any trailing whitespace from column names BEFORE accessing them
     df.columns = df.columns.str.strip()
-    
+
     # CFTC sometimes changes the date column name in Disaggregated reports
     if REPORT_DATE not in df.columns:
         date_cols = [c for c in df.columns if "Report_Date" in c]
@@ -71,16 +70,16 @@ def _parse_zip(zip_path: Path) -> pd.DataFrame:
             df.rename(columns={date_cols[0]: REPORT_DATE}, inplace=True)
         else:
             print(f"AVAILABLE COLUMNS: {list(df.columns)}")
-            
+
     # Coerce the key schema columns to match the Legacy schema format
     df[CONTRACT_CODE] = df[CONTRACT_CODE].apply(_standardize_code)
     df[REPORT_DATE] = pd.to_datetime(df[REPORT_DATE]).dt.tz_localize(None)
-    
+
     # Parquet cannot serialize mixed-type object columns (e.g. Traders_Tot_Old contains ints and strings)
     for col in df.select_dtypes(include=['object']).columns:
         if col not in [CONTRACT_CODE, REPORT_DATE]:
             df[col] = df[col].astype(str)
-            
+
     return df
 
 
@@ -105,7 +104,7 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> dict:
         want = set(code_to_sym.keys())
 
     frames = []
-    
+
     # The CFTC bundles 2006-2016 in a single historical file
     if first_year <= 2016:
         url = "https://www.cftc.gov/files/dea/history/fut_disagg_txt_hist_2006_2016.zip"

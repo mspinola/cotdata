@@ -123,7 +123,7 @@ def test_falls_back_to_offset_jumps_without_delivery_month(store_env):
 
 
 def test_empty_when_either_series_missing(store_env):
-    from cotdata import store, get_prices
+    from cotdata import get_prices, store
     U, _ = _milk_like()
     store.write_prices("DC", "unadj", U, source="test")  # no backadj written
     assert get_prices("DC", "propadj").empty
@@ -131,7 +131,7 @@ def test_empty_when_either_series_missing(store_env):
 
 def test_reconstructed_volume_view_still_works_on_propadj(store_env):
     """The volume view composes with the derived adjustment."""
-    from cotdata import store, get_prices
+    from cotdata import get_prices, store
     U, B = _milk_like()
     U["Volume_Reconstructed"] = [15, 14, 10, 18, 20, 22, 25, 24, 26]
     U["Volume_Source"] = ["reconstructed"] * 9

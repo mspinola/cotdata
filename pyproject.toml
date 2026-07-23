@@ -38,7 +38,7 @@ norgate = ["norgatedata"]
 databento = ["databento>=0.30"]
 
 yahoo = ["yfinance"]
-dev = ["pytest>=7", "ruff>=0.1.0"]
+dev = ["pytest>=7", "ruff==0.15.22"]
 
 [project.scripts]
 cotdata-update = "cotdata.update:main"

@@ -21,7 +21,7 @@ def _sample():
 
 
 def test_prices_roundtrip_and_manifest(store_env):
-    from cotdata import store, get_prices, load_manifest
+    from cotdata import get_prices, load_manifest, store
     store.write_prices("ES", "backadj", _sample(), source="test")
 
     df = get_prices("ES", "backadj")
@@ -64,7 +64,7 @@ def test_reconcile_noop_when_clean(store_env):
 
 
 def test_roll_dates_from_delivery_month(store_env):
-    from cotdata import store, roll_dates
+    from cotdata import roll_dates, store
     store.write_prices("ES", "backadj", _sample(), source="test")
     rolls = roll_dates("ES", "backadj")
     # first bar + the delivery-month change on day 4
@@ -89,7 +89,7 @@ def _sample_reconstructed():
 
 def test_default_volume_view_is_byte_identical(store_env):
     """volume='front' (default) must not change the pre-v2 output shape."""
-    from cotdata import store, get_prices
+    from cotdata import get_prices, store
     store.write_prices("ES", "backadj", _sample_reconstructed(), source="test")
 
     df = get_prices("ES", "backadj")  # default volume='front'
@@ -103,7 +103,7 @@ def test_default_volume_view_is_byte_identical(store_env):
 def test_reconstructed_volume_view(store_env):
     """volume='reconstructed' swaps Volume in, keeps per-row raw fallback, and
     surfaces Volume_Source for audit."""
-    from cotdata import store, get_prices
+    from cotdata import get_prices, store
     store.write_prices("ES", "backadj", _sample_reconstructed(), source="test")
 
     df = get_prices("ES", "backadj", volume="reconstructed")
@@ -118,7 +118,7 @@ def test_reconstructed_volume_view(store_env):
 def test_reconstructed_view_falls_back_on_pre_v2_store(store_env):
     """A store written before reconstruction existed → reconstructed view returns
     front-month volume labelled 'raw', never NaN."""
-    from cotdata import store, get_prices
+    from cotdata import get_prices, store
     store.write_prices("ES", "backadj", _sample(), source="test")  # no recon cols
 
     df = get_prices("ES", "backadj", volume="reconstructed")
@@ -127,7 +127,7 @@ def test_reconstructed_view_falls_back_on_pre_v2_store(store_env):
 
 
 def test_invalid_volume_arg_raises(store_env):
-    from cotdata import store, get_prices
+    from cotdata import get_prices, store
     store.write_prices("ES", "backadj", _sample(), source="test")
     with pytest.raises(ValueError):
         get_prices("ES", "backadj", volume="bogus")
@@ -166,8 +166,8 @@ def test_upsert_metadata_on_empty_store_writes_all(store_env):
 
 
 def test_schema_version_and_require_schema(store_env):
-    from cotdata import store, schema_version, require_schema
     import cotdata.config as cfg
+    from cotdata import require_schema, schema_version, store
 
     # Empty store → no manifest yet → load_manifest defaults to config.SCHEMA_VERSION
     assert schema_version() == cfg.SCHEMA_VERSION

@@ -17,10 +17,11 @@ equity-vs-commodity rules key off); it is derived from asset_class == "Equities"
 unless a symbol overrides it explicitly.
 """
 import os
-import yaml
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
+
+import yaml
 
 
 @dataclass(frozen=True)

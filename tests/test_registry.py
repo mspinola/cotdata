@@ -4,7 +4,11 @@ import textwrap
 import pytest
 
 from cotdata.registry import (
-    Symbol, symbol, all_symbols, by_asset_class, hist_code_scales, load_registry,
+    all_symbols,
+    by_asset_class,
+    hist_code_scales,
+    load_registry,
+    symbol,
 )
 
 

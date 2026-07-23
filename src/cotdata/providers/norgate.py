@@ -11,13 +11,14 @@ stitched out). A close-based stop needs the gap-free series → we fetch _CCB.
 from __future__ import annotations  # PEP 604 unions (dict | None) on Python 3.9
 
 import datetime as dt
-import pandas as pd
-import numpy as np
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ..registry import REGISTRY, all_symbols
+import numpy as np
+import pandas as pd
+
 from .. import store
+from ..registry import REGISTRY, all_symbols
 
 CCB_SUFFIX = "_CCB"  # Norgate "Continuous Contract Back-adjusted"
 
@@ -67,14 +68,14 @@ def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjus
         if len(valid_dates) > 0:
             # Recompute trailing 60 days to catch late data & bridge partial failures
             last_date = valid_dates.max() - pd.Timedelta(days=60)
-            
+
     # Base Norgate symbol (e.g. "&ES" -> "ES")
     base_sym = REGISTRY[internal_symbol].norgate.lstrip("&").split("_")[0]
-    
+
     # 2. Find needed individual contracts
     all_futures = norgatedata.database_symbols('Futures')
     pattern = re.compile(rf"^{re.escape(base_sym)}-(\d{{4}})([FGHJKMNQUVXZ])$")
-    
+
     needed_contracts = []
     for sym in all_futures:
         m = pattern.match(sym)
@@ -83,7 +84,7 @@ def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjus
             expiry_date = pd.Timestamp(year=year, month=month, day=1) + pd.DateOffset(months=1)
             if expiry_date >= last_date:
                 needed_contracts.append(sym)
-                
+
     # 3. Fallback: if no individual contracts (e.g., crypto, ICE softs)
     if not needed_contracts:
         res = continuous_df.copy()
@@ -100,12 +101,12 @@ def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjus
     with ThreadPoolExecutor(max_workers=10) as pool:
         futs = {
             pool.submit(
-                norgatedata.price_timeseries, 
-                c, 
-                padding_setting=norgatedata.PaddingType.NONE, 
-                timeseriesformat="pandas-dataframe", 
+                norgatedata.price_timeseries,
+                c,
+                padding_setting=norgatedata.PaddingType.NONE,
+                timeseriesformat="pandas-dataframe",
                 start_date=last_date.strftime("%Y-%m-%d")
-            ): c 
+            ): c
             for c in needed_contracts
         }
         for f in as_completed(futs):
@@ -130,10 +131,10 @@ def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjus
         res["Volume_Reconstructed"] = res["Volume"]
         res["Volume_Source"] = "raw"
         return res
-        
+
     all_indiv = pd.concat(frames, ignore_index=True)
     all_indiv['Date'] = pd.to_datetime(all_indiv['Date']).dt.tz_localize(None).dt.normalize()
-    
+
     # 5. Contract identification: First / Second = the two HIGHEST-VOLUME contracts
     # trading that day, NOT the two nearest by expiry. Products with serial months
     # around a bi-monthly liquid cycle (e.g. GC, SI) carry almost no volume in the
@@ -155,9 +156,9 @@ def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjus
     order = np.argsort(-rank_key, axis=1, kind='stable')
     compressed = np.take_along_axis(vol_array, order, axis=1)
     names_arr = np.array(pivot.columns)
-    
+
     rec_df = pd.DataFrame(index=pivot.index)
-    
+
     num_cols = compressed.shape[1]
     if num_cols > 0:
         rec_df['FirstVolume'] = compressed[:, 0]
@@ -165,18 +166,18 @@ def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjus
     else:
         rec_df['FirstVolume'] = np.nan
         rec_df['FirstContract'] = ''
-        
+
     if num_cols > 1:
         rec_df['SecondVolume'] = compressed[:, 1]
         rec_df['SecondContract'] = np.where(np.isnan(compressed[:, 1]), '', names_arr[order[:, 1]])
     else:
         rec_df['SecondVolume'] = np.nan
         rec_df['SecondContract'] = ''
-        
+
     rec_df['Volume_Reconstructed'] = rec_df['FirstVolume'].fillna(0) + rec_df['SecondVolume'].fillna(0)
     rec_df.loc[rec_df['FirstVolume'].isna() & rec_df['SecondVolume'].isna(), 'Volume_Reconstructed'] = np.nan
     rec_df['Volume_Source'] = "reconstructed"
-    
+
     # 6. Merge the newly reconstructed subset into the existing history
     for col in ["FirstVolume", "SecondVolume", "FirstContract", "SecondContract", "Volume_Reconstructed", "Volume_Source"]:
         if col not in res.columns:
@@ -184,9 +185,9 @@ def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjus
                 res[col] = existing_df[col]
             else:
                 res[col] = "" if col in ("FirstContract", "SecondContract", "Volume_Source") else np.nan
-                
+
     res.update(rec_df)
-    
+
     common_idx = res.index.intersection(rec_df.index)
     for col in ["FirstContract", "SecondContract"]:
         res.loc[common_idx, col] = rec_df.loc[common_idx, col]
@@ -194,7 +195,7 @@ def _reconstruct_volume(internal_symbol: str, continuous_df: pd.DataFrame, adjus
     mask = res['Volume_Reconstructed'].isna()
     res.loc[mask, 'Volume_Reconstructed'] = res.loc[mask, 'Volume']
     res.loc[mask, 'Volume_Source'] = "raw"
-    
+
     return res
 
 
@@ -204,7 +205,7 @@ def fetch(internal_symbol: str, adjustment: str = "backadj", start: str = "1970-
     ng_sym = REGISTRY[internal_symbol].norgate
     if adjustment == "backadj":
         ng_sym += CCB_SUFFIX
-        
+
     df = norgatedata.price_timeseries(
         ng_sym,
         padding_setting=norgatedata.PaddingType.NONE,
@@ -330,6 +331,7 @@ def update(symbols=None, full: bool = False) -> None:
     logic change so old rows are recomputed under the new algorithm.
     """
     import time
+
     from .. import status
 
     _require_norgate_service()  # abort cleanly if NDU is down (see helper docstring)

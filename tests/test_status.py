@@ -86,8 +86,10 @@ def test_build_status_doc_flat_map_and_domains():
 
 def test_write_status_file_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("COTDATA_STORE", str(tmp_path))
-    from cotdata import store, status as st
     import json
+
+    from cotdata import status as st
+    from cotdata import store
     # seed the store manifest via a real write
     idx = __import__("pandas").date_range("2026-07-10", periods=3, freq="D", name="Date")
     df = __import__("pandas").DataFrame({"Open": [1, 2, 3], "High": [1, 2, 3], "Low": [1, 2, 3],

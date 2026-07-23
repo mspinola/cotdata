@@ -9,8 +9,8 @@ overnight move at roll dates (where Delivery Month changes).
 
 Run on Windows:  python test_adjustment.py
 """
-import numpy as np
 import pandas as pd
+
 try:
     import norgatedata
 except ImportError:

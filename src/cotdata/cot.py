@@ -28,7 +28,7 @@ def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
     sym = REGISTRY.get(name)
     if sym is None:                       # allow lookup by primary CFTC code, not just symbol
         sym = next((s for s in REGISTRY.values() if s.cftc_code == name), None)
-    
+
     read_fn = {
         "legacy": store.read_cot_legacy,
         "disagg": store.read_cot_disagg,

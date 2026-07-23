@@ -1,5 +1,7 @@
 import zipfile
-from cotdata.providers.cftc_disagg import _parse_zip, CONTRACT_CODE, REPORT_DATE
+
+from cotdata.providers.cftc_disagg import CONTRACT_CODE, REPORT_DATE, _parse_zip
+
 
 def test_disagg_fidelity_preserves_columns(tmp_path):
     """
@@ -14,16 +16,16 @@ def test_disagg_fidelity_preserves_columns(tmp_path):
     zip_path = tmp_path / "fut_disagg_txt_2021.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.writestr("f_year.txt", csv_content)
-        
+
     df = _parse_zip(zip_path)
-    
+
     # 9 columns in the CSV -> 9 columns in the parsed DataFrame
     assert len(df.columns) == 9, "Lossless parsing must preserve all columns from the zip"
-    
+
     # Check that crucial non-legacy columns survived
     assert "Traders_Tot_All" in df.columns
     assert "Swap__Positions_Long_All" in df.columns
-    
+
     # Check that coercion worked
     assert df[CONTRACT_CODE].iloc[0] == "002602", "Contract code must be 6-digit zero padded"
     assert df[REPORT_DATE].iloc[0].year == 2021, "Report date must be parsed to datetime"
