@@ -21,10 +21,12 @@ Equities:
   MME:                      # MSCI Emerging Markets Index (ICE) — priced via EEM
     cftc_code: "244042"
     norgate: null           # no Norgate continuous series — priced off the ETF proxy
+    databento: null         # ICE product — not on GLBX.MDP3
     yahoo: "EEM"
   MFS:                      # MSCI EAFE Index (ICE) — priced via EFA
     cftc_code: "244041"
     norgate: null           # (Norgate doesn't carry MSCI intl indices) — skip in the
+    databento: null         # ICE product — not on GLBX.MDP3
     yahoo: "EFA"            #  Norgate producer; the yfinance provider prices these
 
 Metals:
@@ -103,19 +105,35 @@ Fixed Income:
   ZB:
     cftc_code: "020601"
 
+# Softs trade on ICE, not CME Globex, so databento GLBX.MDP3 carries no series for
+# them (see providers/databento.py _DATABENTO_UNSUPPORTED). Norgate covers them for
+# local research; a databento deployment falls back to the Yahoo continuous futures
+# below (research-grade). LBR's Yahoo symbol is unverified, confirm before relying on it.
 Softs:
   SB:
     cftc_code: "080732"
+    databento: null
+    yahoo: "SB=F"
   CT:
     cftc_code: "033661"
+    databento: null
+    yahoo: "CT=F"
   CC:
     cftc_code: "073732"
+    databento: null
+    yahoo: "CC=F"
   KC:
     cftc_code: "083731"
+    databento: null
+    yahoo: "KC=F"
   OJ:
     cftc_code: "040701"
+    databento: null
+    yahoo: "OJ=F"
   LBR:
     cftc_code: "058644"
+    databento: null
+    yahoo: "LBS=F"          # unverified Yahoo lumber symbol — confirm before relying
     hist_codes:
       - ["058643", 4.0]
 

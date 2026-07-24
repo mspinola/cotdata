@@ -34,7 +34,8 @@ Issues = "https://github.com/mspinola/cotdata/issues"
 [project.optional-dependencies]
 # Producer-only, Windows: the Norgate Data Updater must be installed & running.
 norgate = ["norgatedata"]
-# Dormant provider, retained for the intraday news-failure work + settlement cross-check.
+# Cross-platform price producer: two-stage ingest/build back-adjustment (see the
+# Providers section of the README and ADR-0006). Also serves the intraday work.
 databento = ["databento>=0.30"]
 
 yahoo = ["yfinance"]

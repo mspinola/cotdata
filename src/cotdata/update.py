@@ -15,8 +15,15 @@ def main() -> None:
     p.add_argument("--prices", action="store_true", help="Update Norgate price bars (Windows).")
     p.add_argument("--metadata", action="store_true", help="Update Norgate contract metadata (Windows).")
     p.add_argument("--prices-yahoo", action="store_true",
-                   help="Update prices from Yahoo Finance for registry symbols with a "
-                        "'yahoo' ticker (cross-platform; research-grade).")
+                   help="Update prices from Yahoo Finance for registry symbols that resolve to "
+                        "yfinance on this deployment (cross-platform; research-grade).")
+    p.add_argument("--ingest-databento", action="store_true",
+                   help="Databento Stage 1 (paid API, cross-platform): fetch raw .n.0/.n.1 "
+                        "ohlcv-1d + statistics into the append-only raw store ($COTDATA_DATABENTO_RAW). "
+                        "Resumable — re-runs only pull new dates. Needs DATABENTO_API_KEY.")
+    p.add_argument("--build-databento", action="store_true",
+                   help="Databento Stage 2 (free, no API): build back-adjusted prices from the "
+                        "raw store into the cotdata store. Run after --ingest-databento.")
     p.add_argument("--cot-legacy", action="store_true", help="Update CFTC COT Legacy (cross-platform).")
     p.add_argument("--cot-disagg", action="store_true", help="Update CFTC COT Disaggregated Futures-Only (cross-platform).")
     p.add_argument("--cot-tff", action="store_true", help="Update Traders in Financial Futures (TFF) COT (cross-platform).")
@@ -64,8 +71,10 @@ def main() -> None:
                                                "at": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"})
         return
 
-    if not (args.prices or args.metadata or args.prices_yahoo or args.cot_legacy or args.cot_disagg or args.cot_tff or args.cot_all):
-        p.error("nothing to do — pass --check, --prices, --prices-yahoo, --metadata, --cot-legacy, --cot-disagg, --cot-tff, or --cot-all")
+    if not (args.prices or args.metadata or args.prices_yahoo or args.ingest_databento
+            or args.build_databento or args.cot_legacy or args.cot_disagg or args.cot_tff or args.cot_all):
+        p.error("nothing to do — pass --check, --prices, --prices-yahoo, --ingest-databento, "
+                "--build-databento, --metadata, --cot-legacy, --cot-disagg, --cot-tff, or --cot-all")
 
     if args.prices or args.metadata:
         from .providers import norgate
@@ -98,6 +107,20 @@ def main() -> None:
         kinds.append("prices_yahoo")
         if not (r or {}).get("ok", True):
             failed_kinds.append("prices_yahoo")
+
+    if args.ingest_databento:
+        from .providers import databento
+        r = databento.ingest(symbols=args.symbols)
+        kinds.append("ingest_databento")
+        if not (r or {}).get("ok", True):
+            failed_kinds.append("ingest_databento")
+
+    if args.build_databento:
+        from .providers import databento
+        r = databento.build(symbols=args.symbols)
+        kinds.append("build_databento")
+        if not (r or {}).get("ok", True):
+            failed_kinds.append("build_databento")
 
     if args.cot_legacy or args.cot_all:
         from .providers import cftc

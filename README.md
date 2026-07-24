@@ -22,6 +22,8 @@ cotdata separates *fetching* data (a "producer" that talks to vendors) from *usi
 |------|--------|------|---------|
 | CFTC COT — legacy / disaggregated / TFF | [cftc.gov](https://www.cftc.gov/) | **Free** | any OS |
 | Futures prices + contract specs | [Norgate Data](https://norgatedata.com/) | Paid subscription | **Windows** (producer only) |
+| Futures prices, back-adjusted | [Databento](https://databento.com/) GLBX.MDP3 | Paid per query | any OS |
+| Futures prices, research-grade fallback | Yahoo Finance | **Free** | any OS |
 | *Reading the store* (any of the above) | — | Free | any OS |
 
 ## Contents
@@ -116,7 +118,7 @@ Date
 
 ## Producing data (producer)
 
-Run on the machine that can reach the source. Norgate prices require Windows; CFTC COT runs anywhere.
+Run on the machine that can reach the source. Norgate prices require Windows, CFTC COT runs anywhere, and a server without Norgate can build prices from Databento instead (see [Cross-platform prices without Norgate](#cross-platform-prices-without-norgate-databento)).
 
 ```bash
 COTDATA_STORE=/store  cotdata-update --prices                    # Norgate prices, ALL registry symbols (Windows)
@@ -137,6 +139,35 @@ pip install "cotdata[norgate]"     # adds the norgatedata dependency (Windows)
 ```
 
 The `norgatedata` package talks locally to the Norgate Data Updater application — there are no API keys. You just need the Updater installed, authenticated, and running.
+
+### Cross-platform prices without Norgate (databento)
+
+A server that cannot run Norgate (for example the public dashboard host) can build the price store from Databento instead. One provider owns each symbol end to end, so this is a full replacement, not a blend. Install the extras and set the environment:
+
+```bash
+pip install "cotdata[databento,yahoo]"      # databento producer + the Yahoo fallback
+
+export COTDATA_STORE=/path/to/store         # the store the dashboard reads
+export COTDATA_PRICE_SOURCE=databento       # deployment default, so softs/MSCI fall to Yahoo
+export DATABENTO_API_KEY=db-...             # for the paid ingest step only
+# optional: export COTDATA_DATABENTO_RAW=/path/to/raw   # defaults to $COTDATA_STORE/_raw/databento
+```
+
+Then build the store in order (ingest before build):
+
+```bash
+cotdata-update --ingest-databento     # Stage 1 (PAID): raw .n.0/.n.1 ohlcv-1d + statistics -> raw store
+cotdata-update --build-databento      # Stage 2 (FREE): additive back-adjustment -> $COTDATA_STORE/prices
+cotdata-update --prices-yahoo         # softs, lumber, MSCI proxies (resolve to Yahoo on this deployment)
+cotdata-update --cot-all              # CFTC COT, the dashboard needs it too
+cotdata-update --check                # coverage, newest dates, staleness
+```
+
+- **Two stages, one paid.** Stage 1 is the only step that hits the API. It writes an append-only raw store and resumes from the last fetched date, so re-runs pull only new days. Stage 2 reads that raw store with no API cost, so the back-adjustment can be iterated offline. The raw store is producer-internal, so keep it out of any sync to consumers.
+- **History starts 2010-06-06** (the GLBX floor), shallower than Norgate. Markets not on CME Globex (ICE softs, lumber, MSCI intl) fall back to Yahoo.
+- **First-run check.** A healthy symbol prints `built unadj+backadj (N bars, K rolls)`. If it prints `no rolls detected`, back-adjustment is a no-op for that symbol, so investigate before trusting it.
+- **Validate against Norgate** (optional gate) with `scripts/validate_databento_vs_norgate.py` if you have both stores.
+- **Schedule** the two price commands nightly and `--cot-all` weekly (cron on Linux, the same idea as the Windows section below).
 
 ### Scheduling on Windows (Task Scheduler)
 
@@ -206,6 +237,55 @@ foreach ($t in "cotdata prices","cotdata COT (Fri release)","cotdata COT (catch-
 
 **View / manage the jobs** any time in the Windows **Task Scheduler** GUI — press `Win + R` and run `taskschd.msc`, or open *Task Scheduler* from the Start menu — then look under **Task Scheduler Library** for the `cotdata …` tasks.
 
+### Scheduling on Linux (cron)
+
+A databento server schedules the same way: **prices nightly**, **COT caught soon after its Friday ~3:30pm ET release**, with a daily catch-up for holiday delays. The same two properties hold:
+
+- **Idempotent.** `--cot-all` HEAD-checks each CFTC year zip and skips it if unchanged. `--ingest-databento` resumes from the last fetched date, so a re-run pulls only new days. Running before new data lands is a harmless no-op.
+- **Fails loudly.** A run exits non-zero only on a hard fetch error (source unreachable), not when there is simply nothing new. Because ingest is resumable and COT is idempotent, a failed or missed run is picked up by the next one, so no explicit retry logic is needed.
+
+Cron runs with a bare environment, so put the config and the venv path in a wrapper script (one per command, mirroring the Windows pair). Replace the `<...>` placeholders: `<STORE>` = your store, `<VENV>` = your virtualenv, `<KEY>` = your Databento key, `<DIR>` = the folder holding these scripts.
+
+`run-prices.sh` — the two-stage databento build plus the Yahoo fallback:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+export COTDATA_STORE=<STORE>
+export COTDATA_PRICE_SOURCE=databento
+export DATABENTO_API_KEY=<KEY>
+BIN=<VENV>/bin/cotdata-update
+"$BIN" --ingest-databento     # Stage 1 (paid): raw .n.0/.n.1 -> raw store
+"$BIN" --build-databento      # Stage 2 (free): back-adjusted prices
+"$BIN" --prices-yahoo         # softs / lumber / MSCI fallback
+```
+
+`run-cot.sh` — COT (note the different command):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+export COTDATA_STORE=<STORE>
+<VENV>/bin/cotdata-update --cot-all
+```
+
+Make them executable (`chmod +x run-prices.sh run-cot.sh`), then add the jobs with `crontab -e`. Cron uses the **server's local** timezone, so convert the ET times below if it is not on Eastern (or set the server to a known zone). `flock` stops a slow run from overlapping the next, and the redirect keeps a log:
+
+```cron
+# Prices — nightly (Mon-Sat). GLBX settlements are disseminated the morning after the
+# session, so an early-morning run captures the prior session's finalized settlement.
+30 6 * * 1-6     flock -n /tmp/cotdata-prices.lock <DIR>/run-prices.sh >> <DIR>/prices.log 2>&1
+
+# COT — daily morning catch-up (holiday-delayed releases and a safety net).
+10 8 * * *       flock -n /tmp/cotdata-cot.lock <DIR>/run-cot.sh >> <DIR>/cot.log 2>&1
+
+# COT — Friday release window: every 2 min across the ~3:30pm ET release (times in ET,
+# each run a cheap no-op until the zip changes). Convert to the server's local time.
+*/2 15-16 * * 5  flock -n /tmp/cotdata-cot.lock <DIR>/run-cot.sh >> <DIR>/cot.log 2>&1
+```
+
+Set `MAILTO=you@example.com` at the top of the crontab to have cron email the output of any run that writes to stderr or exits non-zero. For tighter alerting, point your monitoring at the log files or the store's `status.json` (see [Operations](#operations)), or run the wrappers from a systemd timer with `OnFailure=`. Check coverage and freshness any time with `cotdata-update --check`.
+
 **Monitoring:** after any run, `status.json` reflects `newest_data.<domain>` and `last_run.symbols_failed` — poll it to confirm the Friday COT actually advanced, or to alert on failures (see [Operations](#operations)).
 
 > The Friday window intentionally over-polls (every 2 minutes across a 45-minute window); idempotency makes every run after the release lands a no-op. If you'd rather actively wait out *late* releases, a wrapper can loop until `status.json`'s `newest_data.cot_legacy` reaches the expected Tuesday — but daily catch-up already covers holiday slips with far less machinery.
@@ -272,8 +352,11 @@ Norgate publishes continuous futures in only two forms: unadjusted and **additiv
 
 ### Providers & authentication
 
-- **Norgate Data (primary prices).** No Python API keys — the `norgatedata` package talks locally to the Norgate Data Updater app, which must be installed, authenticated, and running on Windows.
-- **Databento (dormant / intraday).** Kept as a dormant provider for potential intraday use. If enabled, provide `DATABENTO_API_KEY` via the environment.
+Which vendor prices a symbol is a deployment choice, not a fixed fact (the same ES is Norgate for local research and databento on a public-dash server). It is resolved when a producer runs, from three inputs: the deployment default `COTDATA_PRICE_SOURCE` (`norgate` if unset), per-symbol capability (the `norgate` / `databento` / `yahoo` mappings in the registry, `null` where a vendor has no series), and an optional per-symbol `price_source` override. A symbol uses its override if set, otherwise the default when that vendor can serve it, otherwise a Yahoo fallback where a ticker exists. Each producer writes only the symbols that resolve to it, so a symbol is never blended across vendors. One provider owns each symbol end to end.
+
+- **Norgate Data (paid, Windows).** No Python API key. The `norgatedata` package talks locally to the Norgate Data Updater app, which must be installed, authenticated, and running on Windows. This is the default for local research (`cotdata-update --prices`).
+- **Databento (paid, cross-platform).** A two-stage producer for a server that cannot run Norgate. Stage 1 (`cotdata-update --ingest-databento`) pulls raw `.n.0` / `.n.1` `ohlcv-1d` and `statistics` into an append-only raw store (`$COTDATA_DATABENTO_RAW`, else `_raw/databento` under the store). This is the only paid step, and it is resumable, so re-runs fetch only new dates. Stage 2 (`cotdata-update --build-databento`) derives the back-adjusted prices from the raw store with no API cost, so the build logic can be iterated offline. Set `DATABENTO_API_KEY` and `COTDATA_PRICE_SOURCE=databento`. History starts 2010-06-06, and markets not on CME Globex (ICE softs, lumber, MSCI intl) fall back to Yahoo. The raw store is producer-internal, so exclude it from any consumer sync.
+- **Yahoo Finance (free, research-grade).** `cotdata-update --prices-yahoo` prices the markets that resolve to yfinance on this deployment: the MSCI ETF proxies always, plus the softs and lumber on a databento server. Expect gaps and silent revisions. This is not a production replacement for the paid feeds. Requires the `[yahoo]` extra.
 
 ### The symbol registry
 
