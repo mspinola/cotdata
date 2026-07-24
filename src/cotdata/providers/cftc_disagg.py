@@ -73,7 +73,9 @@ def _parse_zip(zip_path: Path) -> pd.DataFrame:
 
     # Coerce the key schema columns to match the Legacy schema format
     df[CONTRACT_CODE] = df[CONTRACT_CODE].apply(_standardize_code)
-    df[REPORT_DATE] = pd.to_datetime(df[REPORT_DATE]).dt.tz_localize(None)
+    df[REPORT_DATE] = pd.to_datetime(df[REPORT_DATE], format='mixed').dt.tz_localize(None)
+    if not df.empty and df[REPORT_DATE].max() > pd.Timestamp.today().normalize() + pd.Timedelta(days=7):
+        raise ValueError(f"Date parsing sanity check failed: found future date {df[REPORT_DATE].max()}")
 
     # Parquet cannot serialize mixed-type object columns (e.g. Traders_Tot_Old contains ints and strings)
     for col in df.select_dtypes(include=['object']).columns:

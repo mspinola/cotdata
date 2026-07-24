@@ -95,7 +95,9 @@ def _parse_zip(zip_path: Path) -> pd.DataFrame:
             data = fh.read()
     df = pd.read_excel(io.BytesIO(data), usecols=TARGET_COLS)  # .xls → needs xlrd
     df[CONTRACT_CODE] = df[CONTRACT_CODE].apply(_standardize_code)
-    df[REPORT_DATE] = pd.to_datetime(df[REPORT_DATE]).dt.tz_localize(None)
+    df[REPORT_DATE] = pd.to_datetime(df[REPORT_DATE], format='mixed').dt.tz_localize(None)
+    if not df.empty and df[REPORT_DATE].max() > pd.Timestamp.today().normalize() + pd.Timedelta(days=7):
+        raise ValueError(f"Date parsing sanity check failed: found future date {df[REPORT_DATE].max()}")
     return df
 
 

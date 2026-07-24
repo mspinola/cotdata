@@ -15,7 +15,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .. import store
-from ..registry import all_symbols
+from ..registry import all_symbols, default_price_source, resolve_source
 
 
 def _fetch(ticker: str) -> pd.DataFrame:
@@ -35,10 +35,16 @@ def _fetch(ticker: str) -> pd.DataFrame:
 
 
 def update(symbols=None) -> dict:
-    """Fetch Yahoo OHLCV for registry symbols with a ``yahoo`` ticker (default: all
-    that have one; pass ``symbols`` to scope). Returns {kind, ok, wrote}."""
+    """Fetch Yahoo OHLCV for registry symbols that RESOLVE to yfinance on this
+    deployment (see registry.resolve_source): markets the default vendor can't serve
+    (e.g. MSCI ETF proxies always; ICE softs when the default is databento) plus any
+    explicit ``price_source: yfinance`` override. Keyed on $COTDATA_PRICE_SOURCE, so
+    the same softs stay on Norgate locally and fall to Yahoo on a databento server.
+    Pass ``symbols`` to scope. Returns {kind, ok, wrote}."""
+    default = default_price_source()
     targets = [s for s in all_symbols()
-               if s.yahoo and (symbols is None or s.internal in symbols)]
+               if s.yahoo and resolve_source(s, default) == "yfinance"
+               and (symbols is None or s.internal in symbols)]
     if not targets:
         print("yfinance: no registry symbols with a 'yahoo' ticker"
               + (f" among {symbols}" if symbols else ""))
