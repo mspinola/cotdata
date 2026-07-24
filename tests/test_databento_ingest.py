@@ -7,7 +7,6 @@ resume-from-last_date behaviour, and that databento-null symbols are skipped.
 import json
 
 import pandas as pd
-import pytest
 
 from cotdata.providers.databento import ingest
 
