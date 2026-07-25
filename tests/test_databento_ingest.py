@@ -7,6 +7,7 @@ resume-from-last_date behaviour, and that databento-null symbols are skipped.
 import json
 
 import pandas as pd
+import pytest
 
 from cotdata.providers.databento import _ingest_manifest_path, ingest, reconcile_manifest
 
@@ -148,6 +149,40 @@ def test_ingest_skips_when_start_equals_end(tmp_path, monkeypatch):
     client2 = _FakeClient(_frames(pd.date_range("2020-01-01", periods=6)))
     ingest(symbols=["ES"], client=client2, end="2020-01-06", cold_start="2020-01-01")
     assert client2.calls == []
+
+
+def test_fetch_retries_transient_failures_then_succeeds():
+    from cotdata.providers.databento import _fetch
+    n = {"calls": 0}
+
+    class _TS:
+        def get_range(self, **k):
+            n["calls"] += 1
+            if n["calls"] < 3:
+                raise ConnectionError("Response ended prematurely")
+            return _FakeResp(pd.DataFrame({"x": [1]}))
+
+    class _C:
+        timeseries = _TS()
+
+    df = _fetch(_C(), "GLBX.MDP3", "ES.n.0", "ohlcv-1d", "2020-01-01", "2020-01-05",
+                retries=3, backoff=0)
+    assert n["calls"] == 3 and not df.empty
+
+
+def test_fetch_raises_after_exhausting_retries():
+    from cotdata.providers.databento import _fetch
+
+    class _TS:
+        def get_range(self, **k):
+            raise TimeoutError("read timed out")
+
+    class _C:
+        timeseries = _TS()
+
+    with pytest.raises(TimeoutError):
+        _fetch(_C(), "GLBX.MDP3", "ES.n.0", "ohlcv-1d", "2020-01-01", "2020-01-05",
+               retries=2, backoff=0)
 
 
 def test_reconcile_manifest_rebuilds_from_raw_store(tmp_path, monkeypatch):

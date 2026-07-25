@@ -418,18 +418,30 @@ def _client_from_env():
     return db.Historical(key=key)
 
 
-def _fetch(client, dataset: str, dbsym: str, schema: str, start: str, end: str) -> pd.DataFrame:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*No data found.*")
-        warnings.filterwarnings("ignore", message=".*did not resolve.*")
-        # Databento flags a handful of historically "degraded" sessions (e.g. 2014-06-11)
-        # on every request. It's a known data-condition note, not an error, and it floods
-        # the ingest/cron logs — quiet it.
-        warnings.filterwarnings("ignore", message=".*reduced quality.*")
-        data = client.timeseries.get_range(
-            dataset=dataset, symbols=[dbsym], stype_in="continuous",
-            schema=schema, start=start, end=end)
-    return data.to_df()
+def _fetch(client, dataset: str, dbsym: str, schema: str, start: str, end: str,
+           *, retries: int = 3, backoff: float = 5.0) -> pd.DataFrame:
+    """One databento get_range, with retry + linear backoff on transient network
+    failures (read timeouts, dropped/aborted streams) — the historical API throws these
+    often on large pulls. Raises the last error only after ``retries`` attempts."""
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*No data found.*")
+                warnings.filterwarnings("ignore", message=".*did not resolve.*")
+                # Databento flags a handful of historically "degraded" sessions (e.g.
+                # 2014-06-11) on every request. A known data-condition note, not an error,
+                # and it floods the logs — quiet it.
+                warnings.filterwarnings("ignore", message=".*reduced quality.*")
+                data = client.timeseries.get_range(
+                    dataset=dataset, symbols=[dbsym], stype_in="continuous",
+                    schema=schema, start=start, end=end)
+            return data.to_df()
+        except Exception as e:  # noqa: BLE001 — databento/network is flaky; retry transient
+            last = e
+            if attempt < retries:
+                time.sleep(backoff * attempt)
+    raise last
 
 
 def _fmt_hms(seconds: float) -> str:
