@@ -24,6 +24,11 @@ def main() -> None:
     p.add_argument("--build-databento", action="store_true",
                    help="Databento Stage 2 (free, no API): build back-adjusted prices from the "
                         "raw store into the cotdata store. Run after --ingest-databento.")
+    p.add_argument("--windowed-n1-stats", nargs="?", type=int, const=3, default=None, metavar="DAYS",
+                   help="With --ingest-databento: fetch the n.1 statistics schema only in "
+                        "±DAYS windows around roll dates (default 3) instead of full history. "
+                        "n.1 settlement is only needed at rolls, so this cuts the biggest "
+                        "avoidable download with no accuracy loss. Recommended for the backfill.")
     p.add_argument("--cot-legacy", action="store_true", help="Update CFTC COT Legacy (cross-platform).")
     p.add_argument("--cot-disagg", action="store_true", help="Update CFTC COT Disaggregated Futures-Only (cross-platform).")
     p.add_argument("--cot-tff", action="store_true", help="Update Traders in Financial Futures (TFF) COT (cross-platform).")
@@ -46,6 +51,10 @@ def main() -> None:
     p.add_argument("--reconcile", action="store_true",
                    help="Prune manifest entries whose parquet file is missing (ghosts "
                         "from old naming), refresh status.json, and exit. Never touches data.")
+    p.add_argument("--reconcile-databento", action="store_true",
+                   help="Rebuild the databento raw-store ingest manifest from the parquet files "
+                        "on disk, so an interrupted --ingest-databento resumes instead of "
+                        "re-downloading. Reads only local files, no API. Exit.")
     args = p.parse_args()
 
     config.store_root()  # fail fast if COTDATA_STORE unset
@@ -69,6 +78,18 @@ def main() -> None:
                       + (f", … (+{len(names) - 8})" if len(names) > 8 else ""))
             status.write_status_file(last_run={"kinds": ["reconcile"],
                                                "at": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"})
+        return
+
+    if args.reconcile_databento:
+        from .providers import databento
+        recorded = databento.reconcile_manifest()
+        if not recorded:
+            print("databento reconcile: no raw parquet files found — nothing to record.")
+        else:
+            syms = sorted({k.split(".n.")[0] for k in recorded})
+            print(f"databento reconcile: recorded {len(recorded)} raw table(s) across "
+                  f"{len(syms)} symbol(s) into the ingest manifest.")
+            print("  symbols: " + ", ".join(syms))
         return
 
     if not (args.prices or args.metadata or args.prices_yahoo or args.ingest_databento
@@ -110,7 +131,7 @@ def main() -> None:
 
     if args.ingest_databento:
         from .providers import databento
-        r = databento.ingest(symbols=args.symbols)
+        r = databento.ingest(symbols=args.symbols, n1_stats_window=args.windowed_n1_stats)
         kinds.append("ingest_databento")
         if not (r or {}).get("ok", True):
             failed_kinds.append("ingest_databento")

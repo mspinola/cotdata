@@ -134,3 +134,81 @@ def test_build_skips_symbol_missing_from_raw_store(stores):
     # Nothing written for CL → build reports it skipped (and it's not 'ok').
     res = build(["CL"])
     assert res["wrote"] == 0 and res["ok"] is False
+
+
+# ── windowed n.1 statistics: same back-adjustment at a fraction of the download ──
+class _WResp:
+    def __init__(self, df):
+        self._df = df
+
+    def to_df(self):
+        return self._df
+
+
+class _WClient:
+    def __init__(self, frames):
+        self.frames = frames
+        self.calls = []
+
+    @property
+    def timeseries(client_self):
+        class _TS:
+            def get_range(ts_self, *, dataset, symbols, stype_in, schema, start, end):
+                client_self.calls.append((symbols[0], schema, start, end))
+                fr = client_self.frames.get((symbols[0], schema))
+                if fr is None or fr.empty:
+                    return _WResp(pd.DataFrame())
+                naive = fr.index.tz_convert(None)
+                mask = (naive >= pd.Timestamp(start)) & (naive < pd.Timestamp(end))
+                return _WResp(fr[mask])
+        return _TS()
+
+
+def _roll_frames(dates):
+    idx = pd.to_datetime(dates).tz_localize("UTC")
+    idx.name = "ts_event"
+
+    def ohlcv(close, iid):
+        return pd.DataFrame({"open": close, "high": close, "low": close, "close": close,
+                             "volume": [1000] * len(close), "instrument_id": iid,
+                             "symbol": ["ES.n"] * len(close)}, index=idx)
+
+    def stats(settle):
+        return pd.DataFrame({"ts_ref": idx, "stat_type": 3, "price": settle,
+                             "quantity": float("nan")}, index=idx)
+
+    return {
+        ("ES.n.0", "ohlcv-1d"): ohlcv([100, 101, 102, 110, 111, 112], [10, 10, 10, 20, 20, 20]),
+        ("ES.n.1", "ohlcv-1d"): ohlcv([103, 104, 105, 113, 114, 115], [20, 20, 20, 30, 30, 30]),
+        ("ES.n.0", "statistics"): stats([100.5, 101.5, 102.5, 110.5, 111.5, 112.5]),
+        ("ES.n.1", "statistics"): stats([103.5, 104.5, 105.5, 113.5, 114.5, 115.5]),
+    }
+
+
+def test_windowed_n1_stats_matches_full_backadj(tmp_path, monkeypatch):
+    import cotdata
+    from cotdata.providers.databento import ingest
+    dates = pd.date_range("2020-01-01", periods=6)          # roll at 2020-01-03 (id 10→20)
+
+    def run(tag, window):
+        root = tmp_path / tag
+        monkeypatch.setenv("COTDATA_DATABENTO_RAW", str(root / "raw"))
+        monkeypatch.setenv("COTDATA_STORE", str(root / "store"))
+        client = _WClient(_roll_frames(dates))
+        ingest(symbols=["ES"], client=client, end="2020-01-07", cold_start="2020-01-01",
+               n1_stats_window=window)
+        build(["ES"])
+        return cotdata.get_prices("ES", adjustment="backadj"), client
+
+    full_bad, full_client = run("full", None)
+    win_bad, win_client = run("win", 1)
+
+    # Identical back-adjustment (gap = n1_settle - n0_settle = 105.5 - 102.5 = +3 either way).
+    assert list(win_bad["Close"]) == list(full_bad["Close"]) == [103.5, 104.5, 105.5, 110.5, 111.5, 112.5]
+
+    # ...but the n.1 statistics fetch was a narrow roll window, not the full range.
+    def n1_stat_spans(c):
+        return [(s, e) for (sym, sch, s, e) in c.calls if sym == "ES.n.1" and sch == "statistics"]
+    assert n1_stat_spans(full_client) == [("2020-01-01", "2020-01-07")]   # one full-range pull
+    win_spans = n1_stat_spans(win_client)
+    assert win_spans and all(s >= "2020-01-02" and e <= "2020-01-05" for s, e in win_spans)

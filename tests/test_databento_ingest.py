@@ -8,7 +8,7 @@ import json
 
 import pandas as pd
 
-from cotdata.providers.databento import ingest
+from cotdata.providers.databento import _ingest_manifest_path, ingest, reconcile_manifest
 
 
 # ── a databento.Historical-shaped fake ───────────────────────────────────────
@@ -136,3 +136,37 @@ def test_ingest_skips_databento_null_symbol(tmp_path, monkeypatch):
     res = ingest(symbols=["CC"], client=client, end="2020-01-05")   # CC is databento: null
     assert res["symbols"] == 0
     assert client.calls == []
+
+
+def test_ingest_skips_when_start_equals_end(tmp_path, monkeypatch):
+    # Regression: an up-to-date symbol computes start == end, which databento rejects
+    # (422 data_time_range_start_on_or_after_end). The guard must skip, not fetch.
+    monkeypatch.setenv("COTDATA_DATABENTO_RAW", str(tmp_path))
+    ingest(symbols=["ES"], client=_FakeClient(_frames(pd.date_range("2020-01-01", periods=5))),
+           end="2020-01-05", cold_start="2020-01-01")               # stores last_date = 2020-01-05
+    # end == stored last_date + 1 → start (last+1) == end → must skip, no API call.
+    client2 = _FakeClient(_frames(pd.date_range("2020-01-01", periods=6)))
+    ingest(symbols=["ES"], client=client2, end="2020-01-06", cold_start="2020-01-01")
+    assert client2.calls == []
+
+
+def test_reconcile_manifest_rebuilds_from_raw_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("COTDATA_DATABENTO_RAW", str(tmp_path))
+    dates = pd.date_range("2020-01-01", periods=5)
+    ingest(symbols=["ES"], client=_FakeClient(_frames(dates)), end="2020-01-05", cold_start="2020-01-01")
+
+    # Simulate a run that wrote the raw parquets but never persisted the manifest.
+    _ingest_manifest_path().unlink()
+
+    recorded = reconcile_manifest()
+    assert recorded, "reconcile should record the on-disk raw tables"
+    man = json.loads(_ingest_manifest_path().read_text())
+    assert man["ES.n.0:ohlcv-1d"]["last_date"] == "2020-01-05"
+    assert man["ES.n.0:ohlcv-1d"]["n_rows"] == 5
+    assert man["ES.n.0:ohlcv-1d"]["reconciled"] is True
+    assert man["ES.n.0:statistics"]["last_date"] == "2020-01-05"
+
+    # With the manifest rebuilt, a re-ingest sees everything current -> no API calls.
+    client2 = _FakeClient(_frames(dates))
+    ingest(symbols=["ES"], client=client2, end="2020-01-05", cold_start="2020-01-01")
+    assert client2.calls == []
