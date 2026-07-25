@@ -29,6 +29,11 @@ def main() -> None:
                         "±DAYS windows around roll dates (default 3) instead of full history. "
                         "n.1 settlement is only needed at rolls, so this cuts the biggest "
                         "avoidable download with no accuracy loss. Recommended for the backfill.")
+    p.add_argument("--batch", action="store_true",
+                   help="With --ingest-databento: use the databento BATCH API (prepare + "
+                        "download files) instead of streaming. Far more robust for large "
+                        "from-inception pulls (avoids the streaming read-timeouts); statistics "
+                        "are fetched full. Slower to start (async job) but reliable.")
     p.add_argument("--cot-legacy", action="store_true", help="Update CFTC COT Legacy (cross-platform).")
     p.add_argument("--cot-disagg", action="store_true", help="Update CFTC COT Disaggregated Futures-Only (cross-platform).")
     p.add_argument("--cot-tff", action="store_true", help="Update Traders in Financial Futures (TFF) COT (cross-platform).")
@@ -131,7 +136,10 @@ def main() -> None:
 
     if args.ingest_databento:
         from .providers import databento
-        r = databento.ingest(symbols=args.symbols, n1_stats_window=args.windowed_n1_stats)
+        if args.batch:
+            r = databento.ingest_batch(symbols=args.symbols)
+        else:
+            r = databento.ingest(symbols=args.symbols, n1_stats_window=args.windowed_n1_stats)
         kinds.append("ingest_databento")
         if not (r or {}).get("ok", True):
             failed_kinds.append("ingest_databento")

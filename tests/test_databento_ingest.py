@@ -185,6 +185,63 @@ def test_fetch_raises_after_exhausting_retries():
                retries=2, backoff=0)
 
 
+class _FakeBatch:
+    """databento client.batch stand-in: submit → 'done' → download CSV files."""
+    def __init__(self, dates):
+        self.dates = dates
+        self.submitted = []
+
+    def submit_job(self, **k):
+        self.submitted.append(k)
+        return {"id": "j1", "state": "queued"}
+
+    def list_jobs(self):
+        return [{"id": "j1", "state": "done"}]
+
+    def download(self, *, job_id, output_dir):
+        import os
+        k = self.submitted[-1]
+        schema, syms = k["schema"], k["symbols"]
+        rows = []
+        for sym in syms:
+            for i, d in enumerate(self.dates):
+                base = {"ts_event": d.isoformat(), "instrument_id": 10, "symbol": sym}
+                if schema == "ohlcv-1d":
+                    rows.append({**base, "open": 100 + i, "high": 100 + i, "low": 100 + i,
+                                 "close": 100 + i, "volume": 1000})
+                else:
+                    rows.append({**base, "ts_ref": d.isoformat(), "stat_type": 3,
+                                 "price": 100.5 + i, "quantity": 0})
+        p = os.path.join(output_dir, f"out.{schema}.csv")
+        pd.DataFrame(rows).to_csv(p, index=False)
+        return [p]
+
+
+class _FakeBatchClient:
+    def __init__(self, dates):
+        self.batch = _FakeBatch(dates)
+
+
+def test_ingest_batch_writes_raw_and_manifest(tmp_path, monkeypatch):
+    monkeypatch.setenv("COTDATA_DATABENTO_RAW", str(tmp_path))
+    dates = pd.date_range("2020-01-01", periods=4)
+    from cotdata.providers.databento import ingest_batch
+
+    res = ingest_batch(symbols=["ES"], client=_FakeBatchClient(dates),
+                       end="2020-01-05", cold_start="2020-01-01")
+    assert res["ok"] and res["symbols"] == 1
+
+    man = json.loads((tmp_path / "ingest_manifest.json").read_text())
+    assert man["ES.n.0:ohlcv-1d"]["last_date"] == "2020-01-04"
+    assert man["ES.n.0:ohlcv-1d"]["batch"] is True
+    assert man["ES.n.0:statistics"]["last_date"] == "2020-01-04"
+
+    ohlcv = pd.read_parquet(tmp_path / "ohlcv" / "ES.n.0.parquet")
+    assert len(ohlcv) == 4 and ohlcv.index.name == "Date" and ohlcv.index.tz is None
+    stats = pd.read_parquet(tmp_path / "statistics" / "ES.n.0.parquet")
+    assert (stats["stat_type"] == 3).all()
+
+
 def test_reconcile_manifest_rebuilds_from_raw_store(tmp_path, monkeypatch):
     monkeypatch.setenv("COTDATA_DATABENTO_RAW", str(tmp_path))
     dates = pd.date_range("2020-01-01", periods=5)

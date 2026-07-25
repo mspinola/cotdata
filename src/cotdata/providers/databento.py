@@ -661,6 +661,154 @@ def reconcile_manifest() -> dict:
     return recorded
 
 
+# ── Batch ingest: robust large pulls via the databento batch API ─────────────
+# The streaming timeseries.get_range chokes on from-inception statistics (read timeouts,
+# dropped streams). The batch API prepares result files server-side and delivers them as
+# a download (robust, resumable), which is what it is designed for. Same raw store +
+# manifest as the streaming ingest, so build()/reconcile() are unchanged. Statistics are
+# fetched FULL here (no windowing — batch handles the volume).
+
+def _batch_fetch(client, dataset, dbsyms, schema, start, end, *, poll=30, timeout=14400) -> dict:
+    """Submit one databento BATCH job for many continuous symbols over [start, end), wait
+    for it, download the CSV(s), and return ``{dbsym: raw_df}`` grouped by the ``symbol``
+    column. Raises on job failure/timeout."""
+    import tempfile
+
+    def _jid(j):
+        return j.get("id") if isinstance(j, dict) else getattr(j, "id", None)
+
+    def _state(j):
+        return (j.get("state") if isinstance(j, dict) else getattr(j, "state", None)) or "unknown"
+
+    job = client.batch.submit_job(
+        dataset=dataset, symbols=list(dbsyms), stype_in="continuous", schema=schema,
+        start=start, end=end, encoding="csv", split_symbols=False, delivery="download")
+    job_id = _jid(job)
+    if not job_id:
+        raise RuntimeError("batch submit_job returned no job id")
+
+    waited = 0
+    while True:
+        me = next((j for j in client.batch.list_jobs() if _jid(j) == job_id), None)
+        st = _state(me)
+        if st == "done":
+            break
+        if st == "expired" or "fail" in str(st).lower():
+            raise RuntimeError(f"batch job {job_id} state={st}")
+        if waited >= timeout:
+            raise TimeoutError(f"batch job {job_id} not done after {timeout}s (state={st})")
+        time.sleep(poll)
+        waited += poll
+
+    frames: dict = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for path in client.batch.download(job_id=job_id, output_dir=tmp):
+            if ".csv" not in str(path):
+                continue
+            try:
+                df = pd.read_csv(path)                       # pandas infers .zst/.gz compression
+            except Exception as e:  # noqa: BLE001
+                print(f"batch: could not read {path} — {e}")
+                continue
+            if df.empty or "symbol" not in df.columns:
+                continue
+            for dbsym, g in df.groupby("symbol"):
+                frames.setdefault(dbsym, []).append(g)
+    return {k: pd.concat(v, ignore_index=True) for k, v in frames.items()}
+
+
+def _normalize_batch_csv(df: pd.DataFrame, schema: str) -> pd.DataFrame:
+    """Bring a batch CSV frame to the same shape the streaming ``_normalize`` produces
+    (ohlcv: tz-naive daily Date index; statistics: tz-naive columns)."""
+    df = df.copy()
+    for c in ("ts_event", "ts_ref"):
+        if c in df.columns:
+            df[c] = _to_naive(df[c])
+    if schema == "ohlcv-1d":
+        df = df.set_index("ts_event")
+        df.index = df.index.normalize()
+        df.index.name = "Date"
+        return df[~df.index.duplicated(keep="last")].sort_index()
+    return df.drop_duplicates().reset_index(drop=True)
+
+
+def ingest_batch(symbols=None, *, client=None, dataset="GLBX.MDP3", end=None,
+                 cold_start=GLBX_HISTORY_FLOOR, poll=30) -> dict:
+    """Batch-API variant of ingest(): fetch each (feed, schema) as a databento batch job
+    (download-to-file) instead of streaming — robust for large from-inception pulls. One
+    job per (feed, schema) covers every symbol still needing it, from the earliest resume
+    point; per-symbol rows are appended and the manifest advanced individually, so resume
+    and build are unchanged. Returns {kind, ok, symbols, rows}."""
+    targets = [s for s in all_symbols()
+               if s.databento and s.price_source in (None, "databento")
+               and (symbols is None or s.internal in symbols)]
+    if not targets:
+        print("databento batch ingest: no databento-capable symbols"
+              + (f" among {symbols}" if symbols else ""))
+        return {"kind": "ingest_databento", "ok": True, "symbols": 0, "rows": 0}
+    if client is None:
+        client = _client_from_env()
+
+    end = end or (pd.Timestamp.now().normalize() - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    end_ts = pd.Timestamp(end)
+    manifest = _load_ingest_manifest()
+    total_rows, failed = 0, 0
+    run_start = time.monotonic()
+
+    for feed in _FEEDS:
+        for schema in _SCHEMAS:
+            needed, starts = {}, []
+            for s in targets:
+                last = manifest.get(f"{s.internal}{feed}:{schema}", {}).get("last_date")
+                st = (pd.Timestamp(last) + pd.Timedelta(days=1)) if last else pd.Timestamp(cold_start)
+                if st < pd.Timestamp(GLBX_HISTORY_FLOOR):
+                    st = pd.Timestamp(GLBX_HISTORY_FLOOR)
+                if st >= end_ts:
+                    continue                                # already current
+                needed[f"{s.databento}{feed}"] = s.internal
+                starts.append(st)
+            if not needed:
+                continue
+            job_start = min(starts).strftime("%Y-%m-%d")
+            t0 = time.monotonic()
+            print(f"batch {feed} {schema}: {len(needed)} symbols {job_start}..{end} — submitting job...")
+            try:
+                frames = _batch_fetch(client, dataset, list(needed), schema, job_start, end, poll=poll)
+            except Exception as e:  # noqa: BLE001 — batch/network is flaky
+                print(f"batch {feed} {schema}: FAILED — {e}")
+                failed += 1
+                continue
+            wrote = 0
+            for dbsym, raw in frames.items():
+                internal = needed.get(dbsym)
+                if internal is None:
+                    continue
+                raw = _normalize_batch_csv(raw, schema)
+                if raw.empty:
+                    continue
+                _append_raw(internal, feed, schema, raw)
+                first, newest = _date_bounds(raw, schema)
+                key = f"{internal}{feed}:{schema}"
+                rec = manifest.get(key, {})
+                manifest[key] = {
+                    "first_date": rec.get("first_date") or first,
+                    "last_date": newest,
+                    "n_rows": int(rec.get("n_rows", 0)) + len(raw),
+                    "fetched_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "batch": True,
+                }
+                wrote += len(raw)
+            _write_ingest_manifest(manifest)
+            total_rows += wrote
+            print(f"batch {feed} {schema}: +{wrote:,} rows for {len(frames)} symbols in "
+                  f"{_fmt_hms(time.monotonic() - t0)}")
+
+    print(f"databento batch ingest: {len(targets)} symbols, {total_rows:,} rows in "
+          f"{_fmt_hms(time.monotonic() - run_start)}"
+          + (f"  ({failed} job failure(s))" if failed else ""))
+    return {"kind": "ingest_databento", "ok": failed == 0, "symbols": len(targets), "rows": total_rows}
+
+
 # ── Build (Stage 2): free, raw store -> back-adjusted store prices ────────────
 # ADR-0006. Derives two series per symbol from the local raw store (no API cost):
 #   unadj   — raw front continuous (.n.0), settlement close, roll gaps intact.
