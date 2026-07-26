@@ -21,8 +21,9 @@ DEST="REPLACE_WITH_LOCAL_STORE"
 # What each exclusion is for:
 #   _cache, _raw   producer-internal, most of the bytes. _cache is cotdata's cache
 #                  of downloaded CFTC zips; _raw is the PAID databento raw store.
-#   citpy          HAND-WRITTEN research notes that nothing regenerates. A
-#                  --delete sync would remove them permanently.
+#   citpy          consumer-owned, not written by any producer, so --delete removes
+#                  it and no producer run brings it back. Kept as a backstop: such
+#                  files belong outside the store. See docs/SYNCING.md.
 #   manifest.json  legacy aggregate, nothing writes it, and it is the one file a
 #                  sync resolves last-writer-wins across both producer halves
 EXCLUDES=(

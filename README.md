@@ -218,11 +218,13 @@ Norgate needs Windows, so a research Mac or a Linux dashboard is usually a **rea
 replica** of a store produced elsewhere. Prefer one producer writing everything and a
 strictly one-directional sync.
 
-Three directories must be **excluded**, and they are correctness issues rather than
-savings: `_cache/` (cotdata's cache of downloaded CFTC source zips) and `_raw/` (the
-**paid** databento raw store) are producer-internal and together are ~70% of the bytes,
-and `citpy/` is **hand-written research notes** that nothing regenerates, so a mirroring
-sync would delete them permanently. The legacy `manifest.json` should be excluded too.
+Two directories must be **excluded** for size: `_cache/` (cotdata's cache of downloaded
+CFTC source zips) and `_raw/` (the **paid** databento raw store) are producer-internal
+and together are ~70% of the bytes. The legacy `manifest.json` should be excluded too.
+
+Anything a consumer put in the store by hand is a **correctness** issue rather than a
+saving. No producer creates it, so a mirroring sync deletes it. Exclude it, but the real
+fix is to keep it out of the store: the store belongs to its producer.
 
 Consumer cloud sync (Dropbox, Google Drive) is a poor fit here: conflict copies land
 inside the store, and on-demand placeholder files break `read_parquet` on the machine
