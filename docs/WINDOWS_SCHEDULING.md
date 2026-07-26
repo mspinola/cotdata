@@ -48,6 +48,12 @@ schtasks /Create /TN "cotdata prices" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 2
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
 ```
 
+> **Prices task — two settings you must check now**, before this task will work unattended. Open it in `taskschd.msc` → Properties:
+> 1. **General tab → "Run only when user is logged on"** (the default — keep it). The prices task talks to the Norgate Data Updater, which only exists in your interactive desktop session; "run whether user is logged in or not" runs where NDU is invisible and the run fails. See [Norgate Data Updater needs an interactive session](#norgate-data-updater-needs-an-interactive-session).
+> 2. **Conditions tab → uncheck "Start the task only if the computer is on AC power"** (checked by default) if this is ever on a laptop — otherwise runs are silently skipped on battery. See [Task doesn't fire at all](#task-doesnt-fire-at-all).
+>
+> Neither applies to the COT tasks — those are a plain CFTC download with no Norgate dependency, so they run fine non-interactively.
+
 The **Friday release window** needs a *repeating* trigger, which `schtasks` can't express on a weekly schedule (`/ET` and `/DU` are MINUTE/HOURLY only). Create it in PowerShell instead — weekly on Friday at 3:25pm ET, repeating every 2 min for 45 minutes so it catches the ~3:30 release within a couple of minutes:
 
 ```powershell
