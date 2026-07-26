@@ -25,7 +25,7 @@ set -euo pipefail
 export COTDATA_STORE=REPLACE_WITH_STORE_PATH
 export COTDATA_PRICE_SOURCE=databento
 export DATABENTO_API_KEY=REPLACE_WITH_DATABENTO_KEY
-BIN=REPLACE_WITH_VENV_PATH/bin/cotdata-update
+BIN=REPLACE_WITH_VENV_PATH/bin/cotdata-prices
 "$BIN" --ingest-databento     # Stage 1 (paid): raw .n.0/.n.1 to raw store
 "$BIN" --build-databento      # Stage 2 (free): back-adjusted prices
 "$BIN" --prices-yahoo         # softs / lumber / MSCI fallback
@@ -37,7 +37,7 @@ BIN=REPLACE_WITH_VENV_PATH/bin/cotdata-update
 #!/usr/bin/env bash
 set -euo pipefail
 export COTDATA_STORE=REPLACE_WITH_STORE_PATH
-REPLACE_WITH_VENV_PATH/bin/cotdata-update --cot-all
+REPLACE_WITH_VENV_PATH/bin/cotdata-cot --cot-all
 ```
 
 Make them executable:
@@ -73,7 +73,7 @@ Set `MAILTO=you@example.com` at the top of the crontab to have cron email the ou
 
 ### Cron job runs manually but not on schedule
 
-Cron's environment is far barer than an interactive shell — no `PATH` beyond `/usr/bin:/bin`, no `.bashrc`/`.profile` sourced, no venv activation. This is exactly why the wrapper scripts above call the venv's binary by full path (`<VENV>/bin/cotdata-update`) rather than a bare `cotdata-update`, and `export` every variable instead of relying on a login shell to have set them. If a script works when you run it by hand but not under cron, the first thing to check is whether it depends on something your interactive shell set up implicitly.
+Cron's environment is far barer than an interactive shell — no `PATH` beyond `/usr/bin:/bin`, no `.bashrc`/`.profile` sourced, no venv activation. This is exactly why the wrapper scripts above call the venv's binary by full path (`<VENV>/bin/cotdata-prices`, `<VENV>/bin/cotdata-cot`) rather than a bare command name, and `export` every variable instead of relying on a login shell to have set them. If a script works when you run it by hand but not under cron, the first thing to check is whether it depends on something your interactive shell set up implicitly.
 
 ### Job silently does nothing
 
@@ -81,7 +81,7 @@ Check `<DIR>/prices.log` or `<DIR>/cot.log` first — the wrappers redirect both
 
 ### Overlapping runs / stale lock
 
-`flock -n` fails fast (doesn't block) if another instance already holds the lock file, so a slow `run-prices.sh` won't stack with the next scheduled run — the second invocation just no-ops and exits. The lock releases automatically when the holding process exits, including on a crash, so a stale lock that blocks forever generally indicates a *hung*, still-running process, not manual cleanup — check with `ps aux | grep cotdata-update` before deleting anything under `/tmp`.
+`flock -n` fails fast (doesn't block) if another instance already holds the lock file, so a slow `run-prices.sh` won't stack with the next scheduled run — the second invocation just no-ops and exits. The lock releases automatically when the holding process exits, including on a crash, so a stale lock that blocks forever generally indicates a *hung*, still-running process, not manual cleanup — check with `ps aux | grep cotdata` before deleting anything under `/tmp`.
 
 ### Permission denied running the wrapper
 

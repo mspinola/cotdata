@@ -11,7 +11,7 @@ New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDO
 
 ## Wrapper scripts
 
-Create **two** wrapper scripts — they run *different* commands. Each sets `COTDATA_STORE` and calls the venv's `cotdata-update`.
+Create **two** wrapper scripts — they run *different* commands. Each sets `COTDATA_STORE` and calls the venv's half-scoped entry point: `cotdata-prices` for the price half, `cotdata-cot` for the COT half. Each refuses the other half's flags, so a host is scoped to one job and a price box cannot quietly become a second COT producer. `cotdata-update` still runs both if a single machine must do everything.
 
 > **Ready-made templates:** copy [`docs/examples/windows/run-prices.cmd`](examples/windows/run-prices.cmd) and [`run-cot.cmd`](examples/windows/run-cot.cmd) out of the repo into your `<DIR>` (e.g. `C:\Users\you\cotdata\scheduler\`) rather than retyping them — then just fill in the placeholders. Keep them outside the repo so a `git pull` never clobbers your edited paths.
 
@@ -22,7 +22,7 @@ Create **two** wrapper scripts — they run *different* commands. Each sets `COT
 ```bat
 @echo off
 set COTDATA_STORE=REPLACE_WITH_STORE_PATH
-"REPLACE_WITH_VENV_PATH\Scripts\cotdata-update.exe" --prices --metadata --require-final
+"REPLACE_WITH_VENV_PATH\Scripts\cotdata-prices.exe" --prices --metadata --require-final
 ```
 
 `run-cot.cmd` — COT (note the **different** command, `--cot-all`):
@@ -30,10 +30,10 @@ set COTDATA_STORE=REPLACE_WITH_STORE_PATH
 ```bat
 @echo off
 set COTDATA_STORE=REPLACE_WITH_STORE_PATH
-"REPLACE_WITH_VENV_PATH\Scripts\cotdata-update.exe" --cot-all
+"REPLACE_WITH_VENV_PATH\Scripts\cotdata-cot.exe" --cot-all
 ```
 
-Using the full venv `\Scripts\cotdata-update.exe` path (rather than relying on `cotdata-update` being on `PATH`) matters here: Task Scheduler runs with a different, often bare, environment than your interactive shell, so a bare command name that resolves fine in Command Prompt can fail to resolve under the scheduler.
+Using the full venv `\Scripts\cotdata-prices.exe` / `\Scripts\cotdata-cot.exe` path (rather than relying on the command being on `PATH`) matters here: Task Scheduler runs with a different, often bare, environment than your interactive shell, so a bare command name that resolves fine in Command Prompt can fail to resolve under the scheduler.
 
 ## Creating the tasks
 
@@ -124,7 +124,7 @@ Confirm the relevant `newest data` date advanced (and `last write (UTC)` is rece
 
 ### Testing the timing and conditions
 
-- **A daytime prices run only proves the wrapper resolves** — with no Finals yet it just defers. To exercise the actual write path in daylight, run `cotdata-update --prices --metadata` by hand (no `--require-final`), or fire the task after ~8:55pm ET.
+- **A daytime prices run only proves the wrapper resolves** — with no Finals yet it just defers. To exercise the actual write path in daylight, run `cotdata-prices --prices --metadata` by hand (no `--require-final`), or fire the task after ~8:55pm ET.
 - **Test the trigger itself** by moving it a couple of minutes out, watching it fire, then setting it back:
   ```bat
   schtasks /Change /TN "cotdata prices" /ST 14:20
@@ -156,7 +156,7 @@ If `COTDATA_STORE` is a UNC path (e.g. `\\Mac\code\cotdata_store`, as in the pla
 
 **The single most common cotdata-on-Task-Scheduler failure.** The `norgatedata` package doesn't call a remote API — it talks locally to the **Norgate Data Updater (NDU)** app, which is a GUI program that has to be running and authenticated *in your desktop session*.
 
-If a task's General tab has **"Run whether user is logged in or not"** checked, Windows runs it in a non-interactive session (effectively no desktop), and it cannot reach an NDU instance running in your logged-in session — `cotdata-update --prices` will fail even though NDU looks fine when you check it yourself.
+If a task's General tab has **"Run whether user is logged in or not"** checked, Windows runs it in a non-interactive session (effectively no desktop), and it cannot reach an NDU instance running in your logged-in session — `cotdata-prices --prices` will fail even though NDU looks fine when you check it yourself.
 
 **Fix:** for the prices task, use **"Run only when user is logged on"** (the default) so it executes in your interactive session alongside NDU. This does mean the machine needs to be logged in (not just powered on) at run time — screen lock is fine, logged-out is not.
 
@@ -166,9 +166,9 @@ If a task's General tab has **"Run whether user is logged in or not"** checked, 
 
 To confirm a run actually wrote data, check `status.json` in the store (`newest_data.prices` advancing) rather than trusting Task Scheduler's Last Run Result alone — see [Operations](../README.md#operations) in the README.
 
-### Task Scheduler can't find `cotdata-update`
+### Task Scheduler can't find `cotdata-prices` / `cotdata-cot`
 
-Always call the fully-qualified `<VENV>\Scripts\cotdata-update.exe` inside the wrapper `.cmd`, never a bare `cotdata-update`. The scheduler's environment doesn't inherit your interactive shell's activated venv or `PATH` changes.
+Always call the fully-qualified `<VENV>\Scripts\cotdata-prices.exe` (or `cotdata-cot.exe`) inside the wrapper `.cmd`, never a bare command name. The scheduler's environment doesn't inherit your interactive shell's activated venv or `PATH` changes.
 
 ### Diagnosing a silent failure
 
@@ -178,7 +178,7 @@ Always call the fully-qualified `<VENV>\Scripts\cotdata-update.exe` inside the w
 4. Check **Event Viewer → Windows Logs → Application** for `TaskScheduler` source entries around the run time
 5. Have the wrapper redirect output to a log file for a permanent record:
    ```bat
-   "<VENV>\Scripts\cotdata-update.exe" --cot-all >> "<DIR>\cot.log" 2>&1
+   "<VENV>\Scripts\cotdata-cot.exe" --cot-all >> "<DIR>\cot.log" 2>&1
    ```
 
 ### Restart settings not taking effect
