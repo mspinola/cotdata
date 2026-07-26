@@ -152,6 +152,28 @@ If `COTDATA_STORE` is a UNC path (e.g. `\\Mac\code\cotdata_store`, as in the pla
 
 **Fix:** on the task's **General** tab, run it as your own domain/local account (not SYSTEM) with **"Run only when user is logged on"**, and confirm that account can read/write the UNC path directly (test with `dir \\Mac\code\cotdata_store` from a fresh Command Prompt). If credentials are needed, use `net use \\Mac\code\cotdata_store /user:domain\you` once interactively, or store the data locally and sync separately instead of writing directly to the share from the scheduled task.
 
+### The store is on an RDP redirected drive (`\\tsclient\...`)
+
+A `COTDATA_STORE` beginning `\\tsclient\` is not a network share. It is Remote Desktop
+**client drive redirection**, a virtual channel that exists only while an RDP session is
+connected.
+
+Two consequences, both of which look like unrelated failures:
+
+- **The path disappears when you disconnect.** A task that fires at 20:55 with nobody
+  connected cannot resolve the drive at all, so it fails before touching Norgate. Combined
+  with the interactive-session requirement above, the machine now needs an *active RDP
+  session* at run time, not merely a logged-in console session.
+- **Atomic writes are weaker than on a local disk.** The store commits parquet with
+  `os.replace` into the same directory, which relies on filesystem rename semantics. Over
+  a redirected channel those guarantees are not the same as on NTFS, so an interrupted
+  write is likelier to leave a partial file.
+
+**Fix:** point `COTDATA_STORE` at a local disk on the producer machine and sync outward
+as a separate step (Syncthing, rclone, robocopy on a timer, a scheduled push). The
+producer then depends on nothing but its own filesystem, and the sync failing is a
+visible, separate problem rather than a silent missing write.
+
 ### Norgate Data Updater needs an interactive session
 
 **The single most common cotdata-on-Task-Scheduler failure.** The `norgatedata` package doesn't call a remote API — it talks locally to the **Norgate Data Updater (NDU)** app, which is a GUI program that has to be running and authenticated *in your desktop session*.

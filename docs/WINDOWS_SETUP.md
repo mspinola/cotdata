@@ -304,6 +304,45 @@ If you'd rather keep the `pip`-installed copy, add its `Scripts` directory to `P
   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
   ```
 
+### The install succeeded but a console script is missing
+
+Symptom: `pip install -e ".[norgate]"` printed success and exited 0, but
+`.venv\Scripts\cotdata-prices.exe` (or `cotdata-cot.exe`, or `cotdata-update.exe`
+after a fresh setup) is not there.
+
+**Cause: a `uv venv` has no `pip` of its own.** So a bare `pip install` inside an
+activated uv venv does not fail. It resolves to some *other* Python on `PATH` (a
+system install, another venv, the Windows Store shim) and installs the package there.
+Nothing warns you, because from pip's point of view it worked.
+
+The tell is the prompt: `uv venv` names it after the project directory, so you see
+`(cotdata)` rather than `(.venv)`.
+
+**Check which pip you actually ran:**
+
+```powershell
+Get-Command pip | Select-Object -ExpandProperty Source
+```
+
+If that path is not inside your `.venv\Scripts\`, the install went elsewhere.
+
+**Fix:** use uv's own installer, which always targets the active uv venv.
+
+```powershell
+uv pip install -e ".[norgate]"
+```
+
+Then confirm the executables exist:
+
+```powershell
+dir .venv\Scripts\cotdata-*
+```
+
+This bites hardest on a *re*install. The install step tells you to match the tool to
+the venv, but months later you come back to pick up new code, type `pip` out of habit,
+and get a silent no-op. If a `git pull` added a new entry point and it is still not on
+disk, this is almost always why.
+
 ### Module Not Found / "No module named cotdata"
 
 **Problem:** `import cotdata` fails
