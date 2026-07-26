@@ -90,6 +90,8 @@ python -m venv .venv
 
 Same result: your command prompt shows `(.venv)` once activated.
 
+> **Tip: prefer PowerShell over Command Prompt.** PowerShell tab-completes command names on your `PATH`, so `cotdata-u<Tab>` expands to `cotdata-update` once the venv is active. Command Prompt (`cmd.exe`) only tab-completes files and folders in the current directory, never `PATH` executables — so `cotdata-update` will never complete by name there. Activate the venv in PowerShell with `.venv\Scripts\Activate.ps1` (see [Virtual Environment Won't Activate](#virtual-environment-wont-activate) if the execution policy blocks it). Windows Terminal + PowerShell also gives you command history suggestions.
+
 ## Step 3: Install cotdata
 
 With your virtual environment activated, install cotdata.
