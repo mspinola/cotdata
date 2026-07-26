@@ -418,26 +418,104 @@ def _client_from_env():
     return db.Historical(key=key)
 
 
-def _fetch(client, dataset: str, dbsym: str, schema: str, start: str, end: str) -> pd.DataFrame:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*No data found.*")
-        warnings.filterwarnings("ignore", message=".*did not resolve.*")
-        # Databento flags a handful of historically "degraded" sessions (e.g. 2014-06-11)
-        # on every request. It's a known data-condition note, not an error, and it floods
-        # the ingest/cron logs — quiet it.
-        warnings.filterwarnings("ignore", message=".*reduced quality.*")
-        data = client.timeseries.get_range(
-            dataset=dataset, symbols=[dbsym], stype_in="continuous",
-            schema=schema, start=start, end=end)
-    return data.to_df()
+def _fetch(client, dataset: str, dbsym: str, schema: str, start: str, end: str,
+           *, retries: int = 3, backoff: float = 5.0) -> pd.DataFrame:
+    """One databento get_range, with retry + linear backoff on transient network
+    failures (read timeouts, dropped/aborted streams) — the historical API throws these
+    often on large pulls. Raises the last error only after ``retries`` attempts."""
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*No data found.*")
+                warnings.filterwarnings("ignore", message=".*did not resolve.*")
+                # Databento flags a handful of historically "degraded" sessions (e.g.
+                # 2014-06-11) on every request. A known data-condition note, not an error,
+                # and it floods the logs — quiet it.
+                warnings.filterwarnings("ignore", message=".*reduced quality.*")
+                data = client.timeseries.get_range(
+                    dataset=dataset, symbols=[dbsym], stype_in="continuous",
+                    schema=schema, start=start, end=end)
+            return data.to_df()
+        except Exception as e:  # noqa: BLE001 — databento/network is flaky; retry transient
+            last = e
+            if attempt < retries:
+                time.sleep(backoff * attempt)
+    raise last
+
+
+def _fmt_hms(seconds: float) -> str:
+    """Compact H:MM:SS for progress logging."""
+    s = int(seconds)
+    return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
+# A from-inception statistics pull in a single get_range times out (the streaming read
+# runs for many minutes and the server drops it). Page it into calendar-year windows so
+# each request is small and completes, and the manifest advances per window.
+_STATS_CHUNK_DAYS = 365
+
+
+def _stream_into_raw(client, dataset, internal, dbsym, feed, schema, start, end,
+                     manifest, key, *, chunk_days=None):
+    """Stream ``[start, end)`` into the raw store, paging by ``chunk_days`` (None = one
+    request). Appends and persists the manifest after EACH page, so a from-inception pull
+    can't time out in one giant request and a mid-history failure resumes at the last good
+    page instead of from scratch. Returns ``(rows_added, completed_ok)``."""
+    end_ts = pd.Timestamp(end)
+    cur = pd.Timestamp(start)
+    added = 0
+    while cur < end_ts:
+        c_end = min(cur + pd.Timedelta(days=chunk_days), end_ts) if chunk_days else end_ts
+        t0 = time.monotonic()
+        try:
+            raw = _fetch(client, dataset, dbsym, schema,
+                         cur.strftime("%Y-%m-%d"), c_end.strftime("%Y-%m-%d"))
+        except Exception as e:  # noqa: BLE001 — databento/network is flaky
+            print(f"    {internal}{feed} {schema}: fetch failed "
+                  f"({cur.date()}..{c_end.date()}) after {time.monotonic() - t0:.1f}s — {e}")
+            return added, False
+        raw = _normalize(raw, schema) if raw is not None and not raw.empty else raw
+        rec = manifest.get(key, {})
+        if raw is not None and not raw.empty:
+            _append_raw(internal, feed, schema, raw)
+            first, newest = _date_bounds(raw, schema)
+            manifest[key] = {
+                "first_date": rec.get("first_date") or first,
+                "last_date": newest,
+                "n_rows": int(rec.get("n_rows", 0)) + len(raw),
+                "fetched_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            }
+            _write_ingest_manifest(manifest)
+            added += len(raw)
+            print(f"    {internal}{feed} {schema}: +{len(raw):>8,} rows "
+                  f"({cur.date()}..{newest}) in {time.monotonic() - t0:.1f}s")
+        elif chunk_days:
+            # An empty page inside a paged pull — a symbol whose data starts after the GLBX
+            # floor. Advance past it so a re-run doesn't refetch the empty span forever;
+            # only when paging, so a single empty one-shot stays a plain "nothing new" no-op.
+            manifest[key] = {**rec,
+                             "last_date": (c_end - pd.Timedelta(days=1)).strftime("%Y-%m-%d")}
+            _write_ingest_manifest(manifest)
+        cur = c_end
+    return added, True
 
 
 def ingest(symbols=None, *, client=None, dataset="GLBX.MDP3", end=None,
-           cold_start=GLBX_HISTORY_FLOOR) -> dict:
+           cold_start=GLBX_HISTORY_FLOOR, n1_stats_window=None) -> dict:
     """Fetch raw databento daily bars (.n.0 + .n.1) and statistics into the raw
     store, append-only. Resumes each (symbol, feed, schema) from its manifest
-    last_date+1. Scoped to registry symbols that databento can serve (a non-null
-    ``databento`` mapping); pass ``symbols`` to narrow further.
+    last_date+1 — the manifest is persisted after EVERY fetch, so an interrupted run
+    (a from-inception ``statistics`` pull can take minutes) resumes where it left off
+    instead of re-downloading. Logs per-asset progress ``[i/N]`` and timing. Scoped to
+    registry symbols that databento can serve (a non-null ``databento`` mapping); pass
+    ``symbols`` to narrow further.
+
+    ``n1_stats_window`` (days): when set, the n.1 ``statistics`` schema is fetched only in
+    ±window-day windows around each roll date (found from the on-disk n.0 ohlcv) instead
+    of its full history. n.1 settlement is only used at rolls, so this drops the biggest
+    avoidable download with NO back-adjustment accuracy loss. The full n.0 statistics
+    (daily settlement + OI) and n.1 ohlcv are unaffected.
 
     `client` is injectable (databento.Historical-shaped) for tests; the default
     builds one from DATABENTO_API_KEY. Returns {kind, ok, symbols, rows}."""
@@ -455,11 +533,23 @@ def ingest(symbols=None, *, client=None, dataset="GLBX.MDP3", end=None,
     end = end or (pd.Timestamp.now().normalize() - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     manifest = _load_ingest_manifest()
     total_rows, failed = 0, 0
+    n = len(targets)
+    run_start = time.monotonic()
 
-    for s in targets:
+    for i, s in enumerate(targets, 1):
+        sym_start = time.monotonic()
+        sym_rows = 0
+        print(f"[{i}/{n}] {s.internal}: ingesting  (run elapsed {_fmt_hms(time.monotonic() - run_start)})")
         for feed in _FEEDS:
             dbsym = f"{s.databento}{feed}"
             for schema in _SCHEMAS:
+                if (n1_stats_window is not None and feed == ".n.1"
+                        and schema == "statistics"):
+                    added = _ingest_n1_stats_windowed(
+                        client, dataset, s, manifest, end, n1_stats_window)
+                    sym_rows += added
+                    total_rows += added
+                    continue
                 key = f"{s.internal}{feed}:{schema}"
                 rec = manifest.get(key, {})
                 last = rec.get("last_date")
@@ -467,31 +557,290 @@ def ingest(symbols=None, *, client=None, dataset="GLBX.MDP3", end=None,
                          if last else cold_start)
                 if pd.Timestamp(start) < pd.Timestamp(GLBX_HISTORY_FLOOR):
                     start = GLBX_HISTORY_FLOOR
-                if pd.Timestamp(start) > pd.Timestamp(end):
-                    continue  # already current
-                try:
-                    raw = _fetch(client, dataset, dbsym, schema, start, end)
-                except Exception as e:  # noqa: BLE001 — databento/network is flaky
-                    print(f"{s.internal}{feed} {schema}: databento fetch failed ({start}..{end}) — {e}")
+                # Already current. databento requires start < end; a start == end query
+                # 422s (data_time_range_start_on_or_after_end), so skip on >=.
+                if pd.Timestamp(start) >= pd.Timestamp(end):
+                    continue
+                # Page the streaming fetch: a from-inception statistics pull in one giant
+                # get_range times out, so statistics is fetched in yearly windows with the
+                # manifest advanced per window. ohlcv is ~250 rows/yr, so one request is
+                # fine. A page failure leaves the manifest at the last good page to resume.
+                chunk = _STATS_CHUNK_DAYS if schema == "statistics" else None
+                added, completed = _stream_into_raw(
+                    client, dataset, s.internal, dbsym, feed, schema,
+                    start, end, manifest, key, chunk_days=chunk)
+                sym_rows += added
+                total_rows += added
+                if not completed:
                     failed += 1
+        print(f"[{i}/{n}] {s.internal}: done in {_fmt_hms(time.monotonic() - sym_start)} "
+              f"({sym_rows:,} rows)")
+
+    _write_ingest_manifest(manifest)
+    print(f"databento ingest: {n} symbols, {total_rows:,} rows in "
+          f"{_fmt_hms(time.monotonic() - run_start)}"
+          + (f"  ({failed} fetch failure(s))" if failed else ""))
+    return {"kind": "ingest_databento", "ok": failed == 0, "symbols": n, "rows": total_rows}
+
+
+def _roll_dates_on_disk(symbol: str) -> pd.DatetimeIndex:
+    """Roll dates for a symbol, read from the raw n.0 ohlcv already on disk (the last
+    session before the front contract's ``instrument_id`` changes). Empty if n.0 ohlcv is
+    absent — the windowed n.1 stats fetch needs n.0 ohlcv ingested first (it always is,
+    since .n.0/ohlcv-1d is fetched before .n.1/statistics in the loop)."""
+    n0 = _read_ohlcv(symbol, ".n.0")
+    if n0.empty:
+        return pd.DatetimeIndex([])
+    key = _roll_key(n0)
+    if key is None:
+        return pd.DatetimeIndex([])
+    ids = n0[key]
+    is_roll = ids.ne(ids.shift(-1)) & ids.shift(-1).notna()
+    return n0.index[is_roll]
+
+
+def _ingest_n1_stats_windowed(client, dataset, s, manifest, end, window) -> int:
+    """Fetch n.1 ``statistics`` only in ±``window``-day windows around each roll date,
+    instead of the full history. Settlement is only read at rolls, so this is accuracy-
+    neutral. Resumes from the newest roll already covered. Returns rows added."""
+    key = f"{s.internal}.n.1:statistics"
+    rolls = _roll_dates_on_disk(s.internal)
+    if len(rolls) == 0:
+        print(f"    {s.internal}.n.1 statistics: no roll dates yet (n.0 ohlcv missing) — skipped")
+        return 0
+    rec = manifest.get(key, {})
+    covered = pd.Timestamp(rec["last_date"]) if rec.get("last_date") else None
+    todo = [d for d in rolls if covered is None or d > covered]
+    if not todo:
+        return 0
+    dbsym = f"{s.databento}.n.1"
+    end_ts = pd.Timestamp(end)
+    added, t0 = 0, time.monotonic()
+    # Advance the resume watermark only through the last CONTIGUOUS success, so a transient
+    # mid-history window failure is retried on the next run rather than silently leaving that
+    # roll's gap unmeasured.
+    watermark, ok = covered, True
+    for d in todo:
+        wstart = d - pd.Timedelta(days=window)
+        wend = min(d + pd.Timedelta(days=window + 1), end_ts)   # exclusive end
+        if wstart >= wend:
+            continue
+        try:
+            raw = _fetch(client, dataset, dbsym, "statistics",
+                         wstart.strftime("%Y-%m-%d"), wend.strftime("%Y-%m-%d"))
+        except Exception as e:  # noqa: BLE001 — databento/network is flaky
+            print(f"    {s.internal}.n.1 statistics [{d.date()}]: fetch failed — {e}")
+            ok = False
+            continue
+        if raw is not None and not raw.empty:
+            raw = _normalize(raw, "statistics")
+            if not raw.empty:
+                _append_raw(s.internal, ".n.1", "statistics", raw)
+                added += len(raw)
+        if ok:
+            watermark = d
+    if watermark is not None:
+        manifest[key] = {
+            "first_date": rec.get("first_date") or str(todo[0].date()),
+            "last_date": str(pd.Timestamp(watermark).date()),
+            "n_rows": int(rec.get("n_rows", 0)) + added,
+            "fetched_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "windowed": True,
+        }
+        _write_ingest_manifest(manifest)
+    print(f"    {s.internal}.n.1 statistics: +{added:>8,} rows across {len(todo)} roll "
+          f"window(s) (±{window}d) in {time.monotonic() - t0:.1f}s"
+          + ("" if ok else "  (some windows failed — retry on re-run)"))
+    return added
+
+
+def reconcile_manifest() -> dict:
+    """Rebuild the ingest manifest from the raw parquet files actually on disk.
+
+    ingest() writes the raw parquets incrementally, but a run interrupted before it
+    persisted the manifest can leave the manifest behind what is on disk — a restart
+    would then re-download already-fetched tables. This backfills the manifest from the
+    raw store so a restart resumes correctly. Reads only local files, never the API.
+    Returns ``{manifest_key: last_date}`` for every table it recorded."""
+    manifest = _load_ingest_manifest()
+    recorded: dict = {}
+    for schema in _SCHEMAS:
+        sub = "ohlcv" if schema == "ohlcv-1d" else "statistics"
+        d = raw_root() / sub
+        if not d.exists():
+            continue
+        for p in sorted(d.glob("*.parquet")):
+            name = p.stem  # "<symbol><feed>", e.g. "6E.n.0"
+            feed = next((f for f in _FEEDS if name.endswith(f)), None)
+            if feed is None:
+                continue
+            symbol = name[: -len(feed)]
+            try:
+                df = pd.read_parquet(p)
+            except Exception as e:  # noqa: BLE001
+                print(f"reconcile: could not read {p.name} — {e}")
+                continue
+            if df.empty:
+                continue
+            first, newest = _date_bounds(df, schema)
+            key = f"{symbol}{feed}:{schema}"
+            manifest[key] = {
+                "first_date": first,
+                "last_date": newest,
+                "n_rows": int(len(df)),
+                "fetched_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "reconciled": True,
+            }
+            recorded[key] = newest
+    _write_ingest_manifest(manifest)
+    return recorded
+
+
+# ── Batch ingest: robust large pulls via the databento batch API ─────────────
+# The streaming timeseries.get_range chokes on from-inception statistics (read timeouts,
+# dropped streams). The batch API prepares result files server-side and delivers them as
+# a download (robust, resumable), which is what it is designed for. Same raw store +
+# manifest as the streaming ingest, so build()/reconcile() are unchanged. Statistics are
+# fetched FULL here (no windowing — batch handles the volume).
+
+def _batch_fetch(client, dataset, dbsyms, schema, start, end, *, poll=30, timeout=14400) -> dict:
+    """Submit one databento BATCH job for many continuous symbols over [start, end), wait
+    for it, download the CSV(s), and return ``{dbsym: raw_df}`` grouped by the ``symbol``
+    column. Raises on job failure/timeout."""
+    import tempfile
+
+    def _jid(j):
+        return j.get("id") if isinstance(j, dict) else getattr(j, "id", None)
+
+    def _state(j):
+        return (j.get("state") if isinstance(j, dict) else getattr(j, "state", None)) or "unknown"
+
+    job = client.batch.submit_job(
+        dataset=dataset, symbols=list(dbsyms), stype_in="continuous", schema=schema,
+        start=start, end=end, encoding="csv", split_symbols=False, delivery="download")
+    job_id = _jid(job)
+    if not job_id:
+        raise RuntimeError("batch submit_job returned no job id")
+
+    waited = 0
+    while True:
+        me = next((j for j in client.batch.list_jobs() if _jid(j) == job_id), None)
+        st = _state(me)
+        if st == "done":
+            break
+        if st == "expired" or "fail" in str(st).lower():
+            raise RuntimeError(f"batch job {job_id} state={st}")
+        if waited >= timeout:
+            raise TimeoutError(f"batch job {job_id} not done after {timeout}s (state={st})")
+        time.sleep(poll)
+        waited += poll
+
+    frames: dict = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for path in client.batch.download(job_id=job_id, output_dir=tmp):
+            if ".csv" not in str(path):
+                continue
+            try:
+                df = pd.read_csv(path)                       # pandas infers .zst/.gz compression
+            except Exception as e:  # noqa: BLE001
+                print(f"batch: could not read {path} — {e}")
+                continue
+            if df.empty or "symbol" not in df.columns:
+                continue
+            for dbsym, g in df.groupby("symbol"):
+                frames.setdefault(dbsym, []).append(g)
+    return {k: pd.concat(v, ignore_index=True) for k, v in frames.items()}
+
+
+def _normalize_batch_csv(df: pd.DataFrame, schema: str) -> pd.DataFrame:
+    """Bring a batch CSV frame to the same shape the streaming ``_normalize`` produces
+    (ohlcv: tz-naive daily Date index; statistics: tz-naive columns)."""
+    df = df.copy()
+    for c in ("ts_event", "ts_ref"):
+        if c in df.columns:
+            df[c] = _to_naive(df[c])
+    if schema == "ohlcv-1d":
+        df = df.set_index("ts_event")
+        df.index = df.index.normalize()
+        df.index.name = "Date"
+        return df[~df.index.duplicated(keep="last")].sort_index()
+    return df.drop_duplicates().reset_index(drop=True)
+
+
+def ingest_batch(symbols=None, *, client=None, dataset="GLBX.MDP3", end=None,
+                 cold_start=GLBX_HISTORY_FLOOR, poll=30) -> dict:
+    """Batch-API variant of ingest(): fetch each (feed, schema) as a databento batch job
+    (download-to-file) instead of streaming — robust for large from-inception pulls. One
+    job per (feed, schema) covers every symbol still needing it, from the earliest resume
+    point; per-symbol rows are appended and the manifest advanced individually, so resume
+    and build are unchanged. Returns {kind, ok, symbols, rows}."""
+    targets = [s for s in all_symbols()
+               if s.databento and s.price_source in (None, "databento")
+               and (symbols is None or s.internal in symbols)]
+    if not targets:
+        print("databento batch ingest: no databento-capable symbols"
+              + (f" among {symbols}" if symbols else ""))
+        return {"kind": "ingest_databento", "ok": True, "symbols": 0, "rows": 0}
+    if client is None:
+        client = _client_from_env()
+
+    end = end or (pd.Timestamp.now().normalize() - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    end_ts = pd.Timestamp(end)
+    manifest = _load_ingest_manifest()
+    total_rows, failed = 0, 0
+    run_start = time.monotonic()
+
+    for feed in _FEEDS:
+        for schema in _SCHEMAS:
+            needed, starts = {}, []
+            for s in targets:
+                last = manifest.get(f"{s.internal}{feed}:{schema}", {}).get("last_date")
+                st = (pd.Timestamp(last) + pd.Timedelta(days=1)) if last else pd.Timestamp(cold_start)
+                if st < pd.Timestamp(GLBX_HISTORY_FLOOR):
+                    st = pd.Timestamp(GLBX_HISTORY_FLOOR)
+                if st >= end_ts:
+                    continue                                # already current
+                needed[f"{s.databento}{feed}"] = s.internal
+                starts.append(st)
+            if not needed:
+                continue
+            job_start = min(starts).strftime("%Y-%m-%d")
+            t0 = time.monotonic()
+            print(f"batch {feed} {schema}: {len(needed)} symbols {job_start}..{end} — submitting job...")
+            try:
+                frames = _batch_fetch(client, dataset, list(needed), schema, job_start, end, poll=poll)
+            except Exception as e:  # noqa: BLE001 — batch/network is flaky
+                print(f"batch {feed} {schema}: FAILED — {e}")
+                failed += 1
+                continue
+            wrote = 0
+            for dbsym, raw in frames.items():
+                internal = needed.get(dbsym)
+                if internal is None:
                     continue
-                if raw is None or raw.empty:
-                    continue
-                raw = _normalize(raw, schema)
+                raw = _normalize_batch_csv(raw, schema)
                 if raw.empty:
                     continue
-                _append_raw(s.internal, feed, schema, raw)
+                _append_raw(internal, feed, schema, raw)
                 first, newest = _date_bounds(raw, schema)
+                key = f"{internal}{feed}:{schema}"
+                rec = manifest.get(key, {})
                 manifest[key] = {
                     "first_date": rec.get("first_date") or first,
                     "last_date": newest,
                     "n_rows": int(rec.get("n_rows", 0)) + len(raw),
                     "fetched_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "batch": True,
                 }
-                total_rows += len(raw)
-                print(f"{s.internal}{feed} {schema}: +{len(raw):5d} rows ({start}..{newest}) -> raw store")
+                wrote += len(raw)
+            _write_ingest_manifest(manifest)
+            total_rows += wrote
+            print(f"batch {feed} {schema}: +{wrote:,} rows for {len(frames)} symbols in "
+                  f"{_fmt_hms(time.monotonic() - t0)}")
 
-    _write_ingest_manifest(manifest)
+    print(f"databento batch ingest: {len(targets)} symbols, {total_rows:,} rows in "
+          f"{_fmt_hms(time.monotonic() - run_start)}"
+          + (f"  ({failed} job failure(s))" if failed else ""))
     return {"kind": "ingest_databento", "ok": failed == 0, "symbols": len(targets), "rows": total_rows}
 
 
