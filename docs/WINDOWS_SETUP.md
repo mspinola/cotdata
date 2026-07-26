@@ -72,14 +72,18 @@ Activate it:
 
 Your command prompt should now show `(.venv)` at the start of the line. All subsequent `pip install` and `python` commands run in this environment.
 
-### Using `uv` (Faster Alternative)
+### Using `uv` (Faster Alternative — Recommended)
 
-If you want faster installs, install `uv` first:
-```cmd
-pip install uv
+If you want faster installs, install `uv` via [Astral's standalone installer](https://docs.astral.sh/uv/getting-started/installation/) rather than `pip install uv`. The `pip` route puts `uv.exe` in a Python `Scripts` directory that's often missing from `PATH`, so the command can silently fail to resolve right after installing — the standalone installer configures `PATH` for you. See [Troubleshooting: `uv` Not Found](#uv-not-found-after-pip-install-uv) if you've already hit this.
+
+Open **PowerShell** (not Command Prompt) and run:
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Then create and activate:
+**Restart your terminal** afterward — Windows only picks up the `PATH` change in a new session, so `uv` will still say "not recognized" in the window you ran the installer from.
+
+Then create and activate the venv:
 ```cmd
 uv venv --python 3.11
 .venv\Scripts\activate.bat
@@ -230,7 +234,7 @@ Should print the last 3 rows of S&P 500 COT data.
 
 ## Step 7: Scheduling with Task Scheduler (Optional)
 
-If you want cotdata to run automatically (e.g. daily price updates), see the [README's Task Scheduler section](../README.md#scheduling-on-windows-task-scheduler) for setup.
+If you want cotdata to run automatically (e.g. daily price updates), see [Scheduling cotdata on Windows](WINDOWS_SCHEDULING.md) for setup.
 
 ## Troubleshooting
 
@@ -248,6 +252,20 @@ If still broken, add it manually:
 - Under **System variables**, find `Path` → click **Edit**
 - Click **New** and add: `C:\Users\YourUsername\AppData\Local\Programs\Python\Python311` (adjust version if needed)
 - Click **OK** and restart Command Prompt
+
+### `uv` Not Found After `pip install uv`
+
+**Problem:** `pip install uv` succeeds, but running `uv` says "'uv' is not recognized as an internal or external command"
+
+**Cause:** `pip install uv` places `uv.exe` inside Python's `Scripts` directory (e.g. `...\Python311\Scripts\`), which is frequently not on `PATH` even when the `python` command itself works — Windows has nowhere to look for `uv`.
+
+**Fix — use the standalone installer instead** (this is what [Astral](https://docs.astral.sh/uv/getting-started/installation/), `uv`'s creators, recommend over `pip install uv`):
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+It configures `PATH` automatically. **Restart your terminal** afterward — a fresh session is required to pick up the change; the terminal you ran the installer in will still show "not recognized."
+
+If you'd rather keep the `pip`-installed copy, add its `Scripts` directory to `PATH` manually — same Environment Variables steps as the [Python-not-found fix](#python-not-found-after-installation) above, pointing at `...\Python311\Scripts` instead.
 
 ### Virtual Environment Won't Activate
 
@@ -297,7 +315,7 @@ If still broken, add it manually:
 
 - **Read data:** See the [README](../README.md#reading-data-consumer) for `get_prices()`, `get_cot()`, and adjustments
 - **Produce prices:** If you have Norgate, follow the [Producing data](../README.md#producing-data-producer) section
-- **Schedule runs:** Automate daily updates with [Task Scheduler](../README.md#scheduling-on-windows-task-scheduler)
+- **Schedule runs:** Automate daily updates with [Task Scheduler](WINDOWS_SCHEDULING.md)
 - **Develop locally:** Clone the repo, install with `pip install -e .`, and run tests with `pytest`
 
 ## Common Environment Configurations
