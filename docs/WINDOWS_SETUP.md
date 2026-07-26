@@ -10,9 +10,11 @@ This guide walks through setting up a Windows development or production environm
 
 ## Step 1: Install Python
 
+> **Use Python 3.11.** That is the version every other repo in the workspace pins (`npf/.venv` is 3.11), so it's the version cotdata's dependencies are known to have prebuilt wheels for. Do **not** grab "the latest Python" from the python.org front page — newer releases (3.13, 3.14) frequently ship before packages like `norgatedata` publish matching wheels, and the install then fails trying to compile from source. If you already installed a newer version, see [Dependencies Won't Install on a Newer Python](#dependencies-wont-install-on-a-newer-python) below.
+
 ### Option A: Official Python.org (Recommended)
 
-1. Download the latest **Python 3.11** from [python.org](https://www.python.org/downloads/release/python-3112/)
+1. Download **Python 3.11** from [python.org](https://www.python.org/downloads/release/python-3112/) (this link goes straight to a 3.11 release, not the latest)
    - Look for "Windows installer (64-bit)" — click **Download**
    - If your machine is 32-bit (rare), download the 32-bit version instead
 
@@ -25,7 +27,7 @@ This guide walks through setting up a Windows development or production environm
    ```cmd
    python --version
    ```
-   Should print `Python 3.11.x` or similar. If it says "command not found," Python didn't add itself to PATH — reinstall and ensure "Add Python to PATH" is checked.
+   Should print `Python 3.11.x`. If it prints a different major.minor (e.g. `3.14.x`), a newer Python is ahead of 3.11 on your `PATH` — install 3.11 and either make it the default or point `uv`/`venv` at it explicitly (`uv venv --python 3.11`, or `py -3.11 -m venv .venv`). If it says "command not found," Python didn't add itself to PATH — reinstall and ensure "Add Python to PATH" is checked.
 
 ### Option B: Windows Store Python
 
@@ -73,7 +75,9 @@ uv venv --python 3.11
 .venv\Scripts\activate.bat
 ```
 
-Your command prompt should now show `(.venv)` at the start of the line. All subsequent `pip install` and `python` commands run in this environment.
+Your command prompt should now show the environment is active — `(.venv)`, or your project folder name like `(cotdata)`.
+
+> **Important:** a `uv`-created venv has **no standalone `pip`** inside it. Install packages with **`uv pip install ...`** (see [Step 3](#step-3-install-cotdata)). If you run plain `pip install`, it falls through to your *global* Python and installs there instead — then your venv's `python` can't find the package (`ModuleNotFoundError`) even though the install "succeeded."
 
 ### Using `venv` (Built-in Alternative)
 
@@ -88,13 +92,16 @@ Same result: your command prompt shows `(.venv)` once activated.
 
 ## Step 3: Install cotdata
 
-With your virtual environment activated (you see `(.venv)` in the prompt), install cotdata:
+With your virtual environment activated, install cotdata.
+
+> **Which command — `pip` or `uv pip`?** If you created the venv with **`uv venv`**, use **`uv pip install ...`** (a uv venv has no standalone `pip`). If you used **`python -m venv`**, use plain **`pip install ...`**. The examples below show the `pip` form; prefix with `uv` if you're on a uv venv.
 
 ### For Consumer (Read-Only)
 
 If you only read data (no Norgate producer):
 ```cmd
 pip install cotdata
+:: uv venv:  uv pip install cotdata
 ```
 
 ### For Producer (Windows with Norgate)
@@ -102,6 +109,7 @@ pip install cotdata
 If you have a Norgate subscription and will run on this Windows machine:
 ```cmd
 pip install "cotdata[norgate]"
+:: uv venv:  uv pip install "cotdata[norgate]"
 ```
 
 ### For Development (Editable Install)
@@ -109,6 +117,7 @@ pip install "cotdata[norgate]"
 If you're modifying cotdata code:
 ```cmd
 pip install -e .
+:: uv venv:  uv pip install -e .
 ```
 
 Installation may take 1–2 minutes (many dependencies). Watch for any errors — if it says a package failed to download, your internet may have glitched; try again.
@@ -262,6 +271,23 @@ It configures `PATH` automatically. **Restart your terminal** afterward — a fr
 
 If you'd rather keep the `pip`-installed copy, add its `Scripts` directory to `PATH` manually — same Environment Variables steps as the [Python-not-found fix](#python-not-found-after-installation) above, pointing at `...\Python311\Scripts` instead.
 
+### Dependencies Won't Install on a Newer Python
+
+**Problem:** `pip install "cotdata[norgate]"` fails while building a dependency (`norgatedata`, or a package with no matching wheel), often with a compiler error or "no matching distribution found." Or `import cotdata` works but `cotdata-update` isn't found and `where python` / `where pip` point at an `AppData\Local\Python\pythoncore-3.14-64` path.
+
+**Cause:** You're on a Python newer than 3.11 (e.g. 3.13 or 3.14). The workspace pins **3.11** because that's what the dependencies publish prebuilt wheels for; on a brand-new Python, pip falls back to compiling from source (which usually fails) or installs into a global per-version location instead of your venv.
+
+**Fix:**
+1. Install **Python 3.11** (see [Step 1](#step-1-install-python)). You can keep the newer Python installed alongside it.
+2. Create the venv explicitly against 3.11 so it doesn't inherit the newer default:
+   ```cmd
+   uv venv --python 3.11
+   :: or, without uv:
+   py -3.11 -m venv .venv
+   ```
+3. Activate it (`.venv\Scripts\activate.bat`) and confirm `python --version` prints `3.11.x` **and** `where pip` points inside `...\cotdata\.venv\Scripts\`.
+4. Reinstall into the venv: `pip install "cotdata[norgate]"`. `cotdata-update` now lands in `.venv\Scripts\` (on PATH while activated).
+
 ### Virtual Environment Won't Activate
 
 **Problem:** `.venv\Scripts\activate.bat` gives an error
@@ -279,9 +305,10 @@ If you'd rather keep the `pip`-installed copy, add its `Scripts` directory to `P
 **Problem:** `import cotdata` fails
 
 **Likely causes:**
-1. Virtual environment not activated (no `(.venv)` in prompt) → run `.venv\Scripts\activate.bat`
-2. Installation failed → try `pip install --upgrade pip` then `pip install cotdata` again
-3. Wrong Python being used → run `python -m pip list` and check cotdata is there
+1. **Installed with plain `pip` into a `uv` venv** (most common with uv) → a uv venv has no `pip`, so `pip install` used your *global* pip and installed cotdata outside the venv. Reinstall with `uv pip install "cotdata[norgate]"`. Confirm with `where pip` (points at global) vs `where python` (points at `...\.venv\Scripts\`).
+2. Virtual environment not activated (no `(.venv)`/`(cotdata)` in prompt) → run `.venv\Scripts\activate.bat`
+3. Installation failed → try `pip install --upgrade pip` then `pip install cotdata` again
+4. Wrong Python being used → run `python -m pip list` and check cotdata is there
 
 ### `COTDATA_STORE` Not Found
 
