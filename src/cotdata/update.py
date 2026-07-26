@@ -9,8 +9,30 @@ import datetime as _dt
 
 from . import config
 
+# Which producer half each action belongs to. `cotdata-cot` and `cotdata-prices` refuse
+# the other half's actions, so a host can be given exactly one job. That matters most on
+# a second producer machine: a Windows price box that could also run --cot-all would
+# become a second COT producer racing the first, which is the failure the split manifests
+# exist to contain. Read-only actions (--check, --reconcile) belong to both.
+_HALF_ACTIONS = {
+    "cot": ("cot_legacy", "cot_disagg", "cot_tff", "cot_all"),
+    "prices": ("prices", "metadata", "prices_yahoo", "ingest_databento",
+               "build_databento"),
+}
 
-def main() -> None:
+
+def _reject_other_half(parser, args, half: str) -> None:
+    other = "prices" if half == "cot" else "cot"
+    used = [a for a in _HALF_ACTIONS[other] if getattr(args, a, False)]
+    if used:
+        flags = ", ".join("--" + a.replace("_", "-") for a in used)
+        parser.error(
+            f"{flags} belong(s) to the {other} half. This entry point runs the {half} "
+            f"half only, so one host does one job. Use cotdata-{other} for those, or "
+            f"cotdata-update to run both from one machine.")
+
+
+def main(argv=None, half=None) -> None:
     p = argparse.ArgumentParser(description="cotdata producer — fetch sources into the store.")
     p.add_argument("--prices", action="store_true", help="Update Norgate price bars (Windows).")
     p.add_argument("--metadata", action="store_true", help="Update Norgate contract metadata (Windows).")
@@ -57,6 +79,10 @@ def main() -> None:
     p.add_argument("--check", action="store_true",
                    help="Print store status (row counts, newest data, staleness) from "
                         "the manifest and exit. Read-only, cross-platform, no network.")
+    p.add_argument("--migrate-manifests", action="store_true",
+                   help="One-shot: split a legacy manifest.json into the per-half "
+                        "manifests/ files, then exit. Idempotent, read-only on data. "
+                        "Run once per store after upgrading.")
     p.add_argument("--reconcile", action="store_true",
                    help="Prune manifest entries whose parquet file is missing (ghosts "
                         "from old naming), refresh status.json, and exit. Never touches data.")
@@ -64,13 +90,30 @@ def main() -> None:
                    help="Rebuild the databento raw-store ingest manifest from the parquet files "
                         "on disk, so an interrupted --ingest-databento resumes instead of "
                         "re-downloading. Reads only local files, no API. Exit.")
-    args = p.parse_args()
+    args = p.parse_args(argv)
+    if half:
+        _reject_other_half(p, args, half)
 
     config.store_root()  # fail fast if COTDATA_STORE unset
 
     if args.check:
         from . import status
         status.print_check()
+        return
+
+    if args.migrate_manifests:
+        from . import store
+        added = store.migrate_manifests()
+        total = sum(added.values())
+        if not total:
+            print("manifest migration: nothing to do (already migrated, or no legacy "
+                  "manifest.json).")
+        else:
+            for half, n in sorted(added.items()):
+                print(f"  {half:<8} +{n} entries -> manifests/{half}.json")
+            print(f"manifest migration: moved {total} entries out of the legacy "
+                  f"aggregate. manifest.json is no longer written and can be deleted "
+                  f"once every consumer is on this version.")
         return
 
     if args.reconcile:
@@ -197,3 +240,13 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def main_cot(argv=None) -> None:
+    """`cotdata-cot`: the CFTC half. Free, cross-platform, no Norgate."""
+    main(argv, half="cot")
+
+
+def main_prices(argv=None) -> None:
+    """`cotdata-prices`: the price half. Norgate needs Windows with NDU running."""
+    main(argv, half="prices")

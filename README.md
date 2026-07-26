@@ -28,7 +28,7 @@ cotdata separates *fetching* data (a "producer" that talks to vendors) from *usi
 
 ## Contents
 
-- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Reading data](#reading-data-consumer) · [Producing data](#producing-data-producer) · [Scheduling on Windows](#scheduling-on-windows-task-scheduler) · [Operations](#operations) · [Concepts & design](#concepts--design) · [Reference: schemas](#reference-data-schemas) · [Reference: COT formats](#reference-cot-formats-explained) · [Diagnostics](#diagnostics) · [Development](#development) · [Contributing](#contributing) · [License](#license)
+- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Reading data](#reading-data-consumer) · [Producing data](#producing-data-producer) · [Windows setup](docs/WINDOWS_SETUP.md) · [Scheduling on Windows](docs/WINDOWS_SCHEDULING.md) · [Scheduling on Linux](docs/LINUX_SCHEDULING.md) · [Syncing the store](docs/SYNCING.md) · [Operations](#operations) · [Concepts & design](#concepts--design) · [Reference: schemas](#reference-data-schemas) · [Reference: COT formats](#reference-cot-formats-explained) · [Diagnostics](#diagnostics) · [Development](#development) · [Contributing](#contributing) · [License](#license)
 
 ## Quickstart
 
@@ -167,128 +167,70 @@ cotdata-update --check                # coverage, newest dates, staleness
 - **History starts 2010-06-06** (the GLBX floor), shallower than Norgate. Markets not on CME Globex (ICE softs, lumber, MSCI intl) fall back to Yahoo.
 - **First-run check.** A healthy symbol prints `built unadj+backadj (N bars, K rolls)`. If it prints `no rolls detected`, back-adjustment is a no-op for that symbol, so investigate before trusting it.
 - **Validate against Norgate** (optional gate) with `scripts/validate_databento_vs_norgate.py` if you have both stores.
-- **Schedule** the two price commands nightly and `--cot-all` weekly (cron on Linux, the same idea as the Windows section below).
+- **Schedule** the two price commands nightly and `--cot-all` weekly — see [Scheduling on Linux](docs/LINUX_SCHEDULING.md).
+
+### Producer halves: one host, one job
+
+`cotdata` has two producers by design: the CFTC downloader (free, any OS) and the price
+producer (Norgate needs Windows). Two entry points scope a host to one of them:
+
+```bash
+cotdata-cot     --cot-all                      # CFTC half, any OS
+cotdata-prices  --prices --metadata --require-final   # price half, Windows for Norgate
+cotdata-update  ...                            # both, for a single-machine deployment
+```
+
+Each scoped entry point refuses the other half's flags, so a price box cannot quietly
+become a second COT producer racing the first. `--check` and `--reconcile` are read-only
+and work from either.
+
+Each half also owns its own manifest (`manifests/cot.json`, `manifests/prices.json`).
+The legacy top-level `manifest.json` held both halves in ONE file, which was unsafe two
+ways: the update is a read-modify-write, so two producers lose each other's entries, and
+a file-level sync between two stores resolves it last-writer-wins and silently discards
+one side. The per-half files are disjoint, so both problems go away.
+
+**Nothing writes `manifest.json` any more.** Migrate a store once:
+
+```bash
+cotdata-update --migrate-manifests
+```
+
+Idempotent, and it never touches data. Until you run it, a domain missing from the
+per-half files is still read from the aggregate with a warning. Delete `manifest.json`
+once every consumer of that store is on this version. See ADR-0007.
 
 ### Scheduling on Windows (Task Scheduler)
 
-The goal: **prices daily**, and **COT caught within minutes of its Friday ~3:30pm ET release** while surviving holiday delays. Two properties make this simple:
+Full setup, including wrapper scripts, the three-task layout (daily prices, daily COT catch-up, Friday release-window poller), `--require-final` event-driven pricing, restart-on-failure retry settings, and Norgate/Task-Scheduler troubleshooting (notably: NDU needs an interactive session), is in **[docs/WINDOWS_SCHEDULING.md](docs/WINDOWS_SCHEDULING.md)**. Start with the [Windows Setup Guide](docs/WINDOWS_SETUP.md) first if Python/the venv/`COTDATA_STORE` aren't configured yet.
 
-- **Idempotent.** `cotdata-update --cot-*` HEAD-checks each CFTC year zip and skips it if unchanged, so re-running is cheap. Running before the release lands is a harmless no-op; the first run *after* it lands picks it up.
-- **Fails loudly.** A run exits non-zero only on a hard fetch error (source unreachable) — *not* when there's simply no new data yet. So Task Scheduler's "restart on failure" retries real errors without firing on ordinary "nothing new" runs.
-
-Create **two** wrapper scripts — they run *different* commands. Each sets `COTDATA_STORE` and calls the venv's `cotdata-update`.
-
-> **Replace the `<...>` placeholders with your real paths** — in *both* the wrapper files below *and* the task commands further down. `<STORE>` = your synced store, `<VENV>` = your virtualenv, `<DIR>` = the folder holding these `.cmd` files. Example values: `<STORE>` = `\\Mac\code\cotdata_store`, `<VENV>` = `C:\Users\you\code\cotdata\.venv`.
-
-`run-prices.cmd` — prices (with `--require-final`, so it runs only once Norgate's **Final** prices are in, not interim bars):
-
-```bat
-@echo off
-set COTDATA_STORE=<STORE>
-"<VENV>\Scripts\cotdata-update.exe" --prices --metadata --require-final
-```
-
-`run-cot.cmd` — COT (note the **different** command, `--cot-all`):
-
-```bat
-@echo off
-set COTDATA_STORE=<STORE>
-"<VENV>\Scripts\cotdata-update.exe" --cot-all
-```
-
-Then create three tasks — times are the **machine's local** time; convert from ET if it isn't on Eastern:
-
-```bat
-:: 1) Prices — fire at the Continuous Futures Final (~8:55pm ET); --require-final + restart
-::    below keep retrying (cheap no-ops) until Norgate has actually pulled the Finals.
-schtasks /Create /TN "cotdata prices" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55
-
-:: 2) COT — daily morning catch-up for holiday-delayed releases and as a safety net
-schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
-```
-
-The **Friday release window** needs a *repeating* trigger, which `schtasks` can't express on a weekly schedule (`/ET` and `/DU` are MINUTE/HOURLY only). Create it in PowerShell instead — weekly on Friday at 3:25pm ET, repeating every 2 min for 45 minutes so it catches the ~3:30 release within a couple of minutes:
-
-```powershell
-$act = New-ScheduledTaskAction -Execute "<DIR>\run-cot.cmd"
-$trg = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Friday -At 3:25PM
-# borrow a repetition pattern (schtasks/New-ScheduledTaskTrigger can't set it directly on a weekly trigger):
-$rep = (New-ScheduledTaskTrigger -Once -At 3:25PM `
-        -RepetitionInterval (New-TimeSpan -Minutes 2) `
-        -RepetitionDuration (New-TimeSpan -Minutes 45)).Repetition
-$trg.Repetition = $rep
-Register-ScheduledTask -TaskName "cotdata COT (Fri release)" -Action $act -Trigger $trg
-```
-
-(Or in the Task Scheduler GUI: New Task → Trigger *Weekly, Friday, 3:25pm* → check *"Repeat task every: 2 minutes for a duration of: 45 minutes."*)
-
-**Event-driven prices with `--require-final`.** cotdata reads two Norgate databases: **Continuous Futures** (the `&ES` / `_CCB` series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Their **Final** prices land ~8:40pm ET (Futures) and ~8:55pm ET (Continuous Futures), but your Norgate Data Updater still has to *pull* them on its next poll. Rather than guess a fixed time, `--require-final` checks `norgatedata.last_database_update_time()` for both databases and only fetches once each has been refreshed at/after `--final-cutoff` (default `20:55` local — set it to your machine's local equivalent of 8:55pm ET). Until then it **defers with a non-zero exit**, so the restart setting below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
-
-**Retry / wait via restart-on-failure.** Give each task a *restart on failure* — it does double duty: it retries transient fetch errors, and (for the price task) waits out the gap between 8:55pm and NDU actually pulling the Finals (each retry is a cheap `last_database_update_time` check that exits immediately until ready). On a genuine no-session day the retries simply exhaust, harmlessly. `schtasks` can't set this, so use PowerShell (applies to all three tasks):
-
-```powershell
-$s = New-ScheduledTaskSettingsSet -RestartInterval (New-TimeSpan -Minutes 10) -RestartCount 6
-foreach ($t in "cotdata prices","cotdata COT (Fri release)","cotdata COT (catch-up)") {
-    Set-ScheduledTask -TaskName $t -Settings $s
-}
-```
-
-(GUI equivalent: each task → **Settings** tab → *"If the task fails, restart every: 10 minutes"*, *"Attempt to restart up to: 6 times."*)
-
-**View / manage the jobs** any time in the Windows **Task Scheduler** GUI — press `Win + R` and run `taskschd.msc`, or open *Task Scheduler* from the Start menu — then look under **Task Scheduler Library** for the `cotdata …` tasks.
+The short version: prices fire once daily near the Norgate Continuous Futures Final (~8:55pm ET), COT gets a daily morning catch-up plus a tight Friday-afternoon poll around its ~3:30pm ET release, and every task uses restart-on-failure so idempotent, cheap re-runs absorb both transient errors and "not published yet."
 
 ### Scheduling on Linux (cron)
 
-A databento server schedules the same way: **prices nightly**, **COT caught soon after its Friday ~3:30pm ET release**, with a daily catch-up for holiday delays. The same two properties hold:
+Full setup, including wrapper scripts, the crontab entries (nightly prices, daily COT catch-up, Friday release-window poller), `flock` overlap protection, and troubleshooting (cron's bare environment, timezone conversion, `DATABENTO_API_KEY` not being picked up), is in **[docs/LINUX_SCHEDULING.md](docs/LINUX_SCHEDULING.md)**.
 
-- **Idempotent.** `--cot-all` HEAD-checks each CFTC year zip and skips it if unchanged. `--ingest-databento` resumes from the last fetched date, so a re-run pulls only new days. Running before new data lands is a harmless no-op.
-- **Fails loudly.** A run exits non-zero only on a hard fetch error (source unreachable), not when there is simply nothing new. Because ingest is resumable and COT is idempotent, a failed or missed run is picked up by the next one, so no explicit retry logic is needed.
+The short version: a databento server schedules the same way as the Windows/Norgate producer — prices nightly, COT gets a daily morning catch-up plus a tight Friday-afternoon poll around its ~3:30pm ET release, all idempotent and safe to over-run.
 
-Cron runs with a bare environment, so put the config and the venv path in a wrapper script (one per command, mirroring the Windows pair). Replace the `<...>` placeholders: `<STORE>` = your store, `<VENV>` = your virtualenv, `<KEY>` = your Databento key, `<DIR>` = the folder holding these scripts.
+### Syncing the store between machines
 
-`run-prices.sh` — the two-stage databento build plus the Yahoo fallback:
+Norgate needs Windows, so a research Mac or a Linux dashboard is usually a **read-only
+replica** of a store produced elsewhere. Prefer one producer writing everything and a
+strictly one-directional sync.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-export COTDATA_STORE=<STORE>
-export COTDATA_PRICE_SOURCE=databento
-export DATABENTO_API_KEY=<KEY>
-BIN=<VENV>/bin/cotdata-update
-"$BIN" --ingest-databento     # Stage 1 (paid): raw .n.0/.n.1 -> raw store
-"$BIN" --build-databento      # Stage 2 (free): back-adjusted prices
-"$BIN" --prices-yahoo         # softs / lumber / MSCI fallback
-```
+Two directories must be **excluded** for size: `_cache/` (cotdata's cache of downloaded
+CFTC source zips) and `_raw/` (the **paid** databento raw store) are producer-internal
+and together are ~70% of the bytes. The legacy `manifest.json` should be excluded too.
 
-`run-cot.sh` — COT (note the different command):
+Anything a consumer put in the store by hand is a **correctness** issue rather than a
+saving. No producer creates it, so a mirroring sync deletes it. Exclude it, but the real
+fix is to keep it out of the store: the store belongs to its producer.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-export COTDATA_STORE=<STORE>
-<VENV>/bin/cotdata-update --cot-all
-```
+Consumer cloud sync (Dropbox, Google Drive) is a poor fit here: conflict copies land
+inside the store, and on-demand placeholder files break `read_parquet` on the machine
+doing research.
 
-Make them executable (`chmod +x run-prices.sh run-cot.sh`), then add the jobs with `crontab -e`. Cron uses the **server's local** timezone, so convert the ET times below if it is not on Eastern (or set the server to a known zone). `flock` stops a slow run from overlapping the next, and the redirect keeps a log:
-
-```cron
-# Prices — nightly (Mon-Sat). GLBX settlements are disseminated the morning after the
-# session, so an early-morning run captures the prior session's finalized settlement.
-30 6 * * 1-6     flock -n /tmp/cotdata-prices.lock <DIR>/run-prices.sh >> <DIR>/prices.log 2>&1
-
-# COT — daily morning catch-up (holiday-delayed releases and a safety net).
-10 8 * * *       flock -n /tmp/cotdata-cot.lock <DIR>/run-cot.sh >> <DIR>/cot.log 2>&1
-
-# COT — Friday release window: every 2 min across the ~3:30pm ET release (times in ET,
-# each run a cheap no-op until the zip changes). Convert to the server's local time.
-*/2 15-16 * * 5  flock -n /tmp/cotdata-cot.lock <DIR>/run-cot.sh >> <DIR>/cot.log 2>&1
-```
-
-Set `MAILTO=you@example.com` at the top of the crontab to have cron email the output of any run that writes to stderr or exits non-zero. For tighter alerting, point your monitoring at the log files or the store's `status.json` (see [Operations](#operations)), or run the wrappers from a systemd timer with `OnFailure=`. Check coverage and freshness any time with `cotdata-update --check`.
-
-**Monitoring:** after any run, `status.json` reflects `newest_data.<domain>` and `last_run.symbols_failed` — poll it to confirm the Friday COT actually advanced, or to alert on failures (see [Operations](#operations)).
-
-> The Friday window intentionally over-polls (every 2 minutes across a 45-minute window); idempotency makes every run after the release lands a no-op. If you'd rather actively wait out *late* releases, a wrapper can loop until `status.json`'s `newest_data.cot_legacy` reaches the expected Tuesday — but daily catch-up already covers holiday slips with far less machinery.
+Full guidance, exclusion table and example scripts: **[docs/SYNCING.md](docs/SYNCING.md)**.
 
 ## Operations
 

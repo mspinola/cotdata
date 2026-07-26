@@ -10,6 +10,10 @@ dist/
 /store/
 *.parquet
 
+# local Task Scheduler / cron wrapper scripts (machine-specific paths, and on
+# Linux a Databento API key). Copy templates from docs/examples/ into here.
+/scheduler/
+
 # macOS
 .DS_Store
 **/.DS_Store
