@@ -37,11 +37,11 @@ This is the part that matters, and on a real store it is most of the bytes.
 | `status.json` | yes | the producer's own view, useful on the replica |
 | `_cache/` | **NO** | cotdata's own download cache of CFTC source zips, producer-internal, free to rebuild |
 | `_raw/` | **NO** | databento append-only raw store, producer-internal |
-| `citpy/` | **NO** | hand-written research notes, NOT reproducible (see below) |
+| anything a consumer added by hand | **NO** | no producer creates it, so a mirror deletes it (see below) |
 | `manifest.json` | **NO** | legacy aggregate, nothing writes it (see below) |
 
-On one real store those exclusions dropped the payload from 270 MB to about 82 MB, and
-two of them are correctness issues rather than savings.
+On one real store the `_cache/` and `_raw/` exclusions dropped the payload from 270 MB to
+about 82 MB. The other two are correctness issues rather than savings.
 
 ### `_cache/` holds source archives, not derived data
 
@@ -56,17 +56,25 @@ excluded, but for different reasons: `_cache/` because a replica has no use for 
 archives, `_raw/` because a replica has no use for them either and re-fetching would cost
 money.
 
-### `citpy/` is hand-written and NOT reproducible
+### Do not keep consumer-owned files in the store
 
-This is the exclusion to get right. Despite living under the store, `citpy/` is not
-cotdata's and is not derived: cotmetrics describes it as *"CIT PY research notes (dated
-.md/.txt, copied in by hand)"*, and `COTMETRICS_CITPY` points there on a machine that
-does research.
+The store belongs to its producer. Every directory in it is something a producer writes,
+which is what makes a one-directional mirror safe: the replica can be reconstructed by
+running the producer again.
 
-A pure producer has no such directory, so a mirroring sync from the producer **deletes
-it**. Nothing regenerates it, because nothing generated it in the first place. Exclude it,
-or better, move it out of the store entirely by pointing `COTMETRICS_CITPY` elsewhere so
-no future sync can reach it.
+A consumer that drops its own files in gets neither half of that guarantee. A pure
+producer has no such directory, so a mirroring sync **deletes it**, and no producer run
+brings it back.
+
+The real case was `citpy/`, a hand-refreshed copy of a separate tool's output, read via
+cotmetrics' `COTMETRICS_CITPY`. It was excluded from the sync, which worked, but the
+exclusion was the weaker fix on two counts: it had to be remembered in every transport
+config, and the copy could silently drift from the tool that produced it. Pointing
+`COTMETRICS_CITPY` at that tool's own output directory removed both problems and the
+directory left the store.
+
+If you have anything similar, exclude it today and move it out of the store. Then no
+future transport, and no colleague configuring one, can reach it.
 
 ### `manifest.json` is legacy
 
