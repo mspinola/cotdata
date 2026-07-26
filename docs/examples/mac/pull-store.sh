@@ -19,9 +19,10 @@ SRC="REPLACE_WITH_PRODUCER_HOST:REPLACE_WITH_REMOTE_STORE"
 DEST="REPLACE_WITH_LOCAL_STORE"
 
 # What each exclusion is for:
-#   _cache, _raw   databento producer-internal, rebuildable, most of the bytes
-#   citpy          written by COTMETRICS on THIS machine, not by cotdata — a
-#                  --delete sync would remove locally-derived output
+#   _cache, _raw   producer-internal, most of the bytes. _cache is cotdata's cache
+#                  of downloaded CFTC zips; _raw is the PAID databento raw store.
+#   citpy          HAND-WRITTEN research notes that nothing regenerates. A
+#                  --delete sync would remove them permanently.
 #   manifest.json  legacy aggregate, nothing writes it, and it is the one file a
 #                  sync resolves last-writer-wins across both producer halves
 EXCLUDES=(
