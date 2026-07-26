@@ -78,6 +78,22 @@ foreach ($t in "cotdata prices","cotdata COT (Fri release)","cotdata COT (catch-
 
 ## Troubleshooting
 
+### Task doesn't fire at all
+
+Before suspecting cotdata or Norgate, rule out the task simply never running:
+
+- **General tab** → confirm **Enabled** is checked (a task can silently sit disabled after an edit)
+- **Triggers tab** → confirm the trigger isn't greyed out / expired
+- **Conditions tab** → **"Start the task only if the computer is on AC power"** is checked by default and will silently skip runs on an unplugged laptop — uncheck it for an always-on desktop/server producer, since a missed 8:55pm price run has no user-visible symptom other than `status.json` not advancing
+
+If it's unclear whether the trigger is the problem, right-click the task → **Run** to fire it immediately: success there points at the trigger/condition config, failure points at the script/environment instead.
+
+### Can't write to the store over a network path
+
+If `COTDATA_STORE` is a UNC path (e.g. `\\Mac\code\cotdata_store`, as in the placeholder example above) rather than a local drive, the account the task runs as needs its own access to that share — a mapped drive letter set up in your interactive session does **not** carry over to the task's context, and SYSTEM has no credentials for a remote share at all.
+
+**Fix:** on the task's **General** tab, run it as your own domain/local account (not SYSTEM) with **"Run only when user is logged on"**, and confirm that account can read/write the UNC path directly (test with `dir \\Mac\code\cotdata_store` from a fresh Command Prompt). If credentials are needed, use `net use \\Mac\code\cotdata_store /user:domain\you` once interactively, or store the data locally and sync separately instead of writing directly to the share from the scheduled task.
+
 ### Norgate Data Updater needs an interactive session
 
 **The single most common cotdata-on-Task-Scheduler failure.** The `norgatedata` package doesn't call a remote API — it talks locally to the **Norgate Data Updater (NDU)** app, which is a GUI program that has to be running and authenticated *in your desktop session*.
@@ -110,3 +126,8 @@ Always call the fully-qualified `<VENV>\Scripts\cotdata-update.exe` inside the w
 ### Restart settings not taking effect
 
 `schtasks /Create` cannot set restart-on-failure — it's a PowerShell-only (`Set-ScheduledTask` / `New-ScheduledTaskSettingsSet`) or GUI-only setting. If the price task keeps missing the Finals window, verify the Settings tab actually shows a restart interval and count, not just the trigger time.
+
+### Reference
+
+- [Task Scheduler error and success constants](https://docs.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-error-and-success-constants) — decode a numeric Last Run Result code
+- Event Viewer: `eventvwr.msc` → Windows Logs → Application, filter by source `TaskScheduler`
