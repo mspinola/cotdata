@@ -14,9 +14,10 @@ REM See docs/SYNCING.md for what each exclusion is for.
 setlocal
 
 REM /MIR mirrors (copies new + deletes removed). /XD excludes directories:
-REM   _cache, _raw  databento producer-internal, rebuildable, ~70%% of the bytes
-REM   citpy         written by COTMETRICS on the consumer, not by cotdata —
-REM                 mirroring would delete or clobber locally-derived output
+REM   _cache, _raw  producer-internal, ~70%% of the bytes. _cache is cotdata's
+REM                 cache of downloaded CFTC zips; _raw is the PAID databento store.
+REM   citpy         HAND-WRITTEN research notes that nothing regenerates.
+REM                 Mirroring from a producer would delete them permanently.
 REM /XF excludes the legacy aggregate manifest: nothing writes it, and it is the one
 REM file a sync would resolve last-writer-wins across two halves.
 robocopy "REPLACE_WITH_STORE_PATH" "REPLACE_WITH_DEST_PATH" /MIR /R:2 /W:5 /NFL /NDL /NP ^

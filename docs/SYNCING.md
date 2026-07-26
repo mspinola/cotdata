@@ -35,20 +35,38 @@ This is the part that matters, and on a real store it is most of the bytes.
 | `metadata/` | **yes** | contract specs |
 | `manifests/` | **yes** | per-half bookkeeping |
 | `status.json` | yes | the producer's own view, useful on the replica |
-| `_cache/` | **NO** | databento provider cache, producer-internal, rebuildable |
+| `_cache/` | **NO** | cotdata's own download cache of CFTC source zips, producer-internal, free to rebuild |
 | `_raw/` | **NO** | databento append-only raw store, producer-internal |
-| `citpy/` | **NO** | written by **cotmetrics**, not cotdata (see below) |
+| `citpy/` | **NO** | hand-written research notes, NOT reproducible (see below) |
 | `manifest.json` | **NO** | legacy aggregate, nothing writes it (see below) |
 
 On one real store those exclusions dropped the payload from 270 MB to about 82 MB, and
 two of them are correctness issues rather than savings.
 
-### `citpy/` is not cotdata's
+### `_cache/` holds source archives, not derived data
 
-`cotmetrics` writes it, defaulting to `$COTDATA_STORE/citpy` when `COTMETRICS_CITPY` is
-unset. It is derived on the *consumer* machine and does not exist on a pure producer. A
-mirroring sync would therefore either delete it or overwrite locally-derived output with
-nothing. Exclude it, or point `COTMETRICS_CITPY` somewhere outside the store.
+cotdata's own CFTC providers write it: `_cache/cot_legacy`, `_cache/cot_disagg` and
+`_cache/cot_tff` hold the downloaded year zips (`dea_fut_xls_2004.zip` and so on) that
+`--cot-*` HEAD-checks to decide whether anything changed. `_cache/databento` is the
+equivalent for that provider.
+
+It is producer-internal and **free** to rebuild, since the CFTC download costs nothing.
+Do not confuse it with `_raw/`, which is the *paid* databento raw store. Both are
+excluded, but for different reasons: `_cache/` because a replica has no use for source
+archives, `_raw/` because a replica has no use for them either and re-fetching would cost
+money.
+
+### `citpy/` is hand-written and NOT reproducible
+
+This is the exclusion to get right. Despite living under the store, `citpy/` is not
+cotdata's and is not derived: cotmetrics describes it as *"CIT PY research notes (dated
+.md/.txt, copied in by hand)"*, and `COTMETRICS_CITPY` points there on a machine that
+does research.
+
+A pure producer has no such directory, so a mirroring sync from the producer **deletes
+it**. Nothing regenerates it, because nothing generated it in the first place. Exclude it,
+or better, move it out of the store entirely by pointing `COTMETRICS_CITPY` elsewhere so
+no future sync can reach it.
 
 ### `manifest.json` is legacy
 
