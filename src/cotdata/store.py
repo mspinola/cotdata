@@ -2,6 +2,7 @@
 contract between producers (write) and consumers (read)."""
 import datetime as dt
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -9,6 +10,8 @@ from pathlib import Path
 import pandas as pd
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -141,33 +144,59 @@ def _read_json(p) -> dict:
         return {}
 
 
-def load_manifest() -> dict:
-    """The merged manifest.
-
-    Reads the legacy aggregate first, then overlays each per-half manifest, so fresher
-    per-half data wins and a half whose producer has not run yet still resolves from the
-    legacy file. Consumers see the same shape as before and need no change.
-    """
-    merged = _read_json(config.manifest_path())
-    found_half = False
-    for half in HALVES:
-        part = _read_json(config.manifest_path_for(half))
-        if not part:
+def _overlay(dest: dict, src: dict, only_domains=None) -> None:
+    for key, value in src.items():
+        if key == "schema_version":
+            dest["schema_version"] = max(int(dest.get("schema_version", 0) or 0),
+                                         int(value or 0))
             continue
-        found_half = True
-        for key, value in part.items():
-            if key == "schema_version":
-                continue
-            if isinstance(value, dict):
-                merged.setdefault(key, {}).update(value)
-            else:
-                merged[key] = value
+        if only_domains is not None and key not in only_domains:
+            continue
+        if isinstance(value, dict):
+            dest.setdefault(key, {}).update(value)
+        else:
+            dest[key] = value
+
+
+def load_manifest() -> dict:
+    """The manifest, assembled from the per-half files.
+
+    Nothing writes the legacy aggregate any more. It is still read, but ONLY for a
+    half whose own file does not exist yet, so an un-migrated store keeps working
+    while a migrated one never touches it. The fallback is per-half rather than
+    all-or-nothing because a store can be half migrated: the price producer may have
+    run on the new code while the COT producer has not, leaving prices in
+    manifests/prices.json and everything else still in the aggregate.
+
+    Run ``cotdata-update --migrate-manifests`` once to convert a store and silence
+    the warning. The fallback goes away in a later release.
+    """
+    merged: dict = {}
+    for half in HALVES:
+        _overlay(merged, _read_json(config.manifest_path_for(half)))
+
+    legacy = _read_json(config.manifest_path())
+    if legacy:
+        # Fall back per DOMAIN, not per half. A half file existing does not mean the
+        # half is complete: a real store was found with manifests/prices.json holding
+        # `prices` but not `metadata`, because the price producer had run on the new
+        # code while the metadata producer had not. A per-half rule would have hidden
+        # `metadata` entirely until the migration ran.
+        missing = {k for k, v in legacy.items()
+                   if k != "schema_version" and isinstance(v, dict) and k not in merged}
+        if missing:
+            _overlay(merged, legacy, only_domains=missing)
+            logger.warning(
+                "reading the legacy manifest.json for %s. Nothing writes that file any "
+                "more, and a file-level sync between two stores resolves it "
+                "last-writer-wins. Run 'cotdata-update --migrate-manifests' once on "
+                "this store.", ", ".join(sorted(missing)))
         merged["schema_version"] = max(int(merged.get("schema_version", 0) or 0),
-                                       int(part.get("schema_version", 0) or 0))
+                                       int(legacy.get("schema_version", 0) or 0))
+
     if not merged:
         return _empty_manifest()
-    if not found_half and "schema_version" not in merged:
-        merged["schema_version"] = config.SCHEMA_VERSION
+    merged.setdefault("schema_version", config.SCHEMA_VERSION)
     return merged
 
 
@@ -191,12 +220,47 @@ def require_schema(min_version: int) -> None:
         )
 
 
-def _touch_manifest(kind: str, name: str, df: pd.DataFrame, source: str) -> None:
-    """Record one entry, into this domain's half AND the legacy aggregate.
+def migrate_manifests() -> dict:
+    """Split a legacy ``manifest.json`` into per-half files. Idempotent.
 
-    Dual-write on purpose. The per-half file is the one current readers prefer, so it is
-    safe from the moment this ships. The legacy aggregate keeps consumers pinned to an
-    older cotdata working, and is dropped once they have moved.
+    Run once per store when upgrading. Entries already present in a half file win, so
+    re-running cannot resurrect stale bookkeeping and an already-migrated store is
+    left alone. Returns ``{half: n_entries_added}``.
+    """
+    legacy = _read_json(config.manifest_path())
+    added = {h: 0 for h in HALVES}
+    if not legacy:
+        return added
+    for half in HALVES:
+        part = _read_json(config.manifest_path_for(half))
+        for kind, entries in legacy.items():
+            if kind == "schema_version" or not isinstance(entries, dict):
+                continue
+            try:
+                if half_for(kind) != half:
+                    continue
+            except ValueError:
+                continue  # a retired domain the current code no longer declares
+            dest = part.setdefault(kind, {})
+            for name, entry in entries.items():
+                if name not in dest:
+                    dest[name] = entry
+                    added[half] += 1
+        if part:
+            part["schema_version"] = max(int(part.get("schema_version", 0) or 0),
+                                         int(legacy.get("schema_version", 0) or 0))
+            _atomic_write_json(part, config.manifest_path_for(half))
+    return added
+
+
+def _touch_manifest(kind: str, name: str, df: pd.DataFrame, source: str) -> None:
+    """Record one entry into its half's manifest.
+
+    Only the half file is written. The legacy aggregate held both halves in ONE file,
+    which made it unsafe in two ways: two producers doing a read-modify-write on it
+    lose each other's entries, and a file-level sync between two stores resolves it
+    last-writer-wins and silently discards one side. The per-half files are disjoint,
+    so both problems go away by construction.
     """
     half = half_for(kind)
     last = None
@@ -214,11 +278,6 @@ def _touch_manifest(kind: str, name: str, df: pd.DataFrame, source: str) -> None
     part.setdefault(kind, {})[name] = entry
     part["schema_version"] = config.SCHEMA_VERSION
     _atomic_write_json(part, config.manifest_path_for(half))
-
-    legacy = _read_json(config.manifest_path())
-    legacy.setdefault(kind, {})[name] = entry
-    legacy["schema_version"] = config.SCHEMA_VERSION
-    _atomic_write_json(legacy, config.manifest_path())
 
 
 def _atomic_write_json(m: dict, path) -> None:
@@ -254,20 +313,35 @@ def reconcile_manifest() -> dict:
     retired ``cot`` domain, …) — and drop domains left empty. Returns
     ``{domain: [pruned names]}``.
 
-    Provably safe: only removes bookkeeping for files that do not exist on disk;
+    Provably safe: only removes bookkeeping for files that do not exist on disk,
     never deletes or renames data.
+
+    Operates on each manifest FILE in place rather than on the merged view, so a
+    prune is written back to the file the entry actually lives in. The legacy
+    aggregate is pruned too when it is still present, so an un-migrated store can be
+    cleaned without migrating first.
     """
-    m = load_manifest()
     pruned: dict = {}
-    for domain in [k for k, v in m.items() if isinstance(v, dict)]:
-        d = _domain_dir(domain)
-        gone = [name for name in m[domain] if not (d / f"{name}.parquet").exists()]
-        if gone:
-            for name in gone:
-                del m[domain][name]
-            pruned[domain] = sorted(gone)
-        if not m[domain]:
-            del m[domain]
-    if pruned:
-        _write_manifest(m)
-    return pruned
+
+    def _prune(doc: dict) -> bool:
+        changed = False
+        for domain in [k for k, v in doc.items() if isinstance(v, dict)]:
+            d = _domain_dir(domain)
+            gone = [n for n in doc[domain] if not (d / f"{n}.parquet").exists()]
+            if gone:
+                for n in gone:
+                    del doc[domain][n]
+                pruned.setdefault(domain, []).extend(gone)
+                changed = True
+            if not doc[domain]:
+                del doc[domain]
+                changed = True
+        return changed
+
+    targets = [config.manifest_path_for(h) for h in HALVES] + [config.manifest_path()]
+    for path in targets:
+        doc = _read_json(path)
+        if doc and _prune(doc):
+            _atomic_write_json(doc, path)
+
+    return {k: sorted(set(v)) for k, v in pruned.items()}

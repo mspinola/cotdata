@@ -65,6 +65,10 @@ def main(argv=None, half=None) -> None:
     p.add_argument("--check", action="store_true",
                    help="Print store status (row counts, newest data, staleness) from "
                         "the manifest and exit. Read-only, cross-platform, no network.")
+    p.add_argument("--migrate-manifests", action="store_true",
+                   help="One-shot: split a legacy manifest.json into the per-half "
+                        "manifests/ files, then exit. Idempotent, read-only on data. "
+                        "Run once per store after upgrading.")
     p.add_argument("--reconcile", action="store_true",
                    help="Prune manifest entries whose parquet file is missing (ghosts "
                         "from old naming), refresh status.json, and exit. Never touches data.")
@@ -77,6 +81,21 @@ def main(argv=None, half=None) -> None:
     if args.check:
         from . import status
         status.print_check()
+        return
+
+    if args.migrate_manifests:
+        from . import store
+        added = store.migrate_manifests()
+        total = sum(added.values())
+        if not total:
+            print("manifest migration: nothing to do (already migrated, or no legacy "
+                  "manifest.json).")
+        else:
+            for half, n in sorted(added.items()):
+                print(f"  {half:<8} +{n} entries -> manifests/{half}.json")
+            print(f"manifest migration: moved {total} entries out of the legacy "
+                  f"aggregate. manifest.json is no longer written and can be deleted "
+                  f"once every consumer is on this version.")
         return
 
     if args.reconcile:

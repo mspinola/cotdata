@@ -185,9 +185,20 @@ become a second COT producer racing the first. `--check` and `--reconcile` are r
 and work from either.
 
 Each half also owns its own manifest (`manifests/cot.json`, `manifests/prices.json`).
-The manifest update is a read-modify-write, so two producers sharing one file eventually
-lose an entry. The legacy top-level `manifest.json` is still written for consumers pinned
-to an older cotdata, but current readers prefer the per-half files. See ADR-0007.
+The legacy top-level `manifest.json` held both halves in ONE file, which was unsafe two
+ways: the update is a read-modify-write, so two producers lose each other's entries, and
+a file-level sync between two stores resolves it last-writer-wins and silently discards
+one side. The per-half files are disjoint, so both problems go away.
+
+**Nothing writes `manifest.json` any more.** Migrate a store once:
+
+```bash
+cotdata-update --migrate-manifests
+```
+
+Idempotent, and it never touches data. Until you run it, a domain missing from the
+per-half files is still read from the aggregate with a warning. Delete `manifest.json`
+once every consumer of that store is on this version. See ADR-0007.
 
 ### Scheduling on Windows (Task Scheduler)
 
