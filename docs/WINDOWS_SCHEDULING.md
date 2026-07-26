@@ -48,6 +48,12 @@ schtasks /Create /TN "cotdata prices" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 2
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
 ```
 
+> **Substitute `<DIR>` before running these** — with the real folder holding your `.cmd` files, e.g. `C:\Users\you\code\cotdata\scheduler`. `schtasks` takes the quoted `/TR` value as a literal string and **does not check the file exists**, so a leftover `"<DIR>\run-cot.cmd"` is accepted without error and creates a task that fails only when it fires. Verify each task points somewhere real:
+> ```powershell
+> Get-ScheduledTask -TaskName "cotdata*" | Select-Object TaskName, @{n='Action';e={$_.Actions.Execute}}
+> ```
+> Every `Action` should be a full path to an existing `.cmd`. Fix a stray placeholder in place with `schtasks /Change /TN "cotdata COT (catch-up)" /TR "C:\real\path\run-cot.cmd"`.
+
 > **Prices task — two settings you must check now**, before this task will work unattended. Open it in `taskschd.msc` → Properties:
 > 1. **General tab → "Run only when user is logged on"** (the default — keep it). The prices task talks to the Norgate Data Updater, which only exists in your interactive desktop session; "run whether user is logged in or not" runs where NDU is invisible and the run fails. See [Norgate Data Updater needs an interactive session](#norgate-data-updater-needs-an-interactive-session).
 > 2. **Conditions tab → uncheck "Start the task only if the computer is on AC power"** (checked by default) if this is ever on a laptop — otherwise runs are silently skipped on battery. See [Task doesn't fire at all](#task-doesnt-fire-at-all).
