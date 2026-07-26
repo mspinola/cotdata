@@ -48,8 +48,6 @@ Then verify with `python --version`.
 
 A virtual environment keeps cotdata's dependencies isolated from your system Python — essential for managing multiple projects or upgrading packages without breaking other tools.
 
-### Using `venv` (Built-in)
-
 Open **Command Prompt** and navigate to where you want the cotdata repository:
 
 ```cmd
@@ -58,23 +56,9 @@ git clone https://github.com/mspinola/cotdata.git
 cd cotdata
 ```
 
-Create the virtual environment:
-```cmd
-python -m venv .venv
-```
+### Using `uv` (Recommended — Faster)
 
-This creates a `.venv` directory with a complete isolated Python environment.
-
-Activate it:
-```cmd
-.venv\Scripts\activate.bat
-```
-
-Your command prompt should now show `(.venv)` at the start of the line. All subsequent `pip install` and `python` commands run in this environment.
-
-### Using `uv` (Faster Alternative — Recommended)
-
-If you want faster installs, install `uv` via [Astral's standalone installer](https://docs.astral.sh/uv/getting-started/installation/) rather than `pip install uv`. The `pip` route puts `uv.exe` in a Python `Scripts` directory that's often missing from `PATH`, so the command can silently fail to resolve right after installing — the standalone installer configures `PATH` for you. See [Troubleshooting: `uv` Not Found](#uv-not-found-after-pip-install-uv) if you've already hit this.
+Install `uv` via [Astral's standalone installer](https://docs.astral.sh/uv/getting-started/installation/) rather than `pip install uv`. The `pip` route puts `uv.exe` in a Python `Scripts` directory that's often missing from `PATH`, so the command can silently fail to resolve right after installing — the standalone installer configures `PATH` for you. See [Troubleshooting: `uv` Not Found](#uv-not-found-after-pip-install-uv) if you've already hit this.
 
 Open **PowerShell** (not Command Prompt) and run:
 ```powershell
@@ -89,7 +73,18 @@ uv venv --python 3.11
 .venv\Scripts\activate.bat
 ```
 
-Same result, much faster for large dependency trees.
+Your command prompt should now show `(.venv)` at the start of the line. All subsequent `pip install` and `python` commands run in this environment.
+
+### Using `venv` (Built-in Alternative)
+
+If you'd rather not install an extra tool, Python's built-in `venv` works fine, just slower for large dependency trees:
+
+```cmd
+python -m venv .venv
+.venv\Scripts\activate.bat
+```
+
+Same result: your command prompt shows `(.venv)` once activated.
 
 ## Step 3: Install cotdata
 
