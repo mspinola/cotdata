@@ -333,3 +333,73 @@ def test_reconcile_manifest_rebuilds_from_raw_store(tmp_path, monkeypatch):
     client2 = _FakeClient(_frames(dates))
     ingest(symbols=["ES"], client=client2, end="2020-01-05", cold_start="2020-01-01")
     assert client2.calls == []
+
+
+# ── reconcile: the manifest must match the disk in BOTH directions ────────
+def _raw_layout(tmp_path, monkeypatch):
+    monkeypatch.setenv("COTDATA_STORE", str(tmp_path))
+    root = tmp_path / "_raw" / "databento"
+    (root / "ohlcv").mkdir(parents=True)
+    (root / "statistics").mkdir(parents=True)
+    return root
+
+
+def _write_raw(root, sub, name, dates):
+    """ts_event is the INDEX for both schemas, matching what _append_raw writes."""
+    import pandas as pd
+    idx = pd.DatetimeIndex(pd.to_datetime(dates), name="ts_event")
+    df = pd.DataFrame({"open": range(len(dates)), "high": range(len(dates)),
+                       "low": range(len(dates)), "close": range(len(dates)),
+                       "volume": range(len(dates))}, index=idx)
+    df.to_parquet(root / sub / f"{name}.parquet")
+
+
+def test_reconcile_prunes_entries_whose_parquet_is_missing(tmp_path, monkeypatch):
+    """The dangerous direction. ingest() derives each table's start from last_date and
+    skips it when already current, without ever checking the file exists. A manifest
+    entry with no file therefore means that table is NEVER fetched again: no error, no
+    rows, a permanent hole in a paid dataset."""
+    import json
+
+    from cotdata.providers import databento
+    root = _raw_layout(tmp_path, monkeypatch)
+    _write_raw(root, "ohlcv", "ES.n.0", ["2026-07-01", "2026-07-02"])
+    (root / "ingest_manifest.json").write_text(json.dumps({
+        "ES.n.0:ohlcv-1d": {"last_date": "2026-07-02", "n_rows": 2},
+        "GC.n.0:ohlcv-1d": {"last_date": "2026-07-02", "n_rows": 99},   # no file
+        "GC.n.0:statistics": {"last_date": "2026-07-02", "n_rows": 99},  # no file
+    }))
+
+    res = databento.reconcile_manifest()
+    assert set(res["pruned"]) == {"GC.n.0:ohlcv-1d", "GC.n.0:statistics"}
+
+    m = json.loads((root / "ingest_manifest.json").read_text())
+    assert "ES.n.0:ohlcv-1d" in m           # has a file, kept
+    assert "GC.n.0:ohlcv-1d" not in m       # pruned, so the next run re-fetches
+
+
+def test_reconcile_still_records_files_missing_from_the_manifest(tmp_path, monkeypatch):
+    """The original direction: a run interrupted before persisting the manifest."""
+    import json
+
+    from cotdata.providers import databento
+    root = _raw_layout(tmp_path, monkeypatch)
+    _write_raw(root, "ohlcv", "ES.n.0", ["2026-07-01", "2026-07-02"])
+    (root / "ingest_manifest.json").write_text(json.dumps({}))
+
+    res = databento.reconcile_manifest()
+    assert "ES.n.0:ohlcv-1d" in res["recorded"]
+    assert res["pruned"] == []
+
+
+def test_reconcile_prune_can_be_turned_off(tmp_path, monkeypatch):
+    import json
+
+    from cotdata.providers import databento
+    root = _raw_layout(tmp_path, monkeypatch)
+    (root / "ingest_manifest.json").write_text(json.dumps(
+        {"GC.n.0:ohlcv-1d": {"last_date": "2026-07-02", "n_rows": 99}}))
+
+    res = databento.reconcile_manifest(prune=False)
+    assert res["pruned"] == []
+    assert "GC.n.0:ohlcv-1d" in json.loads((root / "ingest_manifest.json").read_text())
