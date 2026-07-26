@@ -94,6 +94,8 @@ Currencies:
     cftc_code: "112741"
   DX:
     cftc_code: "098662"
+    databento: null         # ICE product (US Dollar Index), not on GLBX.MDP3
+    yahoo: "DX-Y.NYB"       # cash DXY (ICE). Yahoo has no working DX futures ticker
 
 Fixed Income:
   ZN:
