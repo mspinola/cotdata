@@ -99,6 +99,77 @@ def test_ingest_writes_raw_files_and_manifest(tmp_path, monkeypatch):
     assert man["ES.n.0:ohlcv-1d"]["n_rows"] == 5
 
 
+def test_ingest_pages_statistics_into_year_chunks(tmp_path, monkeypatch):
+    # A from-inception statistics pull is paged into _STATS_CHUNK_DAYS windows so no single
+    # get_range is large enough to time out; ohlcv (tiny) stays one request. Shrink the
+    # window so a short fixture range still pages.
+    import cotdata.providers.databento as dbmod
+    monkeypatch.setenv("COTDATA_DATABENTO_RAW", str(tmp_path))
+    monkeypatch.setattr(dbmod, "_STATS_CHUNK_DAYS", 2)
+    dates = pd.date_range("2020-01-01", periods=6)
+    client = _FakeClient(_frames(dates))
+
+    dbmod.ingest(symbols=["ES"], client=client, end="2020-01-06", cold_start="2020-01-01")
+
+    stat_calls = [c for c in client.calls if c[0] == "ES.n.0" and c[1] == "statistics"]
+    ohlcv_calls = [c for c in client.calls if c[0] == "ES.n.0" and c[1] == "ohlcv-1d"]
+    assert len(stat_calls) >= 3          # 5-day span paged by 2-day windows
+    assert len(ohlcv_calls) == 1         # ohlcv is not paged
+    # Overlapping fake boundaries notwithstanding, the raw store dedupes to one row per day.
+    combined = pd.read_parquet(tmp_path / "statistics" / "ES.n.0.parquet")
+    assert len(combined) == 6
+    man = json.loads((tmp_path / "ingest_manifest.json").read_text())
+    assert man["ES.n.0:statistics"]["last_date"] == "2020-01-06"
+
+
+class _FlakyStatsTS(_FakeTS):
+    """get_range that raises on the statistics window starting on ``fail_start`` until the
+    owner's ``heal`` flag flips — models a mid-history page failure that a re-run recovers."""
+    def get_range(self, *, dataset, symbols, stype_in, schema, start, end):
+        if (schema == "statistics" and start == self.owner.fail_start
+                and not self.owner.heal):
+            raise TimeoutError("read timed out")
+        return super().get_range(dataset=dataset, symbols=symbols, stype_in=stype_in,
+                                 schema=schema, start=start, end=end)
+
+
+class _FlakyStatsClient(_FakeClient):
+    def __init__(self, frames, fail_start):
+        super().__init__(frames)
+        self.fail_start, self.heal = fail_start, False
+
+    @property
+    def timeseries(self):
+        return _FlakyStatsTS(self)
+
+
+def test_ingest_resumes_mid_history_after_a_page_failure(tmp_path, monkeypatch):
+    # A page failure part-way through a paged statistics pull must leave the manifest at the
+    # last good page, so a re-run resumes there rather than re-pulling from inception.
+    import cotdata.providers.databento as dbmod
+    monkeypatch.setenv("COTDATA_DATABENTO_RAW", str(tmp_path))
+    monkeypatch.setattr(dbmod, "_STATS_CHUNK_DAYS", 2)
+    dates = pd.date_range("2020-01-01", periods=8)
+    client = _FlakyStatsClient(_frames(dates), fail_start="2020-01-05")
+
+    dbmod.ingest(symbols=["ES"], client=client, end="2020-01-08", cold_start="2020-01-01")
+    man = json.loads((tmp_path / "ingest_manifest.json").read_text())
+    # The windows before 2020-01-05 landed; the 2020-01-05 window failed, so the watermark
+    # stops before the end rather than being advanced past the gap.
+    assert man["ES.n.0:statistics"]["last_date"] < "2020-01-08"
+
+    # Re-run with the flake healed: resume from the failed window, finish the pull.
+    client.heal = True
+    client.calls.clear()
+    dbmod.ingest(symbols=["ES"], client=client, end="2020-01-08", cold_start="2020-01-01")
+    resumed = [c for c in client.calls if c[0] == "ES.n.0" and c[1] == "statistics"]
+    assert resumed and resumed[0][2] >= "2020-01-04"     # did NOT restart from 2020-01-01
+    man = json.loads((tmp_path / "ingest_manifest.json").read_text())
+    assert man["ES.n.0:statistics"]["last_date"] == "2020-01-08"
+    combined = pd.read_parquet(tmp_path / "statistics" / "ES.n.0.parquet")
+    assert len(combined) == 8
+
+
 def test_ingest_resumes_from_last_date(tmp_path, monkeypatch):
     monkeypatch.setenv("COTDATA_DATABENTO_RAW", str(tmp_path))
 

@@ -450,6 +450,57 @@ def _fmt_hms(seconds: float) -> str:
     return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 
+# A from-inception statistics pull in a single get_range times out (the streaming read
+# runs for many minutes and the server drops it). Page it into calendar-year windows so
+# each request is small and completes, and the manifest advances per window.
+_STATS_CHUNK_DAYS = 365
+
+
+def _stream_into_raw(client, dataset, internal, dbsym, feed, schema, start, end,
+                     manifest, key, *, chunk_days=None):
+    """Stream ``[start, end)`` into the raw store, paging by ``chunk_days`` (None = one
+    request). Appends and persists the manifest after EACH page, so a from-inception pull
+    can't time out in one giant request and a mid-history failure resumes at the last good
+    page instead of from scratch. Returns ``(rows_added, completed_ok)``."""
+    end_ts = pd.Timestamp(end)
+    cur = pd.Timestamp(start)
+    added = 0
+    while cur < end_ts:
+        c_end = min(cur + pd.Timedelta(days=chunk_days), end_ts) if chunk_days else end_ts
+        t0 = time.monotonic()
+        try:
+            raw = _fetch(client, dataset, dbsym, schema,
+                         cur.strftime("%Y-%m-%d"), c_end.strftime("%Y-%m-%d"))
+        except Exception as e:  # noqa: BLE001 — databento/network is flaky
+            print(f"    {internal}{feed} {schema}: fetch failed "
+                  f"({cur.date()}..{c_end.date()}) after {time.monotonic() - t0:.1f}s — {e}")
+            return added, False
+        raw = _normalize(raw, schema) if raw is not None and not raw.empty else raw
+        rec = manifest.get(key, {})
+        if raw is not None and not raw.empty:
+            _append_raw(internal, feed, schema, raw)
+            first, newest = _date_bounds(raw, schema)
+            manifest[key] = {
+                "first_date": rec.get("first_date") or first,
+                "last_date": newest,
+                "n_rows": int(rec.get("n_rows", 0)) + len(raw),
+                "fetched_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            }
+            _write_ingest_manifest(manifest)
+            added += len(raw)
+            print(f"    {internal}{feed} {schema}: +{len(raw):>8,} rows "
+                  f"({cur.date()}..{newest}) in {time.monotonic() - t0:.1f}s")
+        elif chunk_days:
+            # An empty page inside a paged pull — a symbol whose data starts after the GLBX
+            # floor. Advance past it so a re-run doesn't refetch the empty span forever;
+            # only when paging, so a single empty one-shot stays a plain "nothing new" no-op.
+            manifest[key] = {**rec,
+                             "last_date": (c_end - pd.Timedelta(days=1)).strftime("%Y-%m-%d")}
+            _write_ingest_manifest(manifest)
+        cur = c_end
+    return added, True
+
+
 def ingest(symbols=None, *, client=None, dataset="GLBX.MDP3", end=None,
            cold_start=GLBX_HISTORY_FLOOR, n1_stats_window=None) -> dict:
     """Fetch raw databento daily bars (.n.0 + .n.1) and statistics into the raw
@@ -510,34 +561,18 @@ def ingest(symbols=None, *, client=None, dataset="GLBX.MDP3", end=None,
                 # 422s (data_time_range_start_on_or_after_end), so skip on >=.
                 if pd.Timestamp(start) >= pd.Timestamp(end):
                     continue
-                t0 = time.monotonic()
-                try:
-                    raw = _fetch(client, dataset, dbsym, schema, start, end)
-                except Exception as e:  # noqa: BLE001 — databento/network is flaky
-                    print(f"    {s.internal}{feed} {schema}: fetch failed ({start}..{end}) "
-                          f"after {time.monotonic() - t0:.1f}s — {e}")
+                # Page the streaming fetch: a from-inception statistics pull in one giant
+                # get_range times out, so statistics is fetched in yearly windows with the
+                # manifest advanced per window. ohlcv is ~250 rows/yr, so one request is
+                # fine. A page failure leaves the manifest at the last good page to resume.
+                chunk = _STATS_CHUNK_DAYS if schema == "statistics" else None
+                added, completed = _stream_into_raw(
+                    client, dataset, s.internal, dbsym, feed, schema,
+                    start, end, manifest, key, chunk_days=chunk)
+                sym_rows += added
+                total_rows += added
+                if not completed:
                     failed += 1
-                    continue
-                if raw is None or raw.empty:
-                    continue
-                raw = _normalize(raw, schema)
-                if raw.empty:
-                    continue
-                _append_raw(s.internal, feed, schema, raw)
-                first, newest = _date_bounds(raw, schema)
-                manifest[key] = {
-                    "first_date": rec.get("first_date") or first,
-                    "last_date": newest,
-                    "n_rows": int(rec.get("n_rows", 0)) + len(raw),
-                    "fetched_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                }
-                # Persist after EACH fetch so an interrupted run resumes here, not from
-                # scratch. The write is a small atomic JSON, negligible next to the fetch.
-                _write_ingest_manifest(manifest)
-                sym_rows += len(raw)
-                total_rows += len(raw)
-                print(f"    {s.internal}{feed} {schema}: +{len(raw):>8,} rows "
-                      f"({start}..{newest}) in {time.monotonic() - t0:.1f}s")
         print(f"[{i}/{n}] {s.internal}: done in {_fmt_hms(time.monotonic() - sym_start)} "
               f"({sym_rows:,} rows)")
 

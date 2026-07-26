@@ -20,7 +20,9 @@ def main() -> None:
     p.add_argument("--ingest-databento", action="store_true",
                    help="Databento Stage 1 (paid API, cross-platform): fetch raw .n.0/.n.1 "
                         "ohlcv-1d + statistics into the append-only raw store ($COTDATA_DATABENTO_RAW). "
-                        "Resumable — re-runs only pull new dates. Needs DATABENTO_API_KEY.")
+                        "The statistics schema is paged in yearly windows so a from-inception "
+                        "pull can't time out in one request. Resumable — re-runs (and a mid-pull "
+                        "failure) only pull the missing dates. Needs DATABENTO_API_KEY.")
     p.add_argument("--build-databento", action="store_true",
                    help="Databento Stage 2 (free, no API): build back-adjusted prices from the "
                         "raw store into the cotdata store. Run after --ingest-databento.")
@@ -31,9 +33,11 @@ def main() -> None:
                         "avoidable download with no accuracy loss. Recommended for the backfill.")
     p.add_argument("--batch", action="store_true",
                    help="With --ingest-databento: use the databento BATCH API (prepare + "
-                        "download files) instead of streaming. Far more robust for large "
-                        "from-inception pulls (avoids the streaming read-timeouts); statistics "
-                        "are fetched full. Slower to start (async job) but reliable.")
+                        "download files) instead of the (default) paged streaming ingest. "
+                        "NOTE: submitting a single from-inception continuous job can 504 at "
+                        "databento's gateway (heavy server-side cost/resolution over 16y), so "
+                        "the paged streaming default is preferred for cold-start backfills; "
+                        "reach for --batch only for a bounded catch-up.")
     p.add_argument("--cot-legacy", action="store_true", help="Update CFTC COT Legacy (cross-platform).")
     p.add_argument("--cot-disagg", action="store_true", help="Update CFTC COT Disaggregated Futures-Only (cross-platform).")
     p.add_argument("--cot-tff", action="store_true", help="Update Traders in Financial Futures (TFF) COT (cross-platform).")
