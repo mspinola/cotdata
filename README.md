@@ -169,6 +169,26 @@ cotdata-update --check                # coverage, newest dates, staleness
 - **Validate against Norgate** (optional gate) with `scripts/validate_databento_vs_norgate.py` if you have both stores.
 - **Schedule** the two price commands nightly and `--cot-all` weekly — see [Scheduling on Linux](docs/LINUX_SCHEDULING.md).
 
+### Producer halves: one host, one job
+
+`cotdata` has two producers by design: the CFTC downloader (free, any OS) and the price
+producer (Norgate needs Windows). Two entry points scope a host to one of them:
+
+```bash
+cotdata-cot     --cot-all                      # CFTC half, any OS
+cotdata-prices  --prices --metadata --require-final   # price half, Windows for Norgate
+cotdata-update  ...                            # both, for a single-machine deployment
+```
+
+Each scoped entry point refuses the other half's flags, so a price box cannot quietly
+become a second COT producer racing the first. `--check` and `--reconcile` are read-only
+and work from either.
+
+Each half also owns its own manifest (`manifests/cot.json`, `manifests/prices.json`).
+The manifest update is a read-modify-write, so two producers sharing one file eventually
+lose an entry. The legacy top-level `manifest.json` is still written for consumers pinned
+to an older cotdata, but current readers prefer the per-half files. See ADR-0007.
+
 ### Scheduling on Windows (Task Scheduler)
 
 Full setup, including wrapper scripts, the three-task layout (daily prices, daily COT catch-up, Friday release-window poller), `--require-final` event-driven pricing, restart-on-failure retry settings, and Norgate/Task-Scheduler troubleshooting (notably: NDU needs an interactive session), is in **[docs/WINDOWS_SCHEDULING.md](docs/WINDOWS_SCHEDULING.md)**. Start with the [Windows Setup Guide](docs/WINDOWS_SETUP.md) first if Python/the venv/`COTDATA_STORE` aren't configured yet.

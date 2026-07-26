@@ -101,11 +101,74 @@ def read_cot_tff(name: str) -> pd.DataFrame:
 
 
 # ── Manifest ──────────────────────────────────────────────────────────────
+# ── The COT / price seam ──────────────────────────────────────────────────
+# Which producer half owns each domain. This is the seam ADR-0007 makes explicit:
+# the CFTC producer writes the `cot` half, the price producers write the `prices`
+# half, and they never touch the same manifest file. Listing every domain here (and
+# refusing unknown ones) is what stops a new domain quietly joining the wrong side.
+HALVES = ("cot", "prices")
+_DOMAIN_HALF = {
+    "prices": "prices",
+    "metadata": "prices",
+    "cot": "cot",
+    "cot_legacy": "cot",
+    "cot_disagg": "cot",
+    "cot_tff": "cot",
+}
+
+
+def half_for(kind: str) -> str:
+    """The producer half owning `kind`. Raises on an undeclared domain, so adding one
+    forces a decision about which side of the seam it belongs on."""
+    try:
+        return _DOMAIN_HALF[kind]
+    except KeyError:
+        raise ValueError(
+            f"domain {kind!r} is not assigned to a producer half. Add it to "
+            f"store._DOMAIN_HALF ('cot' or 'prices') before writing it."
+        ) from None
+
+
+def _empty_manifest() -> dict:
+    return {"schema_version": config.SCHEMA_VERSION, "metadata": {}, "prices": {},
+            "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}}
+
+
+def _read_json(p) -> dict:
+    try:
+        return json.loads(p.read_text()) if p.exists() else {}
+    except json.JSONDecodeError:
+        return {}
+
+
 def load_manifest() -> dict:
-    p = config.manifest_path()
-    if p.exists():
-        return json.loads(p.read_text())
-    return {"schema_version": config.SCHEMA_VERSION, "metadata": {}, "prices": {}, "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}}
+    """The merged manifest.
+
+    Reads the legacy aggregate first, then overlays each per-half manifest, so fresher
+    per-half data wins and a half whose producer has not run yet still resolves from the
+    legacy file. Consumers see the same shape as before and need no change.
+    """
+    merged = _read_json(config.manifest_path())
+    found_half = False
+    for half in HALVES:
+        part = _read_json(config.manifest_path_for(half))
+        if not part:
+            continue
+        found_half = True
+        for key, value in part.items():
+            if key == "schema_version":
+                continue
+            if isinstance(value, dict):
+                merged.setdefault(key, {}).update(value)
+            else:
+                merged[key] = value
+        merged["schema_version"] = max(int(merged.get("schema_version", 0) or 0),
+                                       int(part.get("schema_version", 0) or 0))
+    if not merged:
+        return _empty_manifest()
+    if not found_half and "schema_version" not in merged:
+        merged["schema_version"] = config.SCHEMA_VERSION
+    return merged
 
 
 def schema_version() -> int:
@@ -129,25 +192,45 @@ def require_schema(min_version: int) -> None:
 
 
 def _touch_manifest(kind: str, name: str, df: pd.DataFrame, source: str) -> None:
-    m = load_manifest()
+    """Record one entry, into this domain's half AND the legacy aggregate.
+
+    Dual-write on purpose. The per-half file is the one current readers prefer, so it is
+    safe from the moment this ships. The legacy aggregate keeps consumers pinned to an
+    older cotdata working, and is dropped once they have moved.
+    """
+    half = half_for(kind)
     last = None
     if len(df) and isinstance(df.index, pd.DatetimeIndex):
         last = str(df.index.max().date())
-    m.setdefault(kind, {})[name] = {
+    entry = {
         "last_date": last,
         "n_rows": int(len(df)),
         "source": source,
-        "updated_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "updated_at": dt.datetime.now(dt.timezone.utc)
+                        .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     }
-    m["schema_version"] = config.SCHEMA_VERSION
-    _write_manifest(m)
+
+    part = _read_json(config.manifest_path_for(half))
+    part.setdefault(kind, {})[name] = entry
+    part["schema_version"] = config.SCHEMA_VERSION
+    _atomic_write_json(part, config.manifest_path_for(half))
+
+    legacy = _read_json(config.manifest_path())
+    legacy.setdefault(kind, {})[name] = entry
+    legacy["schema_version"] = config.SCHEMA_VERSION
+    _atomic_write_json(legacy, config.manifest_path())
+
+
+def _atomic_write_json(m: dict, path) -> None:
+    tmp = path.with_suffix(".json.tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps(m, indent=2, sort_keys=True))
+    os.replace(tmp, path)
 
 
 def _write_manifest(m: dict) -> None:
-    tmp = config.manifest_path().with_suffix(".json.tmp")
-    tmp.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(json.dumps(m, indent=2, sort_keys=True))
-    os.replace(tmp, config.manifest_path())
+    """Write the legacy aggregate. Retained for callers outside this module."""
+    _atomic_write_json(m, config.manifest_path())
 
 
 # domain -> the directory holding its {name}.parquet files

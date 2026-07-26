@@ -41,4 +41,28 @@ def cot_tff_dir() -> Path:
 
 
 def manifest_path() -> Path:
+    """The legacy aggregate manifest, written by BOTH halves.
+
+    Kept for consumers pinned to an older cotdata. Current code writes it but does not
+    read it when per-half manifests exist, so the read-modify-write hazard it carries no
+    longer affects anyone on this version. It is dropped once every producer and consumer
+    has moved (ADR-0007 step 1, second half).
+    """
     return store_root() / "manifest.json"
+
+
+def manifests_dir() -> Path:
+    return store_root() / "manifests"
+
+
+def manifest_path_for(half: str) -> Path:
+    """The manifest owned by one producer half, `cot` or `prices`.
+
+    One writer per file is the whole point: ``_touch_manifest`` is a read-modify-write, so
+    two producers sharing a manifest eventually lose an entry. Splitting by half means the
+    CFTC producer and the price producer never touch the same file, and it is the shape
+    ADR-0007 needs when the price half moves out to its own package.
+    """
+    if half not in ("cot", "prices"):
+        raise ValueError(f"unknown manifest half {half!r}; expected 'cot' or 'prices'")
+    return manifests_dir() / f"{half}.json"
