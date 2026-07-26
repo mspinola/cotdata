@@ -78,6 +78,50 @@ foreach ($t in "cotdata prices","cotdata COT (Fri release)","cotdata COT (catch-
 
 **View / manage the jobs** any time in the Windows **Task Scheduler** GUI — press `Win + R` and run `taskschd.msc`, or open *Task Scheduler* from the Start menu — then look under **Task Scheduler Library** for the `cotdata …` tasks.
 
+## Testing your tasks
+
+Test in three layers: fire the task, read the result, then confirm it actually wrote data. The third layer is the one that matters — for cotdata the exit code alone is not a reliable success signal (see below).
+
+### 1. Fire the task on demand
+
+Don't wait for the trigger — run it now:
+
+```bat
+schtasks /Run /TN "cotdata prices"
+```
+
+(Or in `taskschd.msc`: right-click the task → **Run**.) Running the *task* rather than the `.cmd` by hand is the stronger test: it exercises the scheduler's own account, environment, and working directory, which is where scheduled runs usually differ from your interactive shell.
+
+### 2. Read what happened
+
+```bat
+schtasks /Query /TN "cotdata prices" /V /FO LIST
+```
+
+Check **Last Run Time** and **Last Result**. For per-run detail, enable history once (right-click the task or the library root → **Enable All Tasks History**) and read the task's **History** tab.
+
+### 3. Confirm data actually landed (the authoritative check)
+
+**Don't trust `Last Result: 0x0` alone.** A `--require-final` price run *defers with a non-zero exit* when Norgate's Finals aren't in yet — by design, so restart-on-failure turns it into a poll loop (see [Task shows success but wrote nothing](#task-shows-success-but-wrote-nothing)). So the exit code misleads in both directions. Check the store instead:
+
+```bat
+cotdata-update --check
+```
+
+Confirm the relevant `newest data` date advanced (and `last write (UTC)` is recent). A weekend `prices` row showing Friday's date "2d behind" is correct — markets were closed. COT rows tracking the latest Tuesday date are current, since COT is Tuesday-dated and released the following Friday. Per-entry `⚠ … behind` warnings for individual delisted or thin contracts are expected and don't mean the run failed; judge the run by the aggregate `newest data` dates.
+
+### Testing the timing and conditions
+
+- **A daytime prices run only proves the wrapper resolves** — with no Finals yet it just defers. To exercise the actual write path in daylight, run `cotdata-update --prices --metadata` by hand (no `--require-final`), or fire the task after ~8:55pm ET.
+- **Test the trigger itself** by moving it a couple of minutes out, watching it fire, then setting it back:
+  ```bat
+  schtasks /Change /TN "cotdata prices" /ST 14:20
+  :: watch it run, then restore
+  schtasks /Change /TN "cotdata prices" /ST 20:55
+  ```
+  This catches the two silent killers below — a disabled task, or the default *"only if on AC power"* condition skipping runs on a laptop.
+- **Keep a permanent record** by having the wrapper redirect output to a log file (see [Diagnosing a silent failure](#diagnosing-a-silent-failure)).
+
 ## Troubleshooting
 
 ### Task doesn't fire at all
