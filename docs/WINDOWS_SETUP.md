@@ -96,31 +96,29 @@ Same result: your command prompt shows `(.venv)` once activated.
 
 With your virtual environment activated, install cotdata.
 
+> **Install from your clone, not PyPI.** The published PyPI release is currently **well behind this repo** — it still carries the version number `0.1.0` while lacking the producer CLI the rest of these docs use (`--metadata`, `--require-final`, the databento flags). `pip install cotdata` therefore hands you a build that *looks* installed but errors with "unrecognized arguments" on the documented commands. Until a fresh release is published, install **editable from the repo you cloned in [Step 2](#step-2-create--activate-a-virtual-environment)** — the `-e` means a later `git pull` updates cotdata with no reinstall.
+
 > **Which command — `pip` or `uv pip`?** If you created the venv with **`uv venv`**, use **`uv pip install ...`** (a uv venv has no standalone `pip`). If you used **`python -m venv`**, use plain **`pip install ...`**. The examples below show the `pip` form; prefix with `uv` if you're on a uv venv.
+
+Run these from inside the clone (`C:\...\cotdata`, where you already are after Step 2).
+
+### For Producer (Windows with Norgate)
+
+If you have a Norgate subscription and will produce prices on this machine:
+```cmd
+pip install -e ".[norgate]"
+:: uv venv:  uv pip install -e ".[norgate]"
+```
 
 ### For Consumer (Read-Only)
 
 If you only read data (no Norgate producer):
 ```cmd
-pip install cotdata
-:: uv venv:  uv pip install cotdata
-```
-
-### For Producer (Windows with Norgate)
-
-If you have a Norgate subscription and will run on this Windows machine:
-```cmd
-pip install "cotdata[norgate]"
-:: uv venv:  uv pip install "cotdata[norgate]"
-```
-
-### For Development (Editable Install)
-
-If you're modifying cotdata code:
-```cmd
 pip install -e .
 :: uv venv:  uv pip install -e .
 ```
+
+(Once a current release is on PyPI, a read-only consumer can instead just `pip install cotdata` without cloning. For now the clone is the source of truth.)
 
 Installation may take 1–2 minutes (many dependencies). Watch for any errors — if it says a package failed to download, your internet may have glitched; try again.
 
@@ -129,7 +127,11 @@ Verify installation:
 python -c "import cotdata; print(cotdata.__version__)"
 ```
 
-Should print a version number (e.g. `0.2.1`). If it errors, check that your venv is activated (look for `(.venv)` in the prompt).
+Should print a version number. **Note:** because the version hasn't been bumped, the editable clone install *and* the stale PyPI build both report `0.1.0` — the version string alone won't tell you which one you have. Confirm you got the right one by checking the CLI has the producer flags:
+```cmd
+cotdata-update --help
+```
+If `--metadata` and `--require-final` appear, you're on the clone. If they don't, you installed the stale PyPI build — reinstall with `-e` from inside the clone. If `import` errors instead, your venv isn't activated (look for `(.venv)`/`(cotdata)` in the prompt).
 
 ## Step 4: Set Environment Variables
 
