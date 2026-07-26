@@ -28,7 +28,7 @@ cotdata separates *fetching* data (a "producer" that talks to vendors) from *usi
 
 ## Contents
 
-- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Reading data](#reading-data-consumer) · [Producing data](#producing-data-producer) · [Windows setup](docs/WINDOWS_SETUP.md) · [Scheduling on Windows](docs/WINDOWS_SCHEDULING.md) · [Scheduling on Linux](docs/LINUX_SCHEDULING.md) · [Operations](#operations) · [Concepts & design](#concepts--design) · [Reference: schemas](#reference-data-schemas) · [Reference: COT formats](#reference-cot-formats-explained) · [Diagnostics](#diagnostics) · [Development](#development) · [Contributing](#contributing) · [License](#license)
+- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Reading data](#reading-data-consumer) · [Producing data](#producing-data-producer) · [Windows setup](docs/WINDOWS_SETUP.md) · [Scheduling on Windows](docs/WINDOWS_SCHEDULING.md) · [Scheduling on Linux](docs/LINUX_SCHEDULING.md) · [Syncing the store](docs/SYNCING.md) · [Operations](#operations) · [Concepts & design](#concepts--design) · [Reference: schemas](#reference-data-schemas) · [Reference: COT formats](#reference-cot-formats-explained) · [Diagnostics](#diagnostics) · [Development](#development) · [Contributing](#contributing) · [License](#license)
 
 ## Quickstart
 
@@ -211,6 +211,23 @@ The short version: prices fire once daily near the Norgate Continuous Futures Fi
 Full setup, including wrapper scripts, the crontab entries (nightly prices, daily COT catch-up, Friday release-window poller), `flock` overlap protection, and troubleshooting (cron's bare environment, timezone conversion, `DATABENTO_API_KEY` not being picked up), is in **[docs/LINUX_SCHEDULING.md](docs/LINUX_SCHEDULING.md)**.
 
 The short version: a databento server schedules the same way as the Windows/Norgate producer — prices nightly, COT gets a daily morning catch-up plus a tight Friday-afternoon poll around its ~3:30pm ET release, all idempotent and safe to over-run.
+
+### Syncing the store between machines
+
+Norgate needs Windows, so a research Mac or a Linux dashboard is usually a **read-only
+replica** of a store produced elsewhere. Prefer one producer writing everything and a
+strictly one-directional sync.
+
+Two directories must be **excluded**, and both are correctness issues rather than savings:
+`_cache/` and `_raw/` are databento producer-internal (on one real store, ~70% of the
+bytes), and `citpy/` is written by *cotmetrics* on the consumer, so mirroring would delete
+or clobber locally-derived output. The legacy `manifest.json` should be excluded too.
+
+Consumer cloud sync (Dropbox, Google Drive) is a poor fit here: conflict copies land
+inside the store, and on-demand placeholder files break `read_parquet` on the machine
+doing research.
+
+Full guidance, exclusion table and example scripts: **[docs/SYNCING.md](docs/SYNCING.md)**.
 
 ## Operations
 
