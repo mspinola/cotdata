@@ -15,25 +15,25 @@ Create **two** wrapper scripts — they run *different* commands. Each sets `COT
 
 > **Ready-made templates:** copy [`docs/examples/windows/run-prices.cmd`](examples/windows/run-prices.cmd) and [`run-cot.cmd`](examples/windows/run-cot.cmd) out of the repo into your `<DIR>` (e.g. `C:\Users\you\cotdata\scheduler\`) rather than retyping them — then just fill in the placeholders. Keep them outside the repo so a `git pull` never clobbers your edited paths.
 
-> **Replace the `<...>` placeholders with your real paths** — in *both* the wrapper files *and* the task commands further down. `<STORE>` = your synced store, `<VENV>` = your virtualenv, `<DIR>` = the folder holding these `.cmd` files. Example values: `<STORE>` = `\\Mac\code\cotdata_store`, `<VENV>` = `C:\Users\you\code\cotdata\.venv`.
+> **Fill in your real paths.** Inside the `.cmd` files, overwrite the plain-text markers `REPLACE_WITH_STORE_PATH` (your synced store, e.g. `\\Mac\code\cotdata_store`) and `REPLACE_WITH_VENV_PATH` (your virtualenv, e.g. `C:\Users\you\code\cotdata\.venv`). **Don't use angle-bracket placeholders like `<STORE>` inside a `.cmd`** — cmd reads `<` and `>` as redirection and the script fails with "The syntax of the command is incorrect," even on `REM` comment lines. The `<DIR>` notation in the *task commands* further down is fine to substitute since those are quoted or typed at the prompt.
 
 `run-prices.cmd` — prices (with `--require-final`, so it runs only once Norgate's **Final** prices are in, not interim bars):
 
 ```bat
 @echo off
-set COTDATA_STORE=<STORE>
-"<VENV>\Scripts\cotdata-update.exe" --prices --metadata --require-final
+set COTDATA_STORE=REPLACE_WITH_STORE_PATH
+"REPLACE_WITH_VENV_PATH\Scripts\cotdata-update.exe" --prices --metadata --require-final
 ```
 
 `run-cot.cmd` — COT (note the **different** command, `--cot-all`):
 
 ```bat
 @echo off
-set COTDATA_STORE=<STORE>
-"<VENV>\Scripts\cotdata-update.exe" --cot-all
+set COTDATA_STORE=REPLACE_WITH_STORE_PATH
+"REPLACE_WITH_VENV_PATH\Scripts\cotdata-update.exe" --cot-all
 ```
 
-Using the full `<VENV>\Scripts\cotdata-update.exe` path (rather than relying on `cotdata-update` being on `PATH`) matters here: Task Scheduler runs with a different, often bare, environment than your interactive shell, so a bare command name that resolves fine in Command Prompt can fail to resolve under the scheduler.
+Using the full venv `\Scripts\cotdata-update.exe` path (rather than relying on `cotdata-update` being on `PATH`) matters here: Task Scheduler runs with a different, often bare, environment than your interactive shell, so a bare command name that resolves fine in Command Prompt can fail to resolve under the scheduler.
 
 ## Creating the tasks
 

@@ -15,18 +15,18 @@ Cron runs with a bare environment, so put the config and the venv path in a wrap
 
 > **Ready-made templates:** copy [`docs/examples/linux/run-prices.sh`](examples/linux/run-prices.sh) and [`run-cot.sh`](examples/linux/run-cot.sh) out of the repo into your `<DIR>`, `chmod +x` them, and fill in the placeholders — keep them outside the repo so a `git pull` never clobbers your edited paths.
 
-Replace the `<...>` placeholders: `<STORE>` = your store, `<VENV>` = your virtualenv, `<KEY>` = your Databento key, `<DIR>` = the folder holding these scripts.
+Inside the scripts, overwrite the plain-text markers: `REPLACE_WITH_STORE_PATH` = your store, `REPLACE_WITH_VENV_PATH` = your virtualenv, `REPLACE_WITH_DATABENTO_KEY` = your Databento key. (They're plain markers, not `<...>` placeholders, because an unedited `<...>` would be read as a shell redirection and the script would fail.) The `<DIR>` in the crontab lines below is normal fill-in notation.
 
 `run-prices.sh` — the two-stage databento build plus the Yahoo fallback:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-export COTDATA_STORE=<STORE>
+export COTDATA_STORE=REPLACE_WITH_STORE_PATH
 export COTDATA_PRICE_SOURCE=databento
-export DATABENTO_API_KEY=<KEY>
-BIN=<VENV>/bin/cotdata-update
-"$BIN" --ingest-databento     # Stage 1 (paid): raw .n.0/.n.1 -> raw store
+export DATABENTO_API_KEY=REPLACE_WITH_DATABENTO_KEY
+BIN=REPLACE_WITH_VENV_PATH/bin/cotdata-update
+"$BIN" --ingest-databento     # Stage 1 (paid): raw .n.0/.n.1 to raw store
 "$BIN" --build-databento      # Stage 2 (free): back-adjusted prices
 "$BIN" --prices-yahoo         # softs / lumber / MSCI fallback
 ```
@@ -36,8 +36,8 @@ BIN=<VENV>/bin/cotdata-update
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-export COTDATA_STORE=<STORE>
-<VENV>/bin/cotdata-update --cot-all
+export COTDATA_STORE=REPLACE_WITH_STORE_PATH
+REPLACE_WITH_VENV_PATH/bin/cotdata-update --cot-all
 ```
 
 Make them executable:
