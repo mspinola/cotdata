@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # cotdata COT update wrapper for cron / systemd (Linux, cross-platform).
-# Copy this file next to your crontab's <DIR> and replace the <...> placeholders:
-#   <STORE> = your data store         e.g. /srv/cotdata_store
-#   <VENV>  = your cotdata virtualenv e.g. /opt/cotdata/.venv
-# --cot-all is idempotent (HEAD-checks each CFTC zip), so re-running is cheap.
+# Copy this file next to your crontab dir and overwrite the markers below:
+#   REPLACE_WITH_STORE_PATH = your data store         e.g. /srv/cotdata_store
+#   REPLACE_WITH_VENV_PATH  = your cotdata venv        e.g. /opt/cotdata/.venv
+# (Plain-text markers, not angle-bracket placeholders: an unedited <...> would be
+# read as a shell redirection.) --cot-all is idempotent, so re-running is cheap.
 # See docs/LINUX_SCHEDULING.md for the crontab and flock setup.
 set -euo pipefail
-export COTDATA_STORE=<STORE>
-<VENV>/bin/cotdata-update --cot-all
+export COTDATA_STORE=REPLACE_WITH_STORE_PATH
+REPLACE_WITH_VENV_PATH/bin/cotdata-update --cot-all
