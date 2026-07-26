@@ -11,7 +11,11 @@ A databento server schedules the same way as the Windows/Norgate producer: **pri
 
 ## Wrapper scripts
 
-Cron runs with a bare environment, so put the config and the venv path in a wrapper script (one per command, mirroring the Windows pair). Replace the `<...>` placeholders: `<STORE>` = your store, `<VENV>` = your virtualenv, `<KEY>` = your Databento key, `<DIR>` = the folder holding these scripts.
+Cron runs with a bare environment, so put the config and the venv path in a wrapper script (one per command, mirroring the Windows pair).
+
+> **Ready-made templates:** copy [`docs/examples/linux/run-prices.sh`](examples/linux/run-prices.sh) and [`run-cot.sh`](examples/linux/run-cot.sh) out of the repo into your `<DIR>`, `chmod +x` them, and fill in the placeholders — keep them outside the repo so a `git pull` never clobbers your edited paths.
+
+Replace the `<...>` placeholders: `<STORE>` = your store, `<VENV>` = your virtualenv, `<KEY>` = your Databento key, `<DIR>` = the folder holding these scripts.
 
 `run-prices.sh` — the two-stage databento build plus the Yahoo fallback:
 
