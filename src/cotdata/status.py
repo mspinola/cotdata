@@ -19,14 +19,24 @@ def status_path():
 
 # Domains shown by --check, in report order.
 _DOMAINS = ["prices", "metadata", "cot", "cot_legacy", "cot_disagg", "cot_tff"]
-# An entry lagging more than this many days behind its domain's newest data
-# probably failed to update while its peers succeeded (a partial run).
+# An entry whose producer last touched it more than this many days behind its
+# domain's newest write probably failed while its peers succeeded (a partial run).
 _LAG_DAYS = 3
 
 
 def _parse_date(s: Optional[str]) -> Optional[dt.date]:
     try:
         return dt.date.fromisoformat(s) if s else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_write(s: Optional[str]) -> Optional[dt.datetime]:
+    """Parse a manifest ``updated_at`` (ISO-8601, trailing Z) to a naive UTC datetime."""
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00")).replace(tzinfo=None)
     except (ValueError, TypeError):
         return None
 
@@ -60,15 +70,36 @@ def summarize(manifest: dict, today: Optional[dt.date] = None,
         dated = {n: _parse_date(e.get("last_date")) for n, e in entries.items()}
         dates = [d for d in dated.values() if d]
         newest = max(dates) if dates else None
-        lagging = []
-        if newest:
-            for name, d in dated.items():
-                if name in ignore_lag:
-                    continue
-                behind = (newest - d).days if d else None
-                if behind is not None and behind > _LAG_DAYS:
-                    lagging.append((name, entries[name].get("last_date"), behind))
         writes = [e.get("updated_at") for e in entries.values() if e.get("updated_at")]
+
+        # Lag is measured on WHEN THE PRODUCER LAST TOUCHED THE ENTRY, not on how
+        # recent its data is. The check exists to catch a partial run (one entry
+        # failed while its peers succeeded), and only updated_at distinguishes that
+        # from a source that simply has nothing newer.
+        #
+        # Comparing last_date instead produced permanent false positives for the two
+        # legitimate cases of an old-but-correct entry: thin markets that drop out of
+        # the CFTC report below the reporting threshold and reappear months later
+        # (NKD and ZO each have ~20 gaps over 10 days across 19 years, the longest
+        # 168d and 294d), and retired hist_code contracts frozen by design. Both are
+        # written on every pass, so both carry a current updated_at.
+        parsed = {n: _parse_write(e.get("updated_at")) for n, e in entries.items()}
+        usable = [w for w in parsed.values() if w]
+        newest_write = max(usable) if usable else None
+        lagging = []
+        for name, e in entries.items():
+            if name in ignore_lag:
+                continue
+            w = parsed[name]
+            if w is None:
+                # No usable write timestamp: report it rather than assume it is fine.
+                # Silently passing here would turn "cannot check" into "all current",
+                # which is the failure mode this whole check exists to avoid.
+                lagging.append((name, e.get("updated_at") or "never", 9999))
+                continue
+            behind = (newest_write - w).days
+            if behind > _LAG_DAYS:
+                lagging.append((name, e.get("updated_at"), behind))
         out["domains"][domain] = {
             "entries": len(entries),
             "rows": sum(int(e.get("n_rows") or 0) for e in entries.values()),
@@ -106,14 +137,15 @@ def format_report(manifest: dict, root: str = "", today: Optional[dt.date] = Non
         if d["lagging"]:
             L.append("")
             L.append(f"⚠ {domain}: {len(d['lagging'])} entr{'y' if len(d['lagging'])==1 else 'ies'} "
-                     f"lag >{_LAG_DAYS}d behind newest ({d['newest']}):")
-            for name, last, behind in d["lagging"][:15]:
-                L.append(f"    {name:<18}{last}  ({behind}d behind)")
+                     f"NOT WRITTEN in the last run (>{_LAG_DAYS}d behind the domain's "
+                     f"newest write, {d['last_write']}):")
+            for name, wrote, behind in d["lagging"][:15]:
+                L.append(f"    {name:<18}last written {wrote}  ({behind}d behind)")
             if len(d["lagging"]) > 15:
                 L.append(f"    … and {len(d['lagging']) - 15} more")
     if not any(d["lagging"] for d in s["domains"].values()):
         L.append("")
-        L.append("✓ all entries current (none lag behind their domain's newest).")
+        L.append("✓ every entry was written by the latest producer pass.")
     return "\n".join(L)
 
 

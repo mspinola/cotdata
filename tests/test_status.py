@@ -31,28 +31,64 @@ def test_summarize_counts_and_newest():
 def test_summarize_flags_lagging_entry():
     s = status.summarize(_manifest(), today=dt.date(2026, 7, 15))
     lagging = s["domains"]["prices"]["lagging"]
-    # NQ_backadj (2026-07-05) is 9 days behind the domain newest (2026-07-14).
+    # NQ_backadj was last WRITTEN 2026-07-06, 9 days behind the domain's newest
+    # write (2026-07-15) — i.e. the producer skipped it while its peers succeeded.
     assert [name for name, _, _ in lagging] == ["NQ_backadj"]
     assert lagging[0][2] == 9
 
 
-def test_ignore_lag_suppresses_hist_codes():
-    # RTY's predecessor code is frozen at 2018 but must NOT be flagged as lagging.
+def test_old_data_is_not_lagging_if_it_was_written_this_pass():
+    """Lag is about the PRODUCER skipping an entry, not about the data being old.
+
+    Two legitimate old-but-correct cases, both seen in the real store: thin markets
+    that drop out of the CFTC report for months and reappear (NKD, ZO), and retired
+    hist_code contracts frozen by design. Both are rewritten every pass, so both
+    carry a current updated_at and neither is a problem.
+    """
     m = {
         "schema_version": 2,
         "cot_legacy": {
-            "RTY_current": {"last_date": "2026-07-07", "n_rows": 100, "updated_at": "x"},
-            "RTY_23977A":  {"last_date": "2018-06-05", "n_rows": 500, "updated_at": "x"},
-            "NQ_current":  {"last_date": "2020-01-01", "n_rows": 100, "updated_at": "x"},
+            "RTY_current": {"last_date": "2026-07-07", "n_rows": 100,
+                            "updated_at": "2026-07-15T04:00:00Z"},
+            "RTY_23977A":  {"last_date": "2018-06-05", "n_rows": 500,   # retired code
+                            "updated_at": "2026-07-15T04:00:00Z"},
+            "ZO_004603":   {"last_date": "2026-06-02", "n_rows": 900,   # intermittent
+                            "updated_at": "2026-07-15T04:00:00Z"},
+            "NQ_skipped":  {"last_date": "2026-07-07", "n_rows": 100,   # genuinely missed
+                            "updated_at": "2026-06-20T04:00:00Z"},
+        },
+    }
+    lagging = status.summarize(m, dt.date(2026, 7, 15))["domains"]["cot_legacy"]["lagging"]
+    # Only the entry the producer actually skipped, even though two others carry
+    # far older data.
+    assert {n for n, _, _ in lagging} == {"NQ_skipped"}
+
+
+def test_ignore_lag_still_suppresses_by_name():
+    m = {
+        "schema_version": 2,
+        "cot_legacy": {
+            "RTY_current": {"last_date": "2026-07-07", "n_rows": 100,
+                            "updated_at": "2026-07-15T04:00:00Z"},
+            "RTY_23977A":  {"last_date": "2018-06-05", "n_rows": 500,
+                            "updated_at": "2026-06-01T04:00:00Z"},
         },
     }
     today = dt.date(2026, 7, 15)
-    # Without the ignore set, both stale entries are flagged.
-    plain = status.summarize(m, today)["domains"]["cot_legacy"]["lagging"]
-    assert {n for n, _, _ in plain} == {"RTY_23977A", "NQ_current"}
-    # With the hist_code suppressed, only the genuinely-stale current code remains.
+    assert {n for n, _, _ in status.summarize(m, today)["domains"]["cot_legacy"]["lagging"]} \
+        == {"RTY_23977A"}
     filt = status.summarize(m, today, ignore_lag={"RTY_23977A"})["domains"]["cot_legacy"]["lagging"]
-    assert {n for n, _, _ in filt} == {"NQ_current"}
+    assert filt == []
+
+
+def test_unusable_write_timestamp_is_reported_not_assumed_fine():
+    """"Cannot check" must never render as "all current" — that is the exact failure
+    this check exists to catch."""
+    m = {"schema_version": 2,
+         "cot_legacy": {"A": {"last_date": "2026-07-07", "n_rows": 1, "updated_at": "x"},
+                        "B": {"last_date": "2026-07-07", "n_rows": 1}}}
+    lagging = status.summarize(m, dt.date(2026, 7, 15))["domains"]["cot_legacy"]["lagging"]
+    assert {n for n, _, _ in lagging} == {"A", "B"}
 
 
 def test_empty_store_report():
