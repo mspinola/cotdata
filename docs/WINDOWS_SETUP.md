@@ -75,7 +75,9 @@ uv venv --python 3.11
 .venv\Scripts\activate.bat
 ```
 
-Your command prompt should now show `(.venv)` at the start of the line. All subsequent `pip install` and `python` commands run in this environment.
+Your command prompt should now show the environment is active — `(.venv)`, or your project folder name like `(cotdata)`.
+
+> **Important:** a `uv`-created venv has **no standalone `pip`** inside it. Install packages with **`uv pip install ...`** (see [Step 3](#step-3-install-cotdata)). If you run plain `pip install`, it falls through to your *global* Python and installs there instead — then your venv's `python` can't find the package (`ModuleNotFoundError`) even though the install "succeeded."
 
 ### Using `venv` (Built-in Alternative)
 
@@ -90,13 +92,16 @@ Same result: your command prompt shows `(.venv)` once activated.
 
 ## Step 3: Install cotdata
 
-With your virtual environment activated (you see `(.venv)` in the prompt), install cotdata:
+With your virtual environment activated, install cotdata.
+
+> **Which command — `pip` or `uv pip`?** If you created the venv with **`uv venv`**, use **`uv pip install ...`** (a uv venv has no standalone `pip`). If you used **`python -m venv`**, use plain **`pip install ...`**. The examples below show the `pip` form; prefix with `uv` if you're on a uv venv.
 
 ### For Consumer (Read-Only)
 
 If you only read data (no Norgate producer):
 ```cmd
 pip install cotdata
+:: uv venv:  uv pip install cotdata
 ```
 
 ### For Producer (Windows with Norgate)
@@ -104,6 +109,7 @@ pip install cotdata
 If you have a Norgate subscription and will run on this Windows machine:
 ```cmd
 pip install "cotdata[norgate]"
+:: uv venv:  uv pip install "cotdata[norgate]"
 ```
 
 ### For Development (Editable Install)
@@ -111,6 +117,7 @@ pip install "cotdata[norgate]"
 If you're modifying cotdata code:
 ```cmd
 pip install -e .
+:: uv venv:  uv pip install -e .
 ```
 
 Installation may take 1–2 minutes (many dependencies). Watch for any errors — if it says a package failed to download, your internet may have glitched; try again.
@@ -298,9 +305,10 @@ If you'd rather keep the `pip`-installed copy, add its `Scripts` directory to `P
 **Problem:** `import cotdata` fails
 
 **Likely causes:**
-1. Virtual environment not activated (no `(.venv)` in prompt) → run `.venv\Scripts\activate.bat`
-2. Installation failed → try `pip install --upgrade pip` then `pip install cotdata` again
-3. Wrong Python being used → run `python -m pip list` and check cotdata is there
+1. **Installed with plain `pip` into a `uv` venv** (most common with uv) → a uv venv has no `pip`, so `pip install` used your *global* pip and installed cotdata outside the venv. Reinstall with `uv pip install "cotdata[norgate]"`. Confirm with `where pip` (points at global) vs `where python` (points at `...\.venv\Scripts\`).
+2. Virtual environment not activated (no `(.venv)`/`(cotdata)` in prompt) → run `.venv\Scripts\activate.bat`
+3. Installation failed → try `pip install --upgrade pip` then `pip install cotdata` again
+4. Wrong Python being used → run `python -m pip list` and check cotdata is there
 
 ### `COTDATA_STORE` Not Found
 
