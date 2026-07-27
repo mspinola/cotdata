@@ -1,20 +1,29 @@
-"""Databento provider — DORMANT. NOT in the live EOD path (Norgate replaced it).
+"""Databento price provider for cotdata (GLBX.MDP3). Two parts live in this file.
 
-Retained deliberately for:
-  1. the intraday news-failure work (Norgate has no intraday; Databento is the
-     source for the release-window reaction refinement of the CMR trigger), and
-  2. cross-checking Norgate's settlement close against Databento statistics.
+LIVE, the ADR-0006 two-stage producer (an alternative to Norgate, selected per deployment
+via COTDATA_PRICE_SOURCE):
+  * ingest() fetches raw .n.0/.n.1 ohlcv-1d + statistics into an append-only raw bronze
+    store ($COTDATA_DATABENTO_RAW). The only paid step, resumable, paged by year.
+  * build() reads only the raw store and writes back-adjusted prices to the cotdata store.
+    Free and re-runnable.
+Driven by `cotdata-update --ingest-databento` / `--build-databento`. databento is a
+validated ALTERNATIVE provider (ADR-0006 Accepted), producing provider-different series
+from Norgate, so it is not the default source. See crucible-stack ADR-0006 and
+docs/databento_norgate_parity.md.
 
-Ported from cot-analyzer/src/core/market_data.py (GLBX.MDP3 ohlcv-1d + statistics).
-The hard-won part preserved here is the STATISTICS extraction — Open Interest
-(stat_type 9) and the settlement fix: use StatType.SETTLEMENT_PRICE == 3 (NOT 7 =
-LOWEST_OFFER, which overwrote Close with the day's lowest offer), dated by ts_ref
-(the session it applies to) not ts_event (final settle is disseminated next morning).
+DORMANT, an older per-symbol EOD path (fetch_daily_ohlc, run_batch_backfill,
+update_all_daily_prices) that is on NO live path. Kept deliberately for (1) the intraday
+news-failure work (Norgate has no intraday, so databento would source the release-window
+reaction refinement of the CMR trigger) and (2) cross-checking Norgate's settlement close
+against databento statistics. Remove it if that intraday work is abandoned.
 
-Standalone-adapted for cotdata: lazy `import databento` (behind the [databento]
-extra), symbols from the registry, cache under $COTDATA_STORE/_cache/databento.
-Requires DATABENTO_API_KEY. The daily path below is superseded by Norgate; the
-intraday work will reuse this statistics logic against ohlcv-1h / trades schemas.
+The hard-won piece both parts share is the STATISTICS extraction: Open Interest is
+stat_type 9, and settlement is StatType.SETTLEMENT_PRICE == 3 (NOT 7 = LOWEST_OFFER, which
+overwrote Close with the day's lowest offer), dated by ts_ref (the session it applies to),
+not ts_event (the final settle is disseminated the next morning).
+
+Lazy `import databento` (behind the [databento] extra), symbols from the registry,
+requires DATABENTO_API_KEY for the paid fetches.
 """
 import datetime as dt
 import json
@@ -33,8 +42,10 @@ from ..registry import all_symbols
 
 logger = logging.getLogger(__name__)
 
-# Symbols Databento GLBX.MDP3 doesn't carry as .n.0 continuous (fall back to yfinance).
-_DATABENTO_UNSUPPORTED = {"CC", "OJ", "SB", "KC", "LBR", "CT"}
+# Symbols Databento GLBX.MDP3 doesn't carry as a .n.0 continuous (fall back to yfinance).
+# Derived from the registry (`databento: null`), the authoritative capability mapping, so
+# it can't drift from it the way the old hardcoded list did (it missed DX/MME/MFS).
+_DATABENTO_UNSUPPORTED = frozenset(s.internal for s in all_symbols() if s.databento is None)
 _API_LAST_CHECKED = {}   # in-memory throttle to avoid hammering the API
 
 
