@@ -66,10 +66,11 @@ before the first Norgate push, so the store is rebuilt as a clean Norgate replic
 push after that is a same-source mirror with nothing to collide.
 
 **citpy on the server.** cot-analyzer's `run-local.sh` sets
-`COTMETRICS_CITPY=$COTDATA_STORE/citpy`, but those are hand-copied, consumer-owned notes,
-not producer output. The push excludes `citpy/`, which keeps it off the Windows producer's
-books and stops `--delete` from removing it on the server. Populate it separately, on the
-server, as before.
+`COTMETRICS_CITPY=$COTDATA_STORE/citpy`, but that is not Norgate producer output: it is
+reproducible output of the `~/code/citpy` tool, read via `COTMETRICS_CITPY`. The push
+excludes `citpy/`, which keeps it off the Windows producer's books and stops `--delete`
+from removing it on the server. Regenerate it on the server, or point `COTMETRICS_CITPY`
+at the citpy tool's own output directory, rather than mirroring it through this store.
 
 ## Prefer one producer
 
