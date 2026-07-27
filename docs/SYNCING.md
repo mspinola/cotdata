@@ -51,10 +51,17 @@ maintenance than a per-symbol roll-rule table.
   rsync on Windows (cwRsync or WSL). robocopy cannot speak SSH, and SMB must never be
   exposed over the internet, so the Mac's SMB path does not carry here. See
   [`examples/windows/push-to-server.cmd`](examples/windows/push-to-server.cmd). The
-  exclusions match the Mac push (`_cache/`, `_raw/`, `citpy/`, `manifest.json`), so the
-  producer-internal databento bronze under `_raw/databento/` never leaves the Windows box.
+  exclusions match the Mac push (`_cache/`, `_raw/`, `citpy/`, `manifest.json`, plus
+  `*.tmp` for partial-write temps), so the producer-internal databento bronze under
+  `_raw/databento/` never leaves the Windows box.
 - **Auth:** key-based SSH only. A scheduled task cannot type a passphrase, so use a
   dedicated key with `ssh -o BatchMode=yes`, never a password prompt.
+- **cwRsync gotcha:** a Cygwin rsync (what `choco install rsync` gives you) must drive the
+  ssh that *ships with it*, not the native Windows OpenSSH. Native ssh corrupts rsync's
+  binary stream and fails with `connection unexpectedly closed (0 bytes received so far)`,
+  even though a plain `ssh host echo ok` works fine. That Cygwin ssh also has no HOME, so
+  give it an explicit writable `-o UserKnownHostsFile=`, and use cygdrive (`/cygdrive/c/…`)
+  paths throughout, including the key. The example script wires all three.
 
 **Provider cutover (one-time).** The server previously held a databento-built store, so its
 `prices/` and `manifests/prices.json` carry databento data under the very keys the Norgate
