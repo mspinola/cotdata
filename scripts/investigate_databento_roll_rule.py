@@ -22,14 +22,19 @@ match rate and smallest date offset is the candidate to switch `_FEEDS` to.
 It reads the paid API, so it is NOT run in CI and is not wired into the producer.
 Run it on a machine with DATABENTO_API_KEY set and a Norgate-built store to read.
 
+The slow part is the API pull, so roll dates are cached per (root, rule) on disk: a
+re-run, or extra --tol-days values, cost no extra pulls. Pull a symbol once, then sweep
+tolerances for free.
+
 Usage:
     DATABENTO_API_KEY=... python scripts/investigate_databento_roll_rule.py \
         --norgate-store ~/code/cotdata_store \
-        --symbols CL ZS NG HE --tol-days 3
+        --symbols CL ZS NG HE --tol-days 3 7 10      # sweep, one pull per rule
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -71,6 +76,21 @@ def databento_roll_dates(client, dataset: str, root: str, rule: str) -> pd.Datet
     return pd.DatetimeIndex(df.index[is_new.values])
 
 
+def roll_dates_cached(client, dataset, root, rule, cache_dir: Path, refresh: bool):
+    """databento_roll_dates with an on-disk cache. The API pull is the only slow part and
+    roll dates are historical (a past roll never moves), so once pulled a (root, rule) is
+    reused across tolerance sweeps and re-runs. `--refresh` forces a fresh pull."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fp = cache_dir / f"{root}.{rule}.roll.json"
+    if fp.exists() and not refresh:
+        rolls = json.loads(fp.read_text()).get("rolls", [])
+        return pd.DatetimeIndex(pd.to_datetime(rolls)), True   # (dates, from_cache)
+    dates = databento_roll_dates(client, dataset, root, rule)
+    fp.write_text(json.dumps({"root": root, "rule": rule, "dataset": dataset,
+                              "rolls": [str(d.date()) for d in dates]}))
+    return dates, False
+
+
 def score(dbrolls: pd.DatetimeIndex, ngrolls: pd.DatetimeIndex, tol_days: int):
     """Of the Norgate rolls that fall inside databento's covered span, how many have a
     databento roll within tol_days? Norgate rolls before databento's history floor have no
@@ -100,10 +120,18 @@ def main() -> None:
     ap.add_argument("--norgate-store", required=True, help="A Norgate-built cotdata store.")
     ap.add_argument("--symbols", nargs="+", default=_DEFAULT_SYMBOLS)
     ap.add_argument("--rules", nargs="+", default=_DEFAULT_RULES, help="c=calendar n=OI v=volume")
-    ap.add_argument("--tol-days", type=int, default=3, help="A roll counts as matched within +/- this many days.")
+    ap.add_argument("--tol-days", nargs="+", type=int, default=[3],
+                    help="Match window(s) in days. Pass several (e.g. 3 7 10) to sweep them "
+                         "in one run — with the cache, extra tolerances cost no extra pulls.")
     ap.add_argument("--dataset", default="GLBX.MDP3")
+    ap.add_argument("--cache-dir", default=".rollrule_cache",
+                    help="Where to cache the pulled roll dates so re-runs and tolerance "
+                         "sweeps skip the slow API pull (default ./.rollrule_cache).")
+    ap.add_argument("--refresh", action="store_true", help="Ignore the cache and re-pull.")
     args = ap.parse_args()
 
+    tols = sorted(set(args.tol_days))
+    cache_dir = Path(args.cache_dir)
     roots = {s.internal: s.databento for s in all_symbols()}
     client = _client_from_env()
 
@@ -118,22 +146,28 @@ def main() -> None:
             print(f"\n{sym}: no Norgate roll dates found in {args.norgate_store} — skipping")
             continue
         print(f"\n{sym}  (databento root {root!r}, Norgate rolls total {len(ng)})")
-        print(f"  {'rule':6} {'db_rolls':>8} {'ng_overlap':>10} {'matched':>8} {'match_rate':>10} {'med|off|d':>9}")
-        best = None
+        tol_hdr = "  ".join(f"rate@{t}d" for t in tols)
+        print(f"  {'rule':5} {'db_rolls':>8} {'ng_ovl':>7}  {tol_hdr}  {'med|off|d':>9}")
+        best = None  # (rule, rate_at_widest_tol, med) — judged on the widest tolerance
         for rule in args.rules:
             try:
-                db = databento_roll_dates(client, args.dataset, root, rule)
+                db, cached = roll_dates_cached(client, args.dataset, root, rule, cache_dir, args.refresh)
             except Exception as e:  # noqa: BLE001 — one bad rule should not sink the run
-                print(f"  {rule:6} FETCH FAILED — {e}")
+                print(f"  {rule:5} FETCH FAILED — {e}")
                 continue
-            n_db, n_ng, matched, rate, med = score(db, ng, args.tol_days)
-            print(f"  {rule:6} {n_db:>8} {n_ng:>10} {matched:>8} "
-                  f"{rate:>10.3f} {med:>9.1f}")
-            if rate == rate and (best is None or rate > best[1] or (rate == best[1] and med < best[2])):
-                best = (rule, rate, med)
+            rates = [score(db, ng, t) for t in tols]
+            n_db, n_ng = rates[0][0], rates[0][1]
+            rate_cells = "  ".join(f"{r[3]:>6.3f}" for r in rates)
+            med = rates[-1][4]
+            tag = "" if not cached else " (cached)"
+            print(f"  {rule:5} {n_db:>8} {n_ng:>7}  {rate_cells}  {med:>9.1f}{tag}")
+            wide = rates[-1][3]
+            if wide == wide and (best is None or wide > best[1] or (wide == best[1] and med < best[2])):
+                best = (rule, wide, med)
         if best:
             winners[sym] = best[0]
-            print(f"  -> best match: rule '{best[0]}' (rate {best[1]:.3f}, median offset {best[2]:.1f}d)")
+            print(f"  -> best match: rule '{best[0]}' (rate {best[1]:.3f} @ {tols[-1]}d, "
+                  f"median offset {best[2]:.1f}d)")
 
     if winners:
         print("\n=== recommended roll rule per symbol ===")
