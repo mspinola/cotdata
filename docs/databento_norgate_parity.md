@@ -91,8 +91,16 @@ If one rule beats `.n` broadly, switch the producer's `_FEEDS` root (and re-inge
 affected symbols). If different symbols favor different rules, add a per-symbol
 roll-rule field to the registry rather than a single global change.
 
-## Decision
+## Decision (2026-07-27)
 
-ADR-0006 stays Proposed. The clean 14 plus the units-fixed 3 are solid. Promotion of the
-monthly-roll set waits on the roll-rule investigation. Do not flip the ADR to Accepted
-until the roll-calendar question is closed for that set.
+The roll-rule investigation is complete. It is per-symbol, not global: energy (CL, NG) tracks
+Norgate on the calendar roll `.c` (near-perfect, 0.995 to 1.000 roll-date match), grains (ZS,
+ZC) on the volume roll `.v` (best but loose, a few days off each roll, so about 0.95 not 0.999),
+and the quarterly financials and metals already match on the open-interest roll `.n`.
+
+That per-symbol roll rule is documented here but intentionally NOT built. The server will source
+Norgate via a Windows-to-Linux store sync rather than databento. That is risk-free (the dashboard
+then shows exactly what local research shows, the same Norgate data) and lower maintenance than
+carrying a per-symbol roll-rule table plus a grain series that never quite matches. databento
+remains a validated, provider-different alternative source, not the server's price provider.
+ADR-0006 is Accepted on that basis (see its Outcome section).
