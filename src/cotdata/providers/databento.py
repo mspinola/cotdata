@@ -858,6 +858,16 @@ _OHLCV_COLMAP = {"open": "Open", "high": "High", "low": "Low",
                  "close": "Close", "volume": "Volume"}
 _OUT_COLS = ["Open", "High", "Low", "Close", "Volume", "Open Interest"]
 
+# Databento reports settlement in true dollars, but the toolchain's price convention
+# (inherited from Norgate, which the rest of the stack was built on) quotes a handful of
+# contracts in cents / the IMM x100 form: silver and copper in cents/unit, JPY in the IMM
+# quote. Scale those at build time so the databento store is a drop-in for the Norgate one.
+# Applied to the price columns only (never Volume/Open Interest, which are counts). The raw
+# bronze store stays faithful to databento; this is a silver-stage reconciliation, so it
+# costs nothing to change. Verified by scripts/validate_databento_vs_norgate.py: with the
+# scale on, SI/HG/6J daily-change correlation is >0.998 and scale_ratio ~1.0 vs Norgate.
+_PRICE_SCALE = {"SI": 100.0, "HG": 100.0, "6J": 100.0}
+
 
 def _read_ohlcv(symbol: str, feed: str) -> pd.DataFrame:
     p = _raw_path(symbol, feed, "ohlcv-1d")
@@ -960,6 +970,14 @@ def build(symbols=None) -> dict:
         n0 = _with_settlement(n0, _stat_series(s.internal, ".n.0", 3, "ts_ref", "price"))
         if not n1.empty:
             n1 = _with_settlement(n1, _stat_series(s.internal, ".n.1", 3, "ts_ref", "price"))
+        # Reconcile databento's dollar units to the toolchain's Norgate convention BEFORE
+        # the roll-gap math, so unadj, the gaps, and backadj all end up in the same units.
+        scale = _PRICE_SCALE.get(s.internal)
+        if scale:
+            for df in (n0, n1):
+                for c in ("Open", "High", "Low", "Close"):
+                    if c in df.columns:
+                        df[c] = df[c] * scale
         oi = _stat_series(s.internal, ".n.0", 9, "ts_event", "quantity")
 
         unadj = n0.copy()

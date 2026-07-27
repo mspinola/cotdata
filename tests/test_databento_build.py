@@ -130,6 +130,33 @@ def test_build_no_rolls_leaves_series_unadjusted(stores, capsys):
     assert "no rolls detected" in capsys.readouterr().out
 
 
+def test_build_applies_norgate_unit_scale(stores):
+    # SI/HG/6J are cents / IMM-x100 in the toolchain's Norgate convention; databento gives
+    # true dollars. The build scales the price columns x100 so the store is a drop-in, and
+    # leaves Volume / Open Interest (counts) untouched.
+    raw, _ = stores
+    dates = pd.date_range("2020-01-01", periods=4, freq="D")
+    _write_ohlcv(raw, "SI", ".n.0", dates, [25.0, 25.1, 25.2, 25.3], "A")   # $/oz
+    _write_stats(raw, "SI", ".n.0", dates, oi=[7000] * 4)
+
+    build(["SI"])
+    unadj = cotdata.get_prices("SI", adjustment="unadj")
+    assert list(unadj["Close"]) == [2500.0, 2510.0, 2520.0, 2530.0]         # x100 -> cents
+    assert unadj["High"].iloc[0] == (25.0 + 0.5) * 100
+    assert list(unadj["Open Interest"]) == [7000] * 4                       # counts unscaled
+    assert list(unadj["Volume"]) == [1000] * 4
+
+
+def test_build_leaves_unscaled_symbol_in_native_units(stores):
+    # A symbol not in _PRICE_SCALE (ES) is written as-is — the scale map is a deny-by-default
+    # allowlist, so a new symbol never gets silently x100'd.
+    raw, _ = stores
+    dates = pd.date_range("2020-01-01", periods=3, freq="D")
+    _write_ohlcv(raw, "ES", ".n.0", dates, [4000.0, 4001.0, 4002.0], "A")
+    build(["ES"])
+    assert list(cotdata.get_prices("ES", adjustment="unadj")["Close"]) == [4000.0, 4001.0, 4002.0]
+
+
 def test_build_skips_symbol_missing_from_raw_store(stores):
     # Nothing written for CL → build reports it skipped (and it's not 'ok').
     res = build(["CL"])
