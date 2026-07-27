@@ -269,3 +269,9 @@ even when its data looks fine.
 If the replica shows entries the producer does not have, the sync is additive rather than
 mirroring and stale files are accumulating. If it shows *fewer*, the sync has not
 completed or an exclusion is too broad.
+
+To automate this across replicas, [`examples/mac/verify-replicas.sh`](examples/mac/verify-replicas.sh)
+checks a local store and a remote one (over SSH) in one pass and exits non-zero if either
+did not receive today's push. `status.json` is rewritten on every producer push, so its
+mtime date is the "did this replica update today" signal. Wire it to launchd/cron a little
+after the producer's run.
