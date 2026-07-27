@@ -6,6 +6,50 @@ the producer and the consumers are different machines, something has to move the
 This page is about **what** to move and what to leave behind. The transport is the easy
 part and comes last.
 
+## This deployment: two stores, three machines
+
+Because a store carries a single price half (`manifests/prices.json`) written by one
+producer, this deployment keeps **two separate stores** rather than merging price sources.
+
+### Research store: standalone Windows server to Mac over SMB
+
+The Mac's `~/code/cotdata_store`, read on the Mac for research. Its producer used to be a
+Windows VM hosted inside the Mac, with the store on a folder shared between guest and host,
+so nothing had to move. It is now a **standalone physical Windows server**, and that shared
+folder was deliberately not carried over, so a real network sync replaced it.
+
+- **Producer:** the Windows server (Norgate prices, CFTC COT), one-directional.
+- **Consumer:** the Mac, read-only, `COTDATA_PRICE_SOURCE` unset (Norgate default).
+- **Transport:** `robocopy /MIR` ([`examples/windows/sync-store.cmd`](examples/windows/sync-store.cmd))
+  pushing to an SMB share the Mac exports for `~/code/cotdata_store`, reached from the
+  server as `\\<mac>\cotdata_store` (use the Mac's LAN IP if its name will not resolve
+  from a headless server).
+- **Trigger:** chained onto the end of the producer task behind an `errorlevel` guard, so
+  it fires only after a successful run rather than on a timer (a deferred
+  `--require-final` prices run exits non-zero and is skipped).
+- **Auth gotcha:** a task set to run whether the user is logged on or not has no cached
+  SMB credentials in its non-interactive session, so the UNC write fails access-denied
+  even though it works logged on. Store one on the server with `cmdkey /add`, or chain the
+  sync onto the logged-on prices task instead.
+
+### Databento store: Linux server to the public dash
+
+A distinct store on a **Linux server**, running the daily databento updates and serving the
+public dash (cot-analyzer with `COTDATA_PRICE_SOURCE=databento`). It does not overlap the
+research store: the Mac never reads databento prices.
+
+- **Seeding (one-time):** the slow from-inception databento download was done on the Mac
+  and rsync'd to Linux. Transfer **both** `_raw/databento/` and `_cache/databento/`;
+  re-fetching either costs databento money, so this is not free to rebuild the way
+  `_cache/cot_*` is. (Doing the initial download on Linux directly would have been simpler,
+  given how long it takes.)
+- **Daily:** Linux runs the databento update from then on.
+
+These two databento directories are producer-internal and are already excluded from the
+Windows -> Mac push, so the seed staged on the Mac never interferes with the research sync.
+Once the seed is confirmed on Linux and daily updates run there, the Mac may delete its own
+`_raw/databento/` and `_cache/databento/`, but not before.
+
 ## Prefer one producer
 
 The simplest topology by a wide margin is **one machine writes everything, the rest are
