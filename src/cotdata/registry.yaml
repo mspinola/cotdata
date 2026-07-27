@@ -135,7 +135,8 @@ Softs:
   LBR:
     cftc_code: "058644"
     databento: null
-    yahoo: "LBS=F"          # unverified Yahoo lumber symbol — confirm before relying
+    yahoo: "LBR=F"          # CME Lumber (physical), listed 2022-08. LBS=F was the delisted
+                            # random-length contract (dark since 2023-05), verified stale.
     hist_codes:
       - ["058643", 4.0]
 
