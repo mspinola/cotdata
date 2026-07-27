@@ -665,14 +665,59 @@ def _ingest_n1_stats_windowed(client, dataset, s, manifest, end, window) -> int:
     return added
 
 
-def reconcile_manifest() -> dict:
-    """Rebuild the ingest manifest from the raw parquet files actually on disk.
+def _claims_rows(entry) -> bool:
+    """Does this manifest entry assert that data was actually fetched?
 
-    ingest() writes the raw parquets incrementally, but a run interrupted before it
-    persisted the manifest can leave the manifest behind what is on disk — a restart
-    would then re-download already-fetched tables. This backfills the manifest from the
-    raw store so a restart resumes correctly. Reads only local files, never the API.
-    Returns ``{manifest_key: last_date}`` for every table it recorded."""
+    The ingest manifest holds two shapes, and only one of them implies a file:
+
+    * a **record** of a fetched table, carrying `first_date` and `n_rows`
+    * an **advance marker**, `{last_date: ...}` and nothing else, written when a
+      paged pull meets an empty window so a re-run skips that span instead of
+      refetching it forever
+
+    Only a record can be a ghost. Treated as a record when it claims rows, so an
+    entry that is malformed or from a future writer errs toward being KEPT: a
+    wrongly-kept entry costs one skipped table that `--ingest-databento` reports,
+    while a wrongly-pruned marker costs a paid refetch on every run thereafter.
+    """
+    if not isinstance(entry, dict):
+        return False
+    try:
+        return int(entry.get("n_rows") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def reconcile_manifest(*, prune: bool = True) -> dict:
+    """Make the ingest manifest match the raw parquet files actually on disk.
+
+    The manifest is the resume ledger: ingest() computes each table's start date from
+    ``last_date`` and skips the table entirely when that is already current. It never
+    checks that the file exists. So the manifest drifting out of step with the disk is
+    silently destructive in BOTH directions, and this fixes both.
+
+    * **Manifest behind disk.** ingest() writes raw parquets incrementally, so a run
+      interrupted before it persisted the manifest leaves fetched tables unrecorded and
+      a restart re-downloads them. Backfilled from the files.
+    * **Manifest ahead of disk.** An entry that claims rows but whose parquet is missing
+      (a partial copy, a store move, a deleted file) still carries a current
+      ``last_date``, so a restart marks it "already current" and NEVER fetches it. No
+      error, no row, a permanent hole in a paid dataset. Pruned, so the next run
+      re-fetches it.
+
+    The second case is the dangerous one: the first costs money re-downloading data you
+    already have, the second leaves you believing you have data you do not.
+
+    **Empty-window advance markers are not ghosts and are never pruned.** A paged pull
+    that meets an empty window writes ``{last_date: ...}`` with no parquet on purpose,
+    so a re-run does not refetch that span forever; for a symbol whose data starts after
+    the GLBX floor, the marker is all there is. Pruning on "no file" alone would delete
+    them and restore the loop, so the test is "claims rows AND has no file". See
+    ``_claims_rows``.
+
+    Reads only local files, never the API. Returns
+    ``{"recorded": {key: last_date}, "pruned": [key, ...]}``.
+    """
     manifest = _load_ingest_manifest()
     recorded: dict = {}
     for schema in _SCHEMAS:
@@ -703,8 +748,36 @@ def reconcile_manifest() -> dict:
                 "reconciled": True,
             }
             recorded[key] = newest
+
+    pruned: list = []
+    if prune:
+        for key in sorted(manifest):
+            try:
+                sym_feed, schema = key.rsplit(":", 1)
+            except ValueError:
+                continue
+            sub = "ohlcv" if schema == "ohlcv-1d" else "statistics"
+            if (raw_root() / sub / f"{sym_feed}.parquet").exists():
+                continue
+            if not _claims_rows(manifest[key]):
+                # NOT a ghost. A paged pull that meets an empty window writes a
+                # `last_date` advance marker with no parquet, deliberately, so a
+                # re-run does not refetch that empty span forever (see the
+                # `elif chunk_days` branch in _ingest_range). For a symbol whose
+                # data starts after the GLBX floor, every early window is empty
+                # and the marker is ALL there is.
+                #
+                # Pruning on "no file" alone would delete exactly those markers and
+                # restore the refetch loop they exist to prevent, on every run,
+                # against a paid API. This function exists to stop a silent hole in
+                # paid data; deleting a marker would trade it for a silent spend.
+                continue
+            pruned.append(key)
+        for key in pruned:
+            del manifest[key]
+
     _write_ingest_manifest(manifest)
-    return recorded
+    return {"recorded": recorded, "pruned": pruned}
 
 
 # ── Batch ingest: robust large pulls via the databento batch API ─────────────

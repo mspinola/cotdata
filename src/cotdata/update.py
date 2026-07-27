@@ -87,9 +87,12 @@ def main(argv=None, half=None) -> None:
                    help="Prune manifest entries whose parquet file is missing (ghosts "
                         "from old naming), refresh status.json, and exit. Never touches data.")
     p.add_argument("--reconcile-databento", action="store_true",
-                   help="Rebuild the databento raw-store ingest manifest from the parquet files "
-                        "on disk, so an interrupted --ingest-databento resumes instead of "
-                        "re-downloading. Reads only local files, no API. Exit.")
+                   help="Make the databento ingest manifest match the parquet files on disk, "
+                        "in BOTH directions: record tables an interrupted run left "
+                        "unrecorded (so a restart does not re-download them), and prune "
+                        "entries whose file is missing (so a restart does not skip them as "
+                        "'already current' and leave a silent hole). Local files only, no "
+                        "API. Exit.")
     args = p.parse_args(argv)
     if half:
         _reject_other_half(p, args, half)
@@ -134,13 +137,21 @@ def main(argv=None, half=None) -> None:
 
     if args.reconcile_databento:
         from .providers import databento
-        recorded = databento.reconcile_manifest()
-        if not recorded:
-            print("databento reconcile: no raw parquet files found — nothing to record.")
-        else:
+        res = databento.reconcile_manifest()
+        recorded, pruned = res["recorded"], res["pruned"]
+        if not recorded and not pruned:
+            print("databento reconcile: manifest already matches the raw store.")
+        if recorded:
             syms = sorted({k.split(".n.")[0] for k in recorded})
             print(f"databento reconcile: recorded {len(recorded)} raw table(s) across "
                   f"{len(syms)} symbol(s) into the ingest manifest.")
+            print("  symbols: " + ", ".join(syms))
+        if pruned:
+            syms = sorted({k.split(".n.")[0] for k in pruned})
+            print(f"databento reconcile: PRUNED {len(pruned)} manifest entr"
+                  f"{'y' if len(pruned) == 1 else 'ies'} with no parquet on disk, across "
+                  f"{len(syms)} symbol(s). The next --ingest-databento will re-fetch these; "
+                  f"without the prune it would have skipped them as 'already current'.")
             print("  symbols: " + ", ".join(syms))
         return
 
