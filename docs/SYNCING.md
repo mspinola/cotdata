@@ -129,6 +129,44 @@ arrival. The per-half files under `manifests/` are disjoint and merge correctly.
 
 Run `cotdata-update --migrate-manifests` once per store, then delete `manifest.json`.
 
+## Check before you mirror
+
+`--delete` and `/MIR` are silent when they destroy something. Run the preflight first:
+
+```bash
+python docs/examples/sync_preflight.py SRC_STORE DEST_STORE
+```
+
+Exit 0 means DEST holds nothing SRC does not produce. Exit 1 lists what a mirror would
+remove and refuses. It reads only.
+
+It checks two things the eye does not. **Entries only on DEST**, which a mirror deletes.
+And **the same key produced by different sources on each side**: cotdata's price path is
+`prices/<SYM>_<adj>.parquet` with no source component, so a Norgate `ES_backadj` and a
+databento `ES_backadj` are the same file, and a sync resolves them last-writer-wins with
+nothing in the output to say so.
+
+On a real pair on 2026-07-26 that second check found **94 collisions** between a
+Norgate-sourced research store and a databento-sourced server store. Neither store was
+wrong. They are not mirrors of each other, and the preflight says so before a transport
+does something irreversible.
+
+The fix for a refusal is the topology, not the exclusion list. Give each producer its
+own store, or put the source in the path. Excluding paths by hand works until someone
+forgets, and the forgetting is silent.
+
+### Migration check
+
+Before deleting a legacy `manifest.json`, confirm the per-half files actually cover it:
+
+```bash
+python docs/examples/check_manifest_migration.py
+```
+
+The presence of `manifests/` is not the test. A store can be part migrated, and
+`load_manifest` falls back to the legacy file **per domain**. Found on a real store where
+`manifests/prices.json` held `prices` but not `metadata`.
+
 ## Ordering: data before manifests
 
 If a manifest arrives before the parquet it describes, a consumer briefly sees an entry
