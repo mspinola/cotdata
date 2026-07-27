@@ -403,3 +403,112 @@ def test_reconcile_prune_can_be_turned_off(tmp_path, monkeypatch):
     res = databento.reconcile_manifest(prune=False)
     assert res["pruned"] == []
     assert "GC.n.0:ohlcv-1d" in json.loads((root / "ingest_manifest.json").read_text())
+
+
+# ── advance markers are not ghosts ───────────────────────────────────────────
+# A paged pull that meets an empty window writes {last_date: ...} with NO parquet, on
+# purpose, so a re-run does not refetch that empty span forever. For a symbol whose
+# data starts after the GLBX floor, that marker is all there is. Pruning on "no file"
+# alone deletes exactly those and restores the loop they exist to prevent, every run,
+# against a paid API.
+
+def test_an_empty_window_marker_survives_the_prune(tmp_path, monkeypatch):
+    import json
+
+    from cotdata.providers import databento
+    root = _raw_layout(tmp_path, monkeypatch)
+    _write_raw(root, "ohlcv", "ES.n.0", ["2026-07-01"])
+    (root / "ingest_manifest.json").write_text(json.dumps({
+        "ES.n.0:ohlcv-1d": {"last_date": "2026-07-01", "n_rows": 1},
+        # The marker: last_date only, no first_date, no n_rows, no file.
+        "BTC.n.0:statistics": {"last_date": "2020-12-31"},
+    }))
+
+    res = databento.reconcile_manifest()
+
+    assert res["pruned"] == [], "an advance marker is not a ghost"
+    m = json.loads((root / "ingest_manifest.json").read_text())
+    assert m["BTC.n.0:statistics"]["last_date"] == "2020-12-31", "marker was destroyed"
+
+
+def test_a_real_ghost_beside_a_marker_is_still_pruned(tmp_path, monkeypatch):
+    """The narrowing must not cost the prune its purpose."""
+    import json
+
+    from cotdata.providers import databento
+    root = _raw_layout(tmp_path, monkeypatch)
+    (root / "ingest_manifest.json").write_text(json.dumps({
+        "BTC.n.0:statistics": {"last_date": "2020-12-31"},                    # marker
+        "GC.n.0:ohlcv-1d": {"last_date": "2026-07-02", "n_rows": 99,
+                            "first_date": "2020-01-01"},                      # ghost
+    }))
+
+    res = databento.reconcile_manifest()
+
+    assert res["pruned"] == ["GC.n.0:ohlcv-1d"]
+    m = json.loads((root / "ingest_manifest.json").read_text())
+    assert "BTC.n.0:statistics" in m and "GC.n.0:ohlcv-1d" not in m
+
+
+def test_a_zero_row_entry_is_treated_as_a_marker(tmp_path, monkeypatch):
+    """n_rows == 0 asserts no data, so there is nothing for a missing file to contradict."""
+    import json
+
+    from cotdata.providers import databento
+    root = _raw_layout(tmp_path, monkeypatch)
+    (root / "ingest_manifest.json").write_text(json.dumps({
+        "BTC.n.0:statistics": {"last_date": "2020-12-31", "n_rows": 0},
+    }))
+
+    assert databento.reconcile_manifest()["pruned"] == []
+
+
+def test_an_unrecognised_entry_shape_errs_toward_keeping(tmp_path, monkeypatch):
+    """A wrongly-KEPT entry costs one skipped table that --ingest-databento reports. A
+    wrongly-PRUNED marker costs a paid refetch on every run after. Fail the cheap way."""
+    import json
+
+    from cotdata.providers import databento
+    root = _raw_layout(tmp_path, monkeypatch)
+    (root / "ingest_manifest.json").write_text(json.dumps({
+        "BTC.n.0:statistics": {"last_date": "2020-12-31", "n_rows": "lots"},
+        "ETH.n.0:statistics": {"windowed": True, "batch": True, "reconciled": True},
+    }))
+
+    assert databento.reconcile_manifest()["pruned"] == []
+
+
+def test_the_marker_the_real_ingest_writes_survives_reconcile(tmp_path, monkeypatch):
+    """End to end against the actual writer, not a hand-built manifest.
+
+    The GLBX-floor case: a symbol whose data begins after the whole requested range, so
+    EVERY window is empty and the `elif chunk_days` branch is the only thing that ever
+    writes. The result is a manifest of pure advance markers and no parquet directory
+    at all. Under a "no file means ghost" rule reconcile deletes both entries and the
+    next ingest re-scans the empty span, on every run, against a paid API.
+
+    A first version of this test used data that started INSIDE the range. That produced
+    a marker on the first window which the next window immediately overwrote with real
+    rows, so the assertion had nothing to assert and the test skipped. A skipped test is
+    not evidence.
+    """
+    import cotdata.providers.databento as dbmod
+    monkeypatch.setenv("COTDATA_DATABENTO_RAW", str(tmp_path))
+    monkeypatch.setattr(dbmod, "_STATS_CHUNK_DAYS", 2)
+    client = _FakeClient(_frames(pd.date_range("2021-06-01", periods=3)))
+
+    dbmod.ingest(symbols=["ES"], client=client, end="2020-01-06",
+                 cold_start="2020-01-01")
+
+    man_path = tmp_path / "ingest_manifest.json"
+    markers = {k: v for k, v in json.loads(man_path.read_text()).items()
+               if not v.get("n_rows")}
+    assert markers, "fixture no longer produces an advance marker; the test is vacuous"
+    assert not (tmp_path / "ohlcv").exists(), "expected no parquet for an all-empty pull"
+
+    dbmod.reconcile_manifest()
+
+    after = json.loads(man_path.read_text())
+    for key, val in markers.items():
+        assert key in after, f"reconcile destroyed the advance marker {key}"
+        assert after[key]["last_date"] == val["last_date"]
