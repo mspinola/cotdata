@@ -17,3 +17,6 @@ dist/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# roll-rule investigation cache (scripts/investigate_databento_roll_rule.py)
+.rollrule_cache/
