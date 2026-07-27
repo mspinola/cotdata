@@ -6,10 +6,14 @@ the producer and the consumers are different machines, something has to move the
 This page is about **what** to move and what to leave behind. The transport is the easy
 part and comes last.
 
-## This deployment: two stores, three machines
+## This deployment: one Norgate producer, two replicas
 
-Because a store carries a single price half (`manifests/prices.json`) written by one
-producer, this deployment keeps **two separate stores** rather than merging price sources.
+A single Windows server is the only producer (Norgate prices, CFTC COT). It feeds two
+read-only replicas: the Mac research store over SMB, and a remote Linux dash server over
+SSH. Both are Norgate, so the dashboard shows exactly what research shows. databento was
+built and validated as a provider-different alternative but is wired to neither consumer;
+see the dash section below and [`databento_norgate_parity.md`](databento_norgate_parity.md)
+(ADR-0006, Accepted).
 
 ### Research store: standalone Windows server to Mac over SMB
 
@@ -32,23 +36,40 @@ folder was deliberately not carried over, so a real network sync replaced it.
   even though it works logged on. Store one on the server with `cmdkey /add`, or chain the
   sync onto the logged-on prices task instead.
 
-### Databento store: Linux server to the public dash
+### Dash store: Windows Norgate to a remote Linux server over SSH
 
-A distinct store on a **Linux server**, running the daily databento updates and serving the
-public dash (cot-analyzer with `COTDATA_PRICE_SOURCE=databento`). It does not overlap the
-research store: the Mac never reads databento prices.
+The public dash (cot-analyzer) reads a Norgate store synced from the same Windows producer,
+not a databento store. databento was built and validated as a provider-different
+alternative, but its monthly-commodity roll calendar produces a materially different series
+([`databento_norgate_parity.md`](databento_norgate_parity.md)), so the server stays on
+synced Norgate: the dashboard then shows exactly what local research shows, at lower
+maintenance than a per-symbol roll-rule table.
 
-- **Seeding (one-time):** the slow from-inception databento download was done on the Mac
-  and rsync'd to Linux. Transfer **both** `_raw/databento/` and `_cache/databento/`;
-  re-fetching either costs databento money, so this is not free to rebuild the way
-  `_cache/cot_*` is. (Doing the initial download on Linux directly would have been simpler,
-  given how long it takes.)
-- **Daily:** Linux runs the databento update from then on.
+- **Producer:** the same Windows server (Norgate prices, CFTC COT).
+- **Consumer:** a remote Ubuntu VPS, read-only, `COTDATA_PRICE_SOURCE` unset (Norgate).
+- **Transport:** an `rsync` push over SSH, chained onto the producer task, using a packaged
+  rsync on Windows (cwRsync or WSL). robocopy cannot speak SSH, and SMB must never be
+  exposed over the internet, so the Mac's SMB path does not carry here. See
+  [`examples/windows/push-to-server.cmd`](examples/windows/push-to-server.cmd). The
+  exclusions match the Mac push (`_cache/`, `_raw/`, `citpy/`, `manifest.json`), so the
+  producer-internal databento bronze under `_raw/databento/` never leaves the Windows box.
+- **Auth:** key-based SSH only. A scheduled task cannot type a passphrase, so use a
+  dedicated key with `ssh -o BatchMode=yes`, never a password prompt.
 
-These two databento directories are producer-internal and are already excluded from the
-Windows -> Mac push, so the seed staged on the Mac never interferes with the research sync.
-Once the seed is confirmed on Linux and daily updates run there, the Mac may delete its own
-`_raw/databento/` and `_cache/databento/`, but not before.
+**Provider cutover (one-time).** The server previously held a databento-built store, so its
+`prices/` and `manifests/prices.json` carry databento data under the very keys the Norgate
+push writes. `sync_preflight.py` will (correctly) refuse: it sees the same
+`prices/<SYM>_<adj>.parquet` produced by a different source on each side, the 94-collision
+case from "Check before you mirror". That refusal is the tool working, not a
+misconfiguration. Resolve it once by clearing the server's `prices/` and `manifests/`
+before the first Norgate push, so the store is rebuilt as a clean Norgate replica; every
+push after that is a same-source mirror with nothing to collide.
+
+**citpy on the server.** cot-analyzer's `run-local.sh` sets
+`COTMETRICS_CITPY=$COTDATA_STORE/citpy`, but those are hand-copied, consumer-owned notes,
+not producer output. The push excludes `citpy/`, which keeps it off the Windows producer's
+books and stops `--delete` from removing it on the server. Populate it separately, on the
+server, as before.
 
 ## Prefer one producer
 
