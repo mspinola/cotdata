@@ -271,6 +271,32 @@ def _finals_ready(db_times: dict, cutoff: str = DEFAULT_FINAL_CUTOFF, now=None):
     return ready, detail
 
 
+def _finals_ready_by_date(norgate_last, store_last):
+    """Data-driven finals gate (pure core): ready when Norgate's latest continuous bar is
+    a NEWER completed session than the store already holds.
+
+    Both args are dates (or datetimes, normalized to their date; or None). Norgate is
+    end-of-day and only publishes a session's bar once that session is complete, so a
+    bar date newer than the store's is a new *settled* session to capture. This needs no
+    trading calendar (weekends/holidays simply produce no new bar) and no wall-clock
+    cutoff (early publish → ready early; late publish → not there yet → a retry catches
+    it), which is what makes it immune to Norgate's publish-time drift. Returns
+    (ready: bool, detail: dict)."""
+    def _d(x):
+        if x is None:
+            return None
+        return x.date() if isinstance(x, dt.datetime) else x
+
+    nl, sl = _d(norgate_last), _d(store_last)
+    detail = {
+        "norgate_last": nl.isoformat() if nl else None,
+        "store_last": sl.isoformat() if sl else None,
+    }
+    if nl is None:
+        return False, detail  # Norgate has no bar to offer → defer
+    return (sl is None or nl > sl), detail
+
+
 def finals_ready(cutoff: str = DEFAULT_FINAL_CUTOFF, now=None):
     """True once Norgate has this day's FINAL futures prices — i.e. it has refreshed
     both the 'Futures' and 'Continuous Futures' databases at/after today's local

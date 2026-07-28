@@ -449,3 +449,33 @@ def test_finals_ready_handles_tz_aware_times():
     assert ok is True
     ng, _ = _finals_ready({"Futures": after, "Continuous Futures": before}, "20:55", now)
     assert ng is False
+
+
+def test_finals_ready_by_date_pure_logic():
+    """Data-driven gate: ready iff Norgate has a newer settled bar than the store."""
+    import datetime as d
+
+    from cotdata.providers.norgate import _finals_ready_by_date
+    mon, tue = d.date(2026, 7, 27), d.date(2026, 7, 28)
+    # a newer settled session is available -> ready
+    ok, det = _finals_ready_by_date(tue, mon)
+    assert ok is True and det["norgate_last"] == "2026-07-28"
+    # store already holds the latest -> nothing new, not ready
+    assert _finals_ready_by_date(mon, mon)[0] is False
+    # Norgate somehow behind the store -> not ready
+    assert _finals_ready_by_date(mon, tue)[0] is False
+    # empty store -> ready on any Norgate bar
+    assert _finals_ready_by_date(mon, None)[0] is True
+    # Norgate offers nothing -> defer
+    assert _finals_ready_by_date(None, mon)[0] is False
+
+
+def test_finals_ready_by_date_normalizes_datetimes():
+    """datetimes collapse to their date: same calendar day is not 'newer'."""
+    import datetime as d
+
+    from cotdata.providers.norgate import _finals_ready_by_date
+    same_day = _finals_ready_by_date(d.datetime(2026, 7, 27, 23, 0), d.datetime(2026, 7, 27, 8, 0))
+    assert same_day[0] is False
+    next_day = _finals_ready_by_date(d.datetime(2026, 7, 28, 9, 0), d.datetime(2026, 7, 27, 20, 0))
+    assert next_day[0] is True

@@ -113,3 +113,36 @@ to confirm no calendar function exists in the installed build.
 Unit-test the pure core on any OS (no norgatedata): weekend/holiday rollover, early vs
 late publish, ref-quorum lag, and the interim guard if needed. Live-validate `finals_ready`
 against the real feed on Windows across a few evenings before flipping the default.
+
+## Probe results (Windows, 2026-07-28 daytime) — design simplified
+
+The daytime run (`scripts/probe_norgate_finals.py`) settled the open questions and made the
+design simpler than the draft above:
+
+- **No calendar API.** The only `*session*` functions (`futures_market_session_*`,
+  `session_type`) describe which contracts trade in a session, not holidays. Confirmed.
+- **`last_quoted_date` is unusable for the gate** — it returns `None` for continuous
+  symbols (it is meant for expiring instruments). The signal must come from
+  `price_timeseries`.
+- **Norgate (EOD) does not publish an in-progress session's bar.** At 11 AM Tue the latest
+  continuous bar was **Mon 7/27** (final OHLC), with **`Open Interest == 0`** while every
+  prior day was ~1.9M — `OI==0` simply marks the newest bar (OI publishes T+1). No Tuesday
+  bar existed intraday.
+
+So the gate needs **neither a trading calendar nor a wall-clock cutoff**:
+
+```
+finals_ready := norgate_latest_bar_date  >  store_latest_bar_date
+```
+
+Implemented as the pure core `_finals_ready_by_date(norgate_last, store_last)` (unit-tested,
+no norgatedata). Weekends/holidays produce no new bar (correctly no capture); publish-time
+drift is absorbed by retries; the 2026-07-27 failure could not recur (Monday's bar was
+available all along — only the clock cutoff blocked it).
+
+**Still pending before wiring into the CLI:** a two-point evening probe (before ~8:45 PM and
+after ~9:15 PM) to observe the 7/28 bar *appear*, confirming Norgate never shows it
+provisionally pre-settlement. If confirmed, `>` needs no settlement guard. Then: add
+`finals_ready()` (norgatedata I/O: read the ref symbols' latest `price_timeseries` date and
+the store's last date), keep `--final-cutoff` accepted as a deprecated fallback, and
+live-validate a few nights before flipping the default.
