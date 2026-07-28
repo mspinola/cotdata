@@ -69,13 +69,14 @@ def main(argv=None, half=None) -> None:
                    help="Full rebuild of reconstructed volume (ignore the incremental "
                         "60-day window). Use after a reconstruction-logic change.")
     p.add_argument("--require-final", action="store_true",
-                   help="For --prices: only fetch once Norgate's FINAL futures prices are "
-                        "in (last_database_update_time for 'Futures' and 'Continuous Futures' "
-                        ">= --final-cutoff today). Otherwise defer with a non-zero exit so a "
-                        "scheduler retries. Avoids capturing interim (non-final) bars.")
+                   help="For --prices: only fetch once Norgate has a NEWER settled continuous "
+                        "bar than the store already holds (a new session has landed). "
+                        "Otherwise defer with a non-zero exit so a scheduler retries. Immune "
+                        "to Norgate's publish-time drift; needs no cutoff or calendar.")
     p.add_argument("--final-cutoff", default="20:55", metavar="HH:MM",
-                   help="Local time after which Norgate's futures Finals are expected "
-                        "(default 20:55, ≈ Continuous Futures Final in ET).")
+                   help="DEPRECATED and ignored: the finals gate is now data-driven "
+                        "(newer-bar-than-store), not a wall-clock cutoff. Accepted so "
+                        "existing schedulers do not break.")
     p.add_argument("--check", action="store_true",
                    help="Print store status (row counts, newest data, staleness) from "
                         "the manifest and exit. Read-only, cross-platform, no network.")
@@ -170,10 +171,10 @@ def main(argv=None, half=None) -> None:
     if args.prices:
         ready = True
         if args.require_final:
-            ready, detail = norgate.finals_ready(args.final_cutoff)
+            ready, detail = norgate.finals_ready()
             if not ready:
-                print(f"prices: Norgate Finals not in yet (--require-final, cutoff "
-                      f"{args.final_cutoff}) — deferring. {detail}")
+                print(f"prices: no new settled Norgate bar yet (--require-final) "
+                      f"— deferring. {detail}")
                 deferred.append("prices")
         if ready:
             last_run = norgate.update(symbols=args.symbols, full=args.full)

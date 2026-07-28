@@ -479,3 +479,42 @@ def test_finals_ready_by_date_normalizes_datetimes():
     assert same_day[0] is False
     next_day = _finals_ready_by_date(d.datetime(2026, 7, 28, 9, 0), d.datetime(2026, 7, 27, 20, 0))
     assert next_day[0] is True
+
+
+def test_finals_ready_quorum():
+    """Ready only when EVERY reference symbol has a newer settled bar than the store."""
+    import datetime as d
+
+    from cotdata.providers.norgate import _finals_ready_quorum
+    mon, tue = d.date(2026, 7, 27), d.date(2026, 7, 28)
+    ok, det = _finals_ready_quorum(
+        {"ES": tue, "CL": tue, "ZC": tue}, {"ES": mon, "CL": mon, "ZC": mon})
+    assert ok is True and det["mode"] == "data"
+    # one reference still lagging (Norgate hasn't published it) -> defer, wait for all
+    ng, _ = _finals_ready_quorum(
+        {"ES": tue, "CL": mon, "ZC": tue}, {"ES": mon, "CL": mon, "ZC": mon})
+    assert ng is False
+    # nothing new anywhere -> not ready
+    assert _finals_ready_quorum({"ES": mon, "CL": mon}, {"ES": mon, "CL": mon})[0] is False
+
+
+def test_finals_ready_gathers_and_delegates(monkeypatch):
+    """finals_ready reads norgate+store dates per ref symbol and delegates to the quorum;
+    the legacy `cutoff` arg is accepted but ignored."""
+    import datetime as d
+
+    from cotdata.providers import norgate
+    monkeypatch.setattr(norgate, "_require_norgate_service", lambda: None)
+    ng = {s: d.date(2026, 7, 28) for s in norgate._FINALS_REF_SYMBOLS}
+    st = {s: d.date(2026, 7, 27) for s in norgate._FINALS_REF_SYMBOLS}
+    monkeypatch.setattr(norgate, "_norgate_last_bar_date", lambda s: ng[s])
+    monkeypatch.setattr(norgate, "_store_last_bar_date", lambda s: st[s])
+    ready, detail = norgate.finals_ready()
+    assert ready is True
+    assert set(detail["per_symbol"]) == set(norgate._FINALS_REF_SYMBOLS)
+    assert norgate.finals_ready("20:55")[0] is True  # cutoff ignored
+
+    # a lagging reference (Norgate hasn't advanced it) keeps the whole gate closed
+    monkeypatch.setattr(norgate, "_norgate_last_bar_date",
+                        lambda s: d.date(2026, 7, 27) if s == norgate._FINALS_REF_SYMBOLS[0] else ng[s])
+    assert norgate.finals_ready()[0] is False

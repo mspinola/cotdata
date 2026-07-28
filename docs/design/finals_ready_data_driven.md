@@ -1,6 +1,9 @@
 # Data-driven `finals_ready` (replace the fixed-clock cutoff)
 
-Status: DRAFT / spec. Blocked on one Windows-only probe (see "Open question").
+Status: IMPLEMENTED, pending live validation on the Windows producer. The daytime probe
+answered the open question (Norgate never shows an in-progress session's bar); the gate is
+wired data-driven with unit tests. What remains is a few nights confirming it flips ready at
+the right moment against the live feed.
 
 ## Problem
 
@@ -140,9 +143,26 @@ no norgatedata). Weekends/holidays produce no new bar (correctly no capture); pu
 drift is absorbed by retries; the 2026-07-27 failure could not recur (Monday's bar was
 available all along — only the clock cutoff blocked it).
 
-**Still pending before wiring into the CLI:** a two-point evening probe (before ~8:45 PM and
-after ~9:15 PM) to observe the 7/28 bar *appear*, confirming Norgate never shows it
-provisionally pre-settlement. If confirmed, `>` needs no settlement guard. Then: add
-`finals_ready()` (norgatedata I/O: read the ref symbols' latest `price_timeseries` date and
-the store's last date), keep `--final-cutoff` accepted as a deprecated fallback, and
-live-validate a few nights before flipping the default.
+### What shipped
+
+- `_finals_ready_by_date(norgate_last, store_last)` — pure per-symbol core.
+- `_finals_ready_quorum(norgate_dates, store_dates)` — pure combiner; ready only when
+  EVERY reference symbol (`_FINALS_REF_SYMBOLS = ES, CL, ZC`) has a newer settled bar than
+  the store, so a session is captured once and complete.
+- `finals_ready()` — thin norgatedata I/O: reads each ref's latest continuous bar date
+  (`_norgate_last_bar_date`, a short trailing `price_timeseries` window) and the store's
+  last captured date (`_store_last_bar_date`, from the prices manifest), then delegates to
+  the quorum. Guards on `_require_norgate_service()`.
+- CLI: `--require-final` now uses this; `--final-cutoff` is accepted-but-ignored
+  (deprecated) so no scheduler breaks. The legacy `_finals_ready` clock core is retained,
+  unused, for reference/rollback.
+- Unit tests cover the core, the quorum (all-advance vs one lagging), the wiring, and the
+  ignored `cutoff` arg — all norgatedata-free.
+
+### Remaining: live validation (Windows)
+
+A couple of evenings confirming `finals_ready` flips to ready when the new settled bar lands
+(and that a same-session re-run stays not-ready). The optional two-point evening probe
+(before ~8:45 PM, after ~9:15 PM) is a nice confirmation of the transition but is no longer a
+blocker — the daytime probe already showed Norgate does not expose an in-progress session's
+bar.
