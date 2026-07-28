@@ -24,6 +24,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off ETF proxies. Adds the MSCI EM (MME→EEM) and EAFE (MFS→EFA) held-out
   generalization markets. ([#24](https://github.com/mspinola/cotdata/pull/24))
 
+### Changed
+- **`--require-final` price gate is now data-driven, not a wall-clock cutoff.**
+  `finals_ready` previously deferred until Norgate's `Futures` and `Continuous
+  Futures` databases were both refreshed at/after a fixed local time
+  (`--final-cutoff`, default 20:55). That is fragile by construction: the cutoff
+  must sit below the earliest evening final yet above any daytime interim, and
+  Norgate's publish time drifts. On 2026-07-27 Norgate finalized the Futures DB at
+  8:49pm, so the `>= 20:55` check never turned true and prices went stale for the
+  day. The gate now asks the robust question — does Norgate hold a **newer settled
+  continuous bar** than the store already has? — across a liquid reference quorum
+  (ES, CL, ZC). It is immune to publish-time drift (early publish → ready early,
+  late publish → a retry catches it) and needs no trading calendar (weekends and
+  holidays simply produce no new bar). `--final-cutoff` is accepted but ignored
+  (deprecated) so existing schedulers do not break. See
+  `docs/design/finals_ready_data_driven.md`.
+
 ### Fixed
 - **`databento.fetch_daily_ohlc`'s `start_date` parameter now actually does
   something** (dormant provider). It was previously silently ignored on every

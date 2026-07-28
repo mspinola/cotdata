@@ -28,6 +28,9 @@ FINAL_DATABASES = ("Futures", "Continuous Futures")
 # Default local-time cutoff after which Norgate's "Final" futures prices are in
 # (≈ Continuous Futures Final at ~8:55pm ET per Norgate's update schedule).
 DEFAULT_FINAL_CUTOFF = "20:55"
+# Liquid continuous reference symbols for the data-driven finals gate: each trades every
+# US futures session, so a newer settled bar on all of them means a session has landed.
+_FINALS_REF_SYMBOLS = ("ES", "CL", "ZC")
 # If roll-day overnight moves exceed this multiple of the normal-day median, the
 # series looks UNADJUSTED (calendar-spread gaps not stitched). Self-calibrating
 # per symbol, so it works across products with different spread magnitudes.
@@ -253,7 +256,11 @@ def _to_naive_local(t):
 
 
 def _finals_ready(db_times: dict, cutoff: str = DEFAULT_FINAL_CUTOFF, now=None):
-    """Pure core of :func:`finals_ready` — testable without norgatedata.
+    """LEGACY wall-clock finals core, superseded by the data-driven gate
+    (:func:`_finals_ready_by_date` / :func:`finals_ready`). Retained for reference and
+    rollback; no CLI path uses it. It broke in production because a fixed clock cutoff
+    must sit below the earliest evening final yet above any daytime interim, and Norgate's
+    publish time drifts (see docs/design/finals_ready_data_driven.md).
 
     db_times maps database name → its last-update datetime (tz-aware or naive local,
     or None). Ready when every database was refreshed at/after today's `cutoff`
@@ -271,15 +278,85 @@ def _finals_ready(db_times: dict, cutoff: str = DEFAULT_FINAL_CUTOFF, now=None):
     return ready, detail
 
 
-def finals_ready(cutoff: str = DEFAULT_FINAL_CUTOFF, now=None):
-    """True once Norgate has this day's FINAL futures prices — i.e. it has refreshed
-    both the 'Futures' and 'Continuous Futures' databases at/after today's local
-    `cutoff`. Uses norgatedata.last_database_update_time (the local PC time of the
-    last DB refresh). Lets a scheduled run avoid capturing interim (non-final) bars.
-    Returns (ready: bool, detail: dict)."""
+def _finals_ready_by_date(norgate_last, store_last):
+    """Data-driven finals gate (pure core): ready when Norgate's latest continuous bar is
+    a NEWER completed session than the store already holds.
+
+    Both args are dates (or datetimes, normalized to their date; or None). Norgate is
+    end-of-day and only publishes a session's bar once that session is complete, so a
+    bar date newer than the store's is a new *settled* session to capture. This needs no
+    trading calendar (weekends/holidays simply produce no new bar) and no wall-clock
+    cutoff (early publish → ready early; late publish → not there yet → a retry catches
+    it), which is what makes it immune to Norgate's publish-time drift. Returns
+    (ready: bool, detail: dict)."""
+    def _d(x):
+        if x is None:
+            return None
+        return x.date() if isinstance(x, dt.datetime) else x
+
+    nl, sl = _d(norgate_last), _d(store_last)
+    detail = {
+        "norgate_last": nl.isoformat() if nl else None,
+        "store_last": sl.isoformat() if sl else None,
+    }
+    if nl is None:
+        return False, detail  # Norgate has no bar to offer → defer
+    return (sl is None or nl > sl), detail
+
+
+def _finals_ready_quorum(norgate_dates: dict, store_dates: dict):
+    """Combine per-reference results into the finals gate (pure/testable): ready only when
+    EVERY reference symbol has a newer settled bar in Norgate than the store already holds.
+    Requiring the whole quorum means a session is captured once and complete, and one
+    lagging reference cannot green-light a partial capture. Returns (ready, detail)."""
+    per, ready_all = {}, True
+    for sym in norgate_dates:
+        r, d = _finals_ready_by_date(norgate_dates.get(sym), store_dates.get(sym))
+        per[sym] = {**d, "ready": r}
+        ready_all = ready_all and r
+    return ready_all, {"mode": "data", "per_symbol": per}
+
+
+def _norgate_last_bar_date(sym: str):
+    """Latest continuous (back-adjusted) bar date Norgate holds for internal `sym`, or None.
+    Pulls a short trailing window (cheap) and takes the last index. Norgate is end-of-day
+    and only publishes a session's bar once settled, so this date advances exactly when a
+    new final session lands — the signal the gate keys on."""
     import norgatedata  # Windows producer only
-    times = {db: norgatedata.last_database_update_time(db) for db in FINAL_DATABASES}
-    return _finals_ready(times, cutoff, now)
+    ng_sym = REGISTRY[sym].norgate + CCB_SUFFIX
+    start = (dt.date.today() - dt.timedelta(days=10)).isoformat()
+    df = norgatedata.price_timeseries(
+        ng_sym,
+        padding_setting=norgatedata.PaddingType.NONE,
+        timeseriesformat="pandas-dataframe",
+        start_date=start,
+    )
+    if df is None or len(df) == 0:
+        return None
+    return pd.to_datetime(df.index[-1]).tz_localize(None).normalize().date()
+
+
+def _store_last_bar_date(sym: str):
+    """Latest date already captured in the store for internal `sym` (back-adjusted), or
+    None if the store has never seen it. Read from the prices manifest — no price I/O."""
+    prices = store.load_manifest().get("prices", {})
+    ld = (prices.get(f"{sym}_backadj") or {}).get("last_date")
+    return pd.to_datetime(ld).date() if ld else None
+
+
+def finals_ready(cutoff=None, now=None, ref_symbols=_FINALS_REF_SYMBOLS):
+    """Ready once Norgate has a NEWER settled continuous bar than the store, for a quorum of
+    liquid reference symbols (data-driven finals gate). Replaces the old wall-clock cutoff:
+    immune to Norgate's publish-time drift (early publish → ready early; late publish → not
+    there yet → a retry catches it) and needs no trading calendar (weekends and holidays
+    simply produce no new bar). See docs/design/finals_ready_data_driven.md.
+
+    `cutoff` and `now` are accepted for backward compatibility and IGNORED — the clock gate
+    is deprecated. Returns (ready: bool, detail: dict)."""
+    _require_norgate_service()  # NDU-down guard: norgatedata calls bare sys.exit otherwise
+    norgate_dates = {s: _norgate_last_bar_date(s) for s in ref_symbols}
+    store_dates = {s: _store_last_bar_date(s) for s in ref_symbols}
+    return _finals_ready_quorum(norgate_dates, store_dates)
 
 
 def _norgate_covered(symbols):
