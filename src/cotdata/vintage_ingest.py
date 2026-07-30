@@ -180,10 +180,17 @@ def read_observations(report_years=None) -> pd.DataFrame:
 
 
 def _latest_by_key(obs: pd.DataFrame) -> pd.DataFrame:
-    """Most recent (max observed_at) observation per natural key."""
+    """Most recent observation per natural key, with a DETERMINISTIC tie-break.
+
+    Ordering is (observed_at, snapshot_id) ascending → take the last per key. When two
+    snapshots share an ``observed_at`` (same-second ingests), the lexicographically
+    greater ``snapshot_id`` wins rather than whichever row happened to land first in
+    file/append order. Capture snapshot_ids lead with a compact retrieved_at timestamp,
+    so that ordering also tracks retrieval time. A stable sort keeps it reproducible."""
     if obs.empty:
         return obs
-    idx = obs.groupby(NATURAL_KEY, dropna=False)["observed_at"].idxmax()
+    ordered = obs.sort_values(["observed_at", "snapshot_id"], kind="mergesort")
+    idx = ordered.groupby(NATURAL_KEY, dropna=False, sort=False).tail(1).index
     return obs.loc[idx]
 
 

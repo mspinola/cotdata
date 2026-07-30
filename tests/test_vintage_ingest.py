@@ -123,6 +123,26 @@ def test_validation_failure_raises_before_writing(store_env):
     assert vi.read_observations().empty  # nothing partially written
 
 
+def test_asof_tiebreak_is_deterministic(store_env):
+    """Two snapshots sharing an observed_at must resolve deterministically: the
+    lexicographically greater snapshot_id wins, NOT file/append order. Append order is
+    set opposite to the winner so a naive first-occurrence pick would return 'a-early'."""
+    from cotdata import vintage_ingest as vi
+    t = dt.datetime(2026, 7, 24, 16, 0, tzinfo=dt.timezone.utc)
+    # appended first (lower index): 'a-early' = 111111
+    vi.ingest_canonical(_canon("2026-07-21", comm_short=111111), snapshot_id="a-early", observed_at=t)
+    # appended second (higher index): 'z-late' = 222222, same observed_at → a genuine tie
+    vi.ingest_canonical(_canon("2026-07-21", comm_short=222222), snapshot_id="z-late", observed_at=t)
+
+    comm = vi.asof(t, report_date="2026-07-21", market_code="088691")
+    comm = comm[comm["category"] == "commercial"].iloc[0]
+    # naive first-occurrence would pick a-early (111111); deterministic picks z-late
+    assert comm["snapshot_id"] == "z-late" and comm["short_contracts"] == 222222
+    # stable across repeated calls
+    again = vi.asof(t, report_date="2026-07-21", market_code="088691")
+    assert again[again["category"] == "commercial"].iloc[0]["snapshot_id"] == "z-late"
+
+
 def test_oi_over_sum_warns_not_raises(store_env):
     from cotdata import vintage_ingest as vi
     # commercial long+short (200000+250000) already < OI; force a breach on OI instead

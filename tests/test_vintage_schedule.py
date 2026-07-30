@@ -79,6 +79,35 @@ def test_backfill_derives_when_no_schedule(store_env):
     assert counts["derived"] == 3 and counts["announced"] == 0
 
 
+def test_backfill_is_idempotent_and_does_not_downgrade_observed(store_env):
+    """Re-running backfill must not downgrade an `observed` release date to `scheduled`.
+    Precedence is enforced on every write (full re-resolve), so a live-captured row whose
+    observed_at is near its report_date stays `observed` even when a schedule entry exists."""
+    from cotdata import vintage_ingest as vi
+    from cotdata import vintage_schedule as vs
+    # captured live: observed_at 3 days after report_date (within the 4-day window)
+    _ingest_one("2026-07-21", observed_at=dt.datetime(2026, 7, 24, 16, tzinfo=dt.timezone.utc))
+    schedule = pd.DataFrame([{
+        "report_date": pd.Timestamp("2026-07-21"),
+        "release_date": pd.Timestamp("2026-07-25"),  # a competing `scheduled` date
+        "source": "scheduled", "note": "", "ingested_at": pd.Timestamp.now("UTC"),
+    }])
+
+    c1 = vs.backfill(schedule=schedule)
+    obs1 = vi.read_observations()
+    src1 = set(obs1["release_date_source"])
+    rel1 = pd.Timestamp(obs1.iloc[0]["release_date"]).date()
+
+    c2 = vs.backfill(schedule=schedule)  # re-run
+    obs2 = vi.read_observations()
+
+    assert c1 == c2  # idempotent counts
+    assert src1 == {"observed"}                      # observed wins over scheduled
+    assert rel1 == dt.date(2026, 7, 24)              # = observed_at, not the scheduled date
+    assert set(obs2["release_date_source"]) == {"observed"}  # not downgraded on re-run
+    assert list(obs1["release_date"]) == list(obs2["release_date"])
+
+
 def test_announcement_parse_is_best_effort():
     from cotdata.vintage_schedule import _parse_announcements
     html = "<ul><li>January 5, 2026: revised gold report</li><li></li></ul>"
