@@ -35,9 +35,22 @@ set COTDATA_STORE=REPLACE_WITH_STORE_PATH
 
 Using the full venv `\Scripts\cotdata-prices.exe` / `\Scripts\cotdata-cot.exe` path (rather than relying on the command being on `PATH`) matters here: Task Scheduler runs with a different, often bare, environment than your interactive shell, so a bare command name that resolves fine in Command Prompt can fail to resolve under the scheduler.
 
+`run-vintage.cmd` — **optional**, the as-published (vintage) capture. Copy
+[`docs/examples/windows/run-vintage.cmd`](examples/windows/run-vintage.cmd); it runs
+`cotdata-vintage fetch` then `ingest --pending`, both exit-code guarded. Two things to know
+before enabling it:
+
+- **It belongs on the producer.** Capture fetches from CFTC, so it is a producer action —
+  and a vintage tree written on a mirrored replica is deleted by the next sync, which is
+  unrecoverable because CFTC serves current state only. See [SYNCING.md](SYNCING.md).
+- **Schedule it daily, not weekly.** Nearly every request returns 304, so a daily run costs
+  almost nothing while catching holiday-shifted and backlog releases with no schedule logic.
+
+
+
 ## Creating the tasks
 
-Create three tasks — times are the **machine's local** time; convert from ET if it isn't on Eastern:
+Create three tasks (plus an optional fourth if you enable vintage capture) — times are the **machine's local** time; convert from ET if it isn't on Eastern:
 
 ```bat
 :: 1) Prices — fire at the Continuous Futures Final (~8:55pm ET); --require-final + restart
@@ -46,6 +59,11 @@ schtasks /Create /TN "cotdata prices" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 2
 
 :: 2) COT — daily morning catch-up for holiday-delayed releases and as a safety net
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
+
+:: 3) Vintage (OPTIONAL) — as-published capture, ~90 min after the 15:30 ET release.
+::    Daily is deliberate: almost every request 304s, so it is nearly free, and it
+::    tightens the observed release date from a 7-day bound to a 1-day one.
+schtasks /Create /TN "cotdata vintage" /TR "<DIR>\run-vintage.cmd" /SC DAILY /ST 17:00
 ```
 
 > **Substitute `<DIR>` before running these** — with the real folder holding your `.cmd` files, e.g. `C:\Users\you\code\cotdata\scheduler`. `schtasks` takes the quoted `/TR` value as a literal string and **does not check the file exists**, so a leftover `"<DIR>\run-cot.cmd"` is accepted without error and creates a task that fails only when it fires. Verify each task points somewhere real:

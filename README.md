@@ -28,7 +28,7 @@ cotdata separates *fetching* data (a "producer" that talks to vendors) from *usi
 
 ## Contents
 
-- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Reading data](#reading-data-consumer) · [Producing data](#producing-data-producer) · [Windows setup](docs/WINDOWS_SETUP.md) · [Scheduling on Windows](docs/WINDOWS_SCHEDULING.md) · [Scheduling on Linux](docs/LINUX_SCHEDULING.md) · [Syncing the store](docs/SYNCING.md) · [Operations](#operations) · [Concepts & design](#concepts--design) · [Reference: schemas](#reference-data-schemas) · [Reference: COT formats](#reference-cot-formats-explained) · [Diagnostics](#diagnostics) · [Development](#development) · [Contributing](#contributing) · [License](#license)
+- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Reading data](#reading-data-consumer) · [Producing data](#producing-data-producer) · [Windows setup](docs/WINDOWS_SETUP.md) · [Scheduling on Windows](docs/WINDOWS_SCHEDULING.md) · [Scheduling on Linux](docs/LINUX_SCHEDULING.md) · [Syncing the store](docs/SYNCING.md) · [Operations](#operations) · [Concepts & design](#concepts--design) · [COT vintage tracking](#cot-vintage-tracking-as-published-history) · [Reference: schemas](#reference-data-schemas) · [Reference: COT formats](#reference-cot-formats-explained) · [Diagnostics](#diagnostics) · [Development](#development) · [Contributing](#contributing) · [License](#license)
 
 ## Quickstart
 
@@ -85,6 +85,9 @@ The store layout:
 - `metadata/contract_specs.parquet` — Norgate contract specifications (tick size, point value, margin).
 - `manifest.json` — per-table `last_date`, `n_rows`, `source`, `updated_at`, `schema_version`.
 - `status.json` — machine-readable new-data signal for downstream tools (see [Operations](#operations)).
+- `vintage/` — optional as-published (vintage) capture: retained raw CFTC downloads plus
+  change-only observations and field-level revisions. Purely additive; the tables above are
+  unchanged whether or not it is enabled. See [COT vintage tracking](#cot-vintage-tracking-as-published-history).
 
 ## Reading data (consumer)
 
@@ -128,6 +131,7 @@ COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (
 COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggregated (any OS)
 COTDATA_STORE=/store  cotdata-update --cot-tff                   # CFTC Traders in Financial Futures (any OS)
 COTDATA_STORE=/store  cotdata-update --cot-all                   # all three CFTC COT reports
+COTDATA_STORE=/store  cotdata-vintage fetch                      # optional: capture as-published COT (any OS)
 ```
 
 `--prices` with no `--symbols` updates every symbol in the registry; add `--symbols` to scope it. Each run prints a per-symbol line with the date advance (e.g. `ES: … [2026-07-13 -> 2026-07-14]`) and a summary footer (OK/failed counts, rows written, elapsed, newest date). A run **exits non-zero** if a fetch hard-fails (Norgate/CFTC unreachable), so a scheduler can retry — see [Scheduling on Windows](#scheduling-on-windows-task-scheduler).
@@ -226,6 +230,12 @@ Anything a consumer put in the store by hand is a **correctness** issue rather t
 saving. No producer creates it, so a mirroring sync deletes it. Exclude it, but the real
 fix is to keep it out of the store: the store belongs to its producer.
 
+The same rule bites hardest on `vintage/` if you enable it, because that data cannot be
+re-fetched: capture it on the **producer** so it syncs outward, or keep it outside the
+mirrored store with `COTDATA_VINTAGE_ROOT`. Its provenance index is deliberately named
+`snapshots.json`, since the usual `manifest.json` exclusion matches by name at any depth
+and would otherwise strip it in transit, delivering raw archives with no index.
+
 Consumer cloud sync (Dropbox, Google Drive) is a poor fit here: conflict copies land
 inside the store, and on-demand placeholder files break `read_parquet` on the machine
 doing research.
@@ -310,6 +320,63 @@ The supported futures contracts are defined in a YAML registry, so adding a mark
 ### Atomic store
 
 The store uses **atomic writes** (write-temp-then-rename). Consumers can safely query via `get_prices` / `get_cot` even while `cotdata-update` is actively downloading and writing.
+
+### COT vintage tracking (as-published history)
+
+CFTC revises COT data after publication — most consequentially through **trader
+reclassification**, which moves positions between categories retroactively. Because
+downstream signals are rolling z-scores and percentiles against years of history, a
+restatement silently rewrites the baseline every historical reading was computed against.
+There is precedent: in July 2008 the Commission revised reports back to July 3, 2007.
+
+**CFTC serves current state only.** There is no vintage archive and no as-published
+endpoint, so vintage data can only be accumulated going forward — every uncaptured week is
+a permanent blind spot in the part of the series most likely to have been revised.
+
+This is **opt-in and purely additive**: if you never run it, the store behaves exactly as
+before. Enabling it adds a `vintage/` subtree.
+
+```bash
+cotdata-vintage fetch                      # capture current year + weekly static (daily)
+cotdata-vintage fetch --all                # every year 1986-present (see below)
+cotdata-vintage ingest --pending           # parse retained raw -> observations + revisions
+cotdata-vintage diff --since 2026-01-01    # field-level revisions, with revision depth
+cotdata-vintage asof --as-of 2026-07-24T18:00:00 --report-date 2026-07-21
+cotdata-schedule sync                      # CFTC Special Announcements
+cotdata-schedule backfill                  # resolve release_date + its provenance
+```
+
+How it works:
+
+- **Immutable landing zone.** Every fetch is recorded (including 304s) and raw bytes are
+  retained permanently under `vintage/raw/`, written atomically and never rewritten. A
+  byte-identical regeneration is deduped — a changed download is not itself a revision.
+- **Change-only observations.** A row is written only when its value hash differs from the
+  latest for its natural key `(report_date, market_code, report_type, combined, category)`,
+  so storage grows with actual revisions rather than with time.
+- **Field-level revisions** carry `age_days` (revision depth): whether revisions stay in
+  recent weeks or reach back into the calibration window determines how much the rest of
+  a system has to care.
+- **Point-in-time reads.** `asof(t)` returns each key's latest value observed at or before
+  `t`, reconstructing what was actually knowable then.
+- **Release dates with provenance.** `report_date` is stored exactly as reported (never
+  normalized to Tuesday), and `release_date` is resolved through
+  `published > observed > announced > scheduled > derived`, with the source recorded — a
+  release date without provenance is worse than none, since indexing on `report_date`
+  embeds a lookahead (three days normally, weeks during a backlog).
+
+**Run capture on the producer, not a replica**, and schedule it **daily**: nearly every
+request returns 304, so a daily run is close to free while catching holiday-shifted and
+backlog releases with no schedule logic. `--all` is a **restatement tripwire** rather than
+a backfill — closed years are byte-frozen, so a checksum change on one is the retroactive-
+restatement signature; monthly or quarterly is the right cadence, and it is cheap because
+almost everything 304s. Full design notes, including the measured CFTC caching behaviour,
+are in [docs/design/cot_vintage.md](docs/design/cot_vintage.md).
+
+> **Replica warning.** The vintage tree must not be written on a machine whose store is
+> mirrored (`robocopy /MIR`, `rsync --delete`) from a producer: the mirror deletes
+> destination-only files and the data is irreplaceable. Capture on the producer, or set
+> `COTDATA_VINTAGE_ROOT` to a path outside the mirrored store. See [docs/SYNCING.md](docs/SYNCING.md).
 
 ## Local development
 
