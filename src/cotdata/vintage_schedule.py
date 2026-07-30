@@ -179,7 +179,7 @@ ANNOUNCEMENTS_URL = ("https://www.cftc.gov/MarketReports/CommitmentsofTraders/"
 
 def _fetch_html(url: str) -> str:
     import requests
-    r = requests.get(url, headers={"User-Agent": vintage._UA}, timeout=120)
+    r = requests.get(url, headers={"User-Agent": vintage.user_agent()}, timeout=120)
     r.raise_for_status()
     return r.text
 

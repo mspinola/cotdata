@@ -62,6 +62,48 @@ the sandbox caveat noted in CLAUDE.md):
    overwritten file, **not a frozen historical archive** — no further historical
    vintage recovery is possible through them.
 
+## 3b. Measured: sha churn on annual zips (2026-07-30)
+
+Open question was whether zip regeneration rewrites embedded entry timestamps, which
+would make every annual file a new sha every week (byte-dedupe never fires, a fresh
+multi-MB copy retained weekly). **Measured, and it does not.**
+
+| File | HTTP `Last-Modified` | inner entry mtime | Reading |
+|---|---|---|---|
+| `dea_fut_xls_2015.zip` | — | 2015-12-31 | frozen at year end |
+| `dea_fut_xls_2024.zip` | — | 2025-01-03 | frozen just after year end |
+| `dea_fut_xls_2025.zip` | **2026-07-24** (this week) | **2026-01-02** | `Last-Modified` churns weekly; CONTENT frozen since January |
+| `dea_fut_xls_2026.zip` | 2026-07-24 | 2026-07-23 | current year: genuinely regenerated, real new data |
+
+Two consequences:
+
+1. **Closed years dedupe to nothing.** Their `Last-Modified` is re-touched weekly (so a
+   conditional GET may still transfer), but the bytes are identical, so `content_sha256`
+   matches and the dedupe branch retains no second copy. `--all` on a schedule is
+   therefore cheap in storage, contrary to the worry — it costs bandwidth, not disk.
+   This is precisely the case §3.4's "changed download is not a revision" exists for.
+2. **The current year does churn weekly**, correctly: a new report is appended, so the
+   sha genuinely changes and a new ~5-8 MB snapshot is retained. At the default
+   (3 annual + 1 weekly static) that is roughly **20 MB/week, ~1 GB/year** — small in
+   absolute terms but large enough that a retention policy should be a deliberate
+   decision, not a discovery. Options: keep all (simplest, ~1 GB/yr), or keep the raw
+   file only when the parsed values differ from the previous vintage.
+
+## 3c. Decision: futures-only, `combined` is constant-False for now
+
+`annual_sources` fetches `dea_fut_xls` / `fut_disagg_txt` / `fut_fin_txt` — all
+**futures-only**. The futures-and-options-combined files are NOT fetched, so the
+`combined` dimension of the natural key is `False` for every row today.
+
+This is a **deliberate carry-forward, not an omission**: the existing producer has only
+ever fetched futures-only (discovery §2.3), and this task's stated non-goal is to avoid
+changing existing fetch scope. `combined` stays in the natural key so the two series can
+never silently merge into one time series (§6) if/when combined files are added — adding
+them later is a fetch-list change, with no schema migration.
+
+Consequence to be explicit about: **half the reportable universe is absent** until that
+happens. Anything needing futures-and-options-combined positioning is blocked on this.
+
 ## 4. Design as adapted to this repo
 
 Layout under `$COTDATA_STORE/vintage/` (a new subtree, disjoint from `current/` which

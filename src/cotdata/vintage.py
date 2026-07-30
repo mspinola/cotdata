@@ -36,9 +36,22 @@ from pathlib import Path
 
 from . import config
 
-_UA = "cotdata-vintage/0.1 (COT research; contact matt.spinola@gmail.com)"
+# Descriptive UA, overridable per deployment via COTDATA_USER_AGENT. Deliberately not a
+# personal address in committed source: appropriate to send to CFTC, not to publish.
+_DEFAULT_UA = "cotdata-vintage/0.1 (+https://github.com/mspinola/cotdata)"
 _RATE_LIMIT_S = 1.0  # polite spacing between real network requests
 SCHEMA_VERSION = 1
+
+# Byte-level floor per source kind: the analogue of §5's row-count band. A truncated or
+# empty 200 body would otherwise be retained as a legitimate snapshot (``content is None``
+# does not catch ``b""``). Deliberately conservative — the smallest real annual zip
+# (1986) is far above this, so the floor only ever catches a broken response.
+_MIN_BYTES = {"annual_zip": 1024, "weekly_static": 1024}
+_MIN_BYTES_DEFAULT = 512
+
+
+def user_agent() -> str:
+    return os.environ.get("COTDATA_USER_AGENT", "").strip() or _DEFAULT_UA
 
 
 # ── Paths ───────────────────────────────────────────────────────────────────
@@ -47,6 +60,9 @@ def vintage_root() -> Path:
 
 
 def raw_dir(source_kind: str, year: int | str) -> Path:
+    """Partition for retained raw bytes. For sources with no report year (the weekly
+    static) the caller passes the CAPTURE year — 'current/' would be actively wrong the
+    moment it stopped being current."""
     return vintage_root() / "raw" / source_kind / str(year)
 
 
@@ -107,7 +123,7 @@ def _http_get(url: str, *, etag: str | None, last_modified: str | None) -> HttpR
     """
     import requests  # local import: keeps the module importable without network deps
 
-    headers = {"User-Agent": _UA}
+    headers = {"User-Agent": user_agent()}
     if etag:
         headers["If-None-Match"] = etag
     if last_modified:
@@ -122,14 +138,39 @@ def _http_get(url: str, *, etag: str | None, last_modified: str | None) -> HttpR
 
 
 # ── Manifest (self-owned, append-only snapshot index) ───────────────────────
+class CorruptManifestError(RuntimeError):
+    """The vintage manifest exists but could not be parsed.
+
+    Never recovered from by returning an empty manifest: the next write would then
+    overwrite the damaged file with that empty structure, and the manifest is the ONLY
+    mapping from snapshot_id to url / sha / retrieval time / parse status. Losing it
+    leaves a directory of opaquely-named blobs while the raw bytes themselves survive —
+    the worst outcome available in this module, and reachable from one interrupted write.
+    """
+
+
 def _read_manifest() -> dict:
     p = manifest_path()
     if not p.exists():
         return {"schema_version": SCHEMA_VERSION, "snapshots": []}
     try:
         m = json.loads(p.read_text())
-    except json.JSONDecodeError:
-        return {"schema_version": SCHEMA_VERSION, "snapshots": []}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        stamp = _utcnow().strftime("%Y%m%dT%H%M%SZ")
+        quarantine = p.with_suffix(f".json.corrupt.{stamp}")
+        try:
+            os.replace(p, quarantine)
+        except OSError:
+            quarantine = None
+        raise CorruptManifestError(
+            f"{p} is unreadable ({e}). "
+            + (f"Moved aside to {quarantine}. " if quarantine else "Could not move it aside. ")
+            + "Raw bytes under vintage/raw/ are intact and self-describing (each filename "
+              "carries its sha256 prefix); rebuild the index from them rather than "
+              "letting an empty manifest overwrite the record."
+        ) from e
+    if not isinstance(m, dict):
+        raise CorruptManifestError(f"{p} does not contain a JSON object.")
     m.setdefault("snapshots", [])
     m.setdefault("schema_version", SCHEMA_VERSION)
     return m
@@ -144,8 +185,28 @@ def _write_manifest(m: dict) -> None:
 
 
 def _latest_for_url(snapshots: list[dict], url: str) -> dict | None:
-    prev = [s for s in snapshots if s.get("source_url") == url]
-    return prev[-1] if prev else None
+    """Most recent snapshot for a URL, by an EXPLICIT max over retrieved_at rather than
+    'last element'. The list is append-only and chronological today, but an implicit
+    ordering assumption is exactly what breaks when a merge or dedupe pass is added
+    later. Ties fall back to list position, which preserves today's behaviour."""
+    prev = [(s.get("retrieved_at") or "", i, s)
+            for i, s in enumerate(snapshots) if s.get("source_url") == url]
+    if not prev:
+        return None
+    return max(prev, key=lambda t: (t[0], t[1]))[2]
+
+
+def _snapshot_id(retrieved_at: str, url: str, tag: str) -> str:
+    """Unique per (retrieval second, url, content-state).
+
+    The URL discriminator is load-bearing: _utcnow() truncates to whole seconds, so
+    several sources returning 304 within one second would otherwise share the id
+    ``{retrieved_at}_304`` — and update_snapshot patches EVERY record matching an id, so
+    one later parse-status write would hit all of them. Rate limiting hides this in
+    production; a test with rate_limit_s=0 walks straight into it.
+    """
+    url8 = hashlib.sha256(url.encode()).hexdigest()[:8]
+    return f"{retrieved_at}_{tag}_{url8}"
 
 
 def read_snapshots() -> list[dict]:
@@ -204,7 +265,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
         # Server says unchanged: record the check, retain nothing new, reuse prior file.
         return {
             **base,
-            "snapshot_id": f"{retrieved_at}_304",
+            "snapshot_id": _snapshot_id(retrieved_at, source.url, "304"),
             "http_status": 304,
             "http_etag": (prev or {}).get("http_etag"),
             "http_last_modified": (prev or {}).get("http_last_modified"),
@@ -214,12 +275,19 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             "note": "304 not-modified",
         }
 
+    floor = _MIN_BYTES.get(source.source_kind, _MIN_BYTES_DEFAULT)
+    if len(res.content) < floor:
+        raise ValueError(
+            f"{source.url} returned {len(res.content)} bytes, below the {floor}-byte floor "
+            f"for {source.source_kind}. Refusing to retain a truncated/empty response as a "
+            f"legitimate snapshot.")
+
     sha = hashlib.sha256(res.content).hexdigest()
     if prev and prev.get("content_sha256") == sha:
         # Byte-identical to what we already retained (zips regenerate): dedupe, no rewrite.
         return {
             **base,
-            "snapshot_id": f"{retrieved_at}_{sha[:8]}",
+            "snapshot_id": _snapshot_id(retrieved_at, source.url, sha[:8]),
             "http_status": res.status,
             "http_etag": res.etag,
             "http_last_modified": res.last_modified,
@@ -229,16 +297,26 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             "note": "unchanged bytes (deduped)",
         }
 
-    # New bytes: retain immutably.
+    # New bytes: retain immutably, via a .part file + atomic replace. A crash during a
+    # plain write_bytes would leave a TRUNCATED file already carrying the full sha in its
+    # name — the filename asserts an integrity claim the contents don't satisfy, and any
+    # sha-keyed recovery pass would then adopt it as valid.
     compact = retrieved_at.replace("-", "").replace(":", "")
     fname = f"{compact}_{sha[:8]}.{source.ext}"
-    dest = raw_dir(source.source_kind, source.report_year or "current") / fname
+    year = source.report_year if source.report_year is not None else now.year
+    dest = raw_dir(source.source_kind, year) / fname
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(res.content)
+    part = dest.with_suffix(dest.suffix + ".part")
+    try:
+        part.write_bytes(res.content)
+        os.replace(part, dest)
+    finally:
+        if part.exists():
+            part.unlink()
     rel = str(dest.relative_to(config.store_root()))
     return {
         **base,
-        "snapshot_id": f"{retrieved_at}_{sha[:8]}",
+        "snapshot_id": _snapshot_id(retrieved_at, source.url, sha[:8]),
         "http_status": res.status,
         "http_etag": res.etag,
         "http_last_modified": res.last_modified,
@@ -271,18 +349,56 @@ def fetch(year: int | None = None, *, all_years: bool = False,
             sources.append(WEEKLY_STATIC)
 
     m = _read_manifest()
+    m["schema_version"] = SCHEMA_VERSION
     snapshots = m["snapshots"]
     new_files = 0
+    failed = 0
     records = []
     for i, src in enumerate(sources):
-        rec = capture_source(src, snapshots=snapshots, http_get=http_get, now=now_fn())
+        now = now_fn()
+        try:
+            rec = capture_source(src, snapshots=snapshots, http_get=http_get, now=now)
+        except Exception as e:  # noqa: BLE001
+            # One bad source must not kill the run. A cold-start --all is 120+ requests
+            # and dies at the first naming variant or missing disagg year otherwise. The
+            # failure is RECORDED (so it is visible and retryable), then the run goes on —
+            # matching what the ingest path already does.
+            rec = _failure_record(src, now, e)
+            failed += 1
+            print(f"  {src.report_type}/{src.source_kind} {src.report_year or ''}: "
+                  f"fetch failed — {e}")
         snapshots.append(rec)   # visible to the next source's _latest_for_url
         records.append(rec)
         if rec.get("note") is None and rec.get("byte_size") is not None:
             new_files += 1
+        # Write after EVERY source, not once at the end: the manifest is small and its
+        # replace is atomic, so this costs nothing measurable and shrinks the crash window
+        # from a whole run to a single source. Combined with the atomic raw write, an
+        # interrupted run leaves a consistent store rather than unrecorded blobs.
+        _write_manifest(m)
         if rate_limit_s and i < len(sources) - 1:
             time.sleep(rate_limit_s)
 
-    m["schema_version"] = SCHEMA_VERSION
-    _write_manifest(m)
-    return {"records": records, "new_files": new_files, "checks": len(records)}
+    return {"records": records, "new_files": new_files, "checks": len(records),
+            "failed": failed}
+
+
+def _failure_record(source: Source, now: dt.datetime, error: Exception) -> dict:
+    retrieved_at = _iso(now)
+    return {
+        "source_url": source.url,
+        "source_kind": source.source_kind,
+        "report_type": source.report_type,
+        "report_year": source.report_year,
+        "retrieved_at": retrieved_at,
+        "snapshot_id": _snapshot_id(retrieved_at, source.url, "failed"),
+        "http_status": None,
+        "http_etag": None,
+        "http_last_modified": None,
+        "content_sha256": None,
+        "byte_size": None,
+        "local_path": None,
+        "parse_status": "pending",
+        "parse_error": None,
+        "note": f"fetch failed: {error}",
+    }
