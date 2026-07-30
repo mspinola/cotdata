@@ -291,3 +291,114 @@ Git recovery returned nothing, so the diff machinery has no input until the next
 - Any deviation from this spec and why
 - Date coverage achieved by the release-date backfill, broken down by `release_date_source`
 - Whether weekly static reports appear frozen at publication or restated alongside annual files — open empirical question; the answer determines whether any further historical vintage recovery is possible
+
+---
+
+## 12. Outcome (2026-07-30)
+
+Everything above is the spec **as written before implementation** and is left unedited.
+This section records what the build established, including where the spec was wrong.
+Implementation lives on branch `claude/cot-revision-snapshots-9b196f`
+([cotdata PR #78](https://github.com/mspinola/cotdata/pull/78)), unmerged at time of
+writing. Design detail: [cot_vintage.md](cot_vintage.md). Decision: crucible-stack
+ADR-0008 ([crucible-stack PR #13](https://github.com/mspinola/crucible-stack/pull/13)).
+
+> **Both of those targets arrive with their PRs.** `cot_vintage.md` lands with cotdata
+> #78 and `ADR-0008` with crucible-stack #13, so on `main` those two links dangle until
+> the PRs merge. Everything stated in this section is independent of that and stands on
+> its own.
+
+### 12.1 The `Last-Modified` spike: a negative result
+
+§4.6 hoped the spike would collapse the release-date taxonomy to one mechanism. **It did
+not.** Historical release dates cannot be recovered from HTTP headers:
+
+- Annual zips are regenerated, so their `Last-Modified` carries no per-week information.
+- Past weekly statics are not archived — one file, overwritten each week.
+
+`announced` and `scheduled` therefore remain the only sources for historical weeks, and
+§4.6's fallback chain stands as written rather than as a contingency. Recorded explicitly
+as a null so it is not re-investigated.
+
+The spike did produce one gain: the weekly static's `Last-Modified` **is** a true
+publication timestamp for the current week, which is strictly better than "first
+`observed_at` at polling interval."
+
+### 12.2 Header sweep (measured 2026-07-30)
+
+| Year | `Last-Modified` |
+|---|---|
+| 2020 | 2021-10-29 |
+| 2021 | 2022-01-14 |
+| 2022 / 2023 / 2024 | 2026-01-15 (one bulk re-touch, not weekly) |
+| **2025** | **2026-07-24 19:27:59** |
+| **2026** | **2026-07-24 19:27:59** |
+
+**The rolling two-year window.** 2025 and 2026 share an identical timestamp: CFTC's weekly
+job regenerates the current year *and the immediately-prior year*. Everything older is
+static. An earlier draft claimed all closed years were re-touched weekly; that was wrong.
+
+This explains a long-standing observation that weekly downloads grab both the current and
+prior year: the pipeline conditions on `Last-Modified`, CFTC re-touches it, and identical
+bytes are re-fetched. No revision is involved.
+
+**Conditional GET.** cftc.gov serves **no `ETag` on any file**, so `If-None-Match` can
+never fire. `If-Modified-Since` does work (verified 304 against both a static year and the
+current year), so on an `--all` sweep only ~2 of ~40 annual files actually transfer.
+
+**Content churn.** Inner zip entry mtimes show closed years are byte-frozen (2025's content
+has not changed since January despite weekly header re-touching); only the current year
+genuinely churns. Caveat: inner mtime is strong evidence, not proof — a regeneration
+preserving source mtimes would look identical. `content_sha256` across two weeks is
+definitive, and capture now does that automatically.
+
+### 12.3 Decisions taken
+
+- **Retention: keep everything, no pruning.** ~1 GB/year of current-year churn is
+  immaterial against irreplaceability, and those weekly copies *are* the vintage series —
+  pruning them destroys the artifact being built.
+- **`--all` is a restatement tripwire, not a backfill.** Since closed years are frozen, a
+  `content_sha256` change on one is precisely the 2008-style retroactive-restatement
+  signature, and it is the only automated detector for the failure mode this subsystem
+  exists to guard against. Monthly or quarterly; weekly is pointless because nothing older
+  moves. Implemented as a `restatement_suspect` flag on any closed-year content change.
+- **Capture runs on the producer, daily.** Daily because nearly everything 304s, so it is
+  nearly free while catching holiday shifts and backlog publications with no schedule
+  logic, and it tightens `observed_at` from a seven-day to a one-day bound. On the
+  producer because the replicas are mirrored (`robocopy /MIR`, `rsync --delete`) and a
+  vintage tree written on a replica is **deleted** by the next sync — irrecoverable, since
+  CFTC serves current state only. `COTDATA_VINTAGE_ROOT` relocates the tree for a replica
+  that must capture anyway.
+- **Futures-only carry-forward.** Only `dea_fut_xls` / `fut_disagg_txt` / `fut_fin_txt` are
+  fetched, all futures-only, so `combined` is constant-`False` in the natural key today.
+  This is a deliberate carry-forward of existing producer scope under the §0 non-goal, not
+  an oversight. `combined` stays in the key so the two series can never silently merge
+  (§6); adding the combined files later is a fetch-list change with no schema migration.
+  **Consequence: half the reportable universe is absent** until that happens.
+
+### 12.4 Deviations from this spec
+
+| Spec said | Built | Why |
+|---|---|---|
+| polars (§3.2) | pandas + pyarrow | polars is not a dependency; pandas/pyarrow already are, so the no-database decision is not undone by adding a near-equivalent |
+| `manifest.json` (§3.1) | `snapshots.json` | Both deployed sync scripts exclude `manifest.json` **unanchored** (robocopy `/XF`, rsync `--exclude` match at any depth), so it would have been stripped in transit, delivering raw archives to a replica with no index |
+| fixtures from trimmed real CFTC files (§8) | synthetic frames | Matches the repo's existing test idiom, runs offline, and avoids an `xlrd` fixture dependency |
+| `vintage recover --from-git` (§7) | not built | Git archaeology found zero committed data files; there is nothing to recover |
+| weekly-static work deferred (§10) | **`published` shipped** | The deferral assumed the file needed parsing. It is a headerless positional CSV covering exactly ONE report date (365 rows, 129 columns, one distinct value in field 2), so the mapping reads one field. ~30 lines, so it landed. Verified live: report date 2026-07-21 → 2026-07-24 ET publication |
+
+### 12.5 Answers to §11
+
+- **Backfill coverage by `release_date_source`: none yet.** No production vintages exist —
+  capture is forward-only and git recovery returned nothing, so there is nothing to report
+  coverage over. The machinery is tested (backlog week → `announced`; otherwise
+  `derived`), but real numbers require captures to accumulate.
+- **Are weekly statics frozen at publication or restated?** Neither, and the question
+  dissolves: the weekly static is a **single file, overwritten** each week, not a per-week
+  archive. So it offers no route to further historical vintage recovery.
+
+### 12.6 Still deferred
+
+`vintage stats` (needs roughly a quarter of data to measure), category-migration detection
+(needs revisions to exist), tombstone *logic* (column present; needs a real disappearing
+key to design against), and full canonicalisation of the weekly static **into
+observations** (129 positional columns, genuinely larger than the `published` mapping).

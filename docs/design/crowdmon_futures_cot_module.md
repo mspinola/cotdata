@@ -168,6 +168,28 @@ Two implementations: `LocalCotData` wrapping the existing module, and `CftcApiCo
 
 *Open items to resolve at implementation:* the existing module's output schema and index conventions, whether history is already backfilled and from what date, and whether revisions are currently retained or overwritten. Revision retention is the one that matters most — see §5.3.
 
+> **Resolved 2026-07-30** by the vintage build (branch `claude/cot-revision-snapshots-9b196f`,
+> [PR #78](https://github.com/mspinola/cotdata/pull/78); spec + outcome in
+> [cot_vintage_store_handoff.md](cot_vintage_store_handoff.md) §12, design in
+> [cot_vintage.md](cot_vintage.md)):
+>
+> - **Output schema.** Wide, one parquet per symbol per report type, `Report_Date`-indexed
+>   (tz-naive `DatetimeIndex`): OI, per-category long/short, trader counts. `Report_Date` is
+>   stored exactly as reported and **never** normalised to Tuesday, so §5.3's holiday-week
+>   hazard is already avoided by the existing producer.
+> - **Backfill.** Full history per report: Legacy from 1986, Disaggregated and TFF from 2006.
+> - **Revisions were overwritten**, as §5.3 feared: every run rebuilt the whole per-code table
+>   and replaced the parquet, so no prior state survived. That is what the vintage layer fixes.
+> - **`release_date` did not exist anywhere**, and could not simply be read — see §5.3.
+> - **Only futures-only is fetched**, so `combined` is constant-`False` today: the column is
+>   present and correct but not yet discriminating, and half the reportable universe is absent
+>   until the combined files are added.
+> - **`vintage: int` is not how it was built.** The implementation is bitemporal
+>   (`observed_at` plus change-only rows), so a point-in-time read is "greatest
+>   `observed_at <= t` per natural key". An integer vintage ordinal can be derived from that
+>   if this adapter wants one, but it is not stored — storage grows with revisions rather
+>   than with time, which an ordinal-per-week scheme would not achieve.
+
 ---
 
 ## 5. Normalisation
@@ -192,6 +214,24 @@ The widely used **COT Index** — stochastic rescaling of net position to 0–10
 Index on **release date**, never as-of date. Using the Tuesday date embeds a three-day lookahead — small, but it is exactly the window in which the largest moves happen, so it flatters every historical result in precisely the wrong way.
 
 CFTC revises. Store vintages and expose an as-of query so backtests see only what was visible at the time. If the existing `cotdata` module overwrites on re-fetch, this is the first thing to change.
+
+> **Built 2026-07-30.** It did overwrite; `cotdata-vintage` now captures as-published
+> snapshots, records field-level revisions with `age_days` depth, and answers
+> `asof(t)`. Two findings change what this section can assume:
+>
+> - **Release date is resolved, not read.** The annual zips carry only `report_date`, and
+>   HTTP headers cannot recover historical publication times (see
+>   [handoff §12.1](cot_vintage_store_handoff.md) — a measured negative result). So
+>   `release_date` carries a provenance flag,
+>   `published > observed > announced > scheduled > derived`. **`derived` fails on exactly
+>   the weeks that matter** (holiday shifts, the Oct–Dec 2025 backlog), so anything doing
+>   strict point-in-time evaluation must be able to exclude `derived` rows rather than
+>   trusting the date. A release date without provenance is worse than none.
+> - **Vintages accumulate forward only.** Git archaeology recovered nothing and CFTC serves
+>   current state only, so the vintage series begins at first capture. Backtests over
+>   history predating that see *current-state* data with no as-of protection — the PIT
+>   discipline this section asks for is available going forward, not retroactively. That is
+>   a permanent property, not a gap to be filled later.
 
 ### 5.4 Seasonal adjustment
 
