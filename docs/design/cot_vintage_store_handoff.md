@@ -303,10 +303,10 @@ Implementation lives on branch `claude/cot-revision-snapshots-9b196f`
 writing. Design detail: [cot_vintage.md](cot_vintage.md). Decision: crucible-stack
 ADR-0008 ([crucible-stack PR #13](https://github.com/mspinola/crucible-stack/pull/13)).
 
-> **Both of those targets arrive with their PRs.** `cot_vintage.md` lands with cotdata
-> #78 and `ADR-0008` with crucible-stack #13, so on `main` those two links dangle until
-> the PRs merge. Everything stated in this section is independent of that and stands on
-> its own.
+> `cot_vintage.md` ships in this same PR, so that link resolves here and on `main` after
+> merge. The cross-repo `ADR-0008` reference is the exception: it lands separately with
+> crucible-stack #13, so it resolves only once that merges. Everything stated in this
+> section is independent of both and stands on its own.
 
 ### 12.1 The `Last-Modified` spike: a negative result
 
