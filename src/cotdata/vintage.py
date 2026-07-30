@@ -153,6 +153,20 @@ def read_snapshots() -> list[dict]:
     return _read_manifest()["snapshots"]
 
 
+def update_snapshot(snapshot_id: str, **fields) -> bool:
+    """Patch fields (e.g. ``parse_status``, ``parse_error``) on a recorded snapshot.
+    Returns True if a matching snapshot was found and written."""
+    m = _read_manifest()
+    hit = False
+    for rec in m["snapshots"]:
+        if rec.get("snapshot_id") == snapshot_id:
+            rec.update(fields)
+            hit = True
+    if hit:
+        _write_manifest(m)
+    return hit
+
+
 # ── Capture ─────────────────────────────────────────────────────────────────
 def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)

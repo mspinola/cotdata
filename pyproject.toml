@@ -46,6 +46,7 @@ cotdata-update = "cotdata.update:main"
 cotdata-cot = "cotdata.update:main_cot"
 cotdata-prices = "cotdata.update:main_prices"
 cotdata-vintage = "cotdata.vintage_cli:main"
+cotdata-schedule = "cotdata.vintage_cli:main_schedule"
 
 [tool.setuptools.packages.find]
 where = ["src"]
