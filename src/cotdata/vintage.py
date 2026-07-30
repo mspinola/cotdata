@@ -56,6 +56,22 @@ def user_agent() -> str:
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 def vintage_root() -> Path:
+    """Root of the vintage subtree.
+
+    Defaults to ``$COTDATA_STORE/vintage``, but ``COTDATA_VINTAGE_ROOT`` overrides it, and
+    on a REPLICA that override is mandatory rather than cosmetic.
+
+    The deployment syncs the store with ``robocopy /MIR``, which deletes anything at the
+    destination that is absent at the source, excluding only ``_cache _raw citpy``. A
+    vintage tree written on a replica is therefore destroyed by the next producer sync —
+    the same trap docs/SYNCING.md already documents for ``citpy``, except that vintage data
+    is IRREPLACEABLE by construction (CFTC serves current state only). Either run capture
+    on the producer, where the tree syncs outward normally, or point this override at a
+    path outside the mirrored store.
+    """
+    override = os.environ.get("COTDATA_VINTAGE_ROOT", "").strip()
+    if override:
+        return Path(override)
     return config.store_root() / "vintage"
 
 
@@ -318,10 +334,31 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
     finally:
         if part.exists():
             part.unlink()
-    rel = str(dest.relative_to(config.store_root()))
+    try:
+        rel = str(dest.relative_to(config.store_root()))
+    except ValueError:
+        rel = str(dest)  # COTDATA_VINTAGE_ROOT points outside the store
+
+    # ── Restatement tripwire ────────────────────────────────────────────────
+    # A CLOSED year's content is frozen (measured: 2020-2024 static, and 2025 re-touched
+    # weekly by the rolling regeneration window but byte-identical since January). So a
+    # closed year whose sha CHANGES is the 2008-style retroactive-restatement signature —
+    # the failure mode this whole subsystem exists to detect — and it costs no extra
+    # machinery: it falls out of the ordinary dedupe path. 2025 in particular should
+    # produce exactly one "unchanged bytes (deduped)" record per week, indefinitely; the
+    # week it does not is the alert.
+    restatement_suspect = False
+    if prev is not None and source.report_year is not None and source.report_year < now.year:
+        restatement_suspect = True
+        print(f"  *** RESTATEMENT SUSPECT: {source.report_type} {source.report_year} "
+              f"content changed (sha {(prev.get('content_sha256') or '')[:8]} -> {sha[:8]}). "
+              f"A closed year should be frozen. In January this may be ordinary year-end "
+              f"finalization; otherwise treat as a retroactive restatement and diff it.")
+
     return {
         **base,
         "snapshot_id": _snapshot_id(retrieved_at, source.url, sha[:8]),
+        "restatement_suspect": restatement_suspect,
         "http_status": res.status,
         "http_etag": res.etag,
         "http_last_modified": res.last_modified,

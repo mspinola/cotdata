@@ -234,6 +234,49 @@ def test_weekly_static_partitions_by_capture_year(store_env):
     assert len(raws) == 1 and raws[0].parent.name == "2026"  # not "current"
 
 
+def test_closed_year_sha_change_is_flagged_as_restatement_suspect(store_env):
+    """A closed year is frozen, so a content change is the retroactive-restatement
+    signature. It must be flagged, not silently retained as an ordinary new vintage."""
+    from cotdata import vintage
+    url = "https://www.cftc.gov/files/dea/history/dea_fut_xls_2025.zip"
+    srcs = [vintage.Source("legacy", "annual_zip", "zip", url, 2025)]  # closed year
+    http = _FakeHttp({url: [(200, _body(b"jan-final"), '"e1"', "lm1"),
+                            (200, _body(b"RESTATED"), '"e2"', "lm2")]})
+    now = _clock()  # clock is in 2026, so 2025 is closed
+    r1 = vintage.fetch(sources=srcs, http_get=http, rate_limit_s=0, now_fn=now)
+    r2 = vintage.fetch(sources=srcs, http_get=http, rate_limit_s=0, now_fn=now)
+
+    assert r1["records"][0]["restatement_suspect"] is False  # first sighting, no prior
+    assert r2["records"][0]["restatement_suspect"] is True   # frozen year changed
+
+
+def test_current_year_change_is_not_a_restatement_suspect(store_env):
+    """The current year legitimately gains a report every week."""
+    from cotdata import vintage
+    http = _FakeHttp(_only(LEGACY_2026,
+                           (200, _body(b"week1"), '"e1"', "lm1"),
+                           (200, _body(b"week2"), '"e2"', "lm2")))
+    now = _clock()  # 2026, and the source's report_year is 2026
+    _fetch(vintage, http, now)
+    res2 = _fetch(vintage, http, now)
+    assert res2["records"][0]["restatement_suspect"] is False
+
+
+def test_vintage_root_override_keeps_tree_outside_a_mirrored_store(store_env, tmp_path, monkeypatch):
+    """COTDATA_VINTAGE_ROOT must relocate the whole tree — the escape hatch for a replica
+    whose store is mirrored with robocopy /MIR (which would delete a store-local tree)."""
+    from cotdata import vintage
+    outside = tmp_path / "vintage_elsewhere"
+    monkeypatch.setenv("COTDATA_VINTAGE_ROOT", str(outside))
+    http = _FakeHttp(_only(LEGACY_2026, (200, _body(b"week1"), '"e1"', "lm1")))
+    res = _fetch(vintage, http, _clock())
+
+    assert res["new_files"] == 1
+    assert (outside / "manifest.json").exists()
+    assert list(outside.rglob("*.zip"))
+    assert not (store_env / "vintage").exists()  # nothing written into the synced store
+
+
 def test_changed_bytes_writes_second_immutable_snapshot(store_env):
     from cotdata import vintage
     http = _FakeHttp(_only(

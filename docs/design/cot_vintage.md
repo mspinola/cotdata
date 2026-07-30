@@ -124,6 +124,36 @@ the two that do transfer (2025 re-downloads weekly, ~8 MB, and dedupes away).
    pointless (nothing older moves); monthly/quarterly is cheap because almost everything
    304s.
 
+## 3d. DEPLOYMENT HAZARD: `robocopy /MIR` deletes a replica-local vintage tree
+
+**Read before scheduling capture anywhere.**
+
+This deployment syncs the store from one Windows producer to two read-only replicas
+(Mac over SMB, Linux VPS over rsync). The Mac push is `robocopy /MIR`, which deletes
+anything present at the destination and absent at the source, excluding only
+`/XD _cache _raw citpy` and `/XF manifest.json`. **`vintage` is not excluded.**
+
+So a `vintage/` tree written on the Mac replica is **destroyed by the next producer
+sync**. This is not hypothetical: `sync-store.cmd` already documents exactly this
+outcome for `citpy` ("not written by any producer, so /MIR removes it and no producer
+run brings it back"). The difference is that vintage data is **irreplaceable** — CFTC
+serves current state only, so a deleted vintage cannot be re-fetched, ever.
+
+Two safe placements:
+
+1. **Run capture on the producer (preferred).** Vintage capture *is* a producer action
+   (it fetches from CFTC), so it belongs on the same machine as the COT half, and the
+   tree then syncs outward to replicas like any other store content. This also matches
+   the ADR-0007 seam: the CFTC producer owns the `cot` half.
+2. **Run on a replica with `COTDATA_VINTAGE_ROOT` pointing outside the mirrored store.**
+   The override exists for this. The tree then survives `/MIR`, but does not propagate to
+   other machines — acceptable for a single-box capture, but it makes that box the sole
+   custodian of irreplaceable data, so it needs its own backup.
+
+Adding `vintage` to the `/XD` list is a third option and is NOT recommended: it protects
+the tree only as long as every future sync invocation remembers the flag, and one
+forgotten flag is unrecoverable.
+
 ### Real-network smoke (2026-07-30, pre-merge)
 
 Default path (`cotdata-vintage fetch` = current year × 3 reports + weekly static) run
