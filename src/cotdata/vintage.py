@@ -10,9 +10,9 @@ Layout (all under ``$COTDATA_STORE/vintage/``):
     revisions/detected_year=YYYY/*.parquet                 append-only, field-level
     release_schedule.parquet
     announcements.parquet
-    manifest.json                                          vintage provenance index
+    snapshots.json                                         vintage provenance index
 
-Provenance lives in its OWN ``vintage/manifest.json`` rather than a block in the cot-half
+Provenance lives in its OWN ``vintage/snapshots.json`` rather than a block in the cot-half
 manifest, because ``store.reconcile_manifest`` ghost-prunes any manifest entry without a
 matching ``{name}.parquet`` — raw snapshot ids are not parquet files and would be wiped.
 A self-owned file also matches the repo's existing "one writer per manifest file" split.
@@ -83,7 +83,16 @@ def raw_dir(source_kind: str, year: int | str) -> Path:
 
 
 def manifest_path() -> Path:
-    return vintage_root() / "manifest.json"
+    """The snapshot provenance index.
+
+    Deliberately NOT named manifest.json. Both deployed sync scripts exclude that name
+    UNANCHORED — robocopy ``/XF manifest.json`` and rsync ``--exclude "manifest.json"``
+    match at any depth — so a vintage/manifest.json would be silently stripped in transit,
+    delivering raw bytes to a replica with no index: the "directory of opaque blobs"
+    failure this module works hardest to prevent. The distinct name means existing sync
+    scripts need no edit to carry it correctly.
+    """
+    return vintage_root() / "snapshots.json"
 
 
 # ── Sources ─────────────────────────────────────────────────────────────────

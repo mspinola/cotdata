@@ -137,7 +137,7 @@ def test_corrupt_manifest_raises_and_quarantines_rather_than_overwriting(store_e
     with pytest.raises(vintage.CorruptManifestError, match="unreadable"):
         vintage.read_snapshots()
     # original moved aside, not destroyed; no empty manifest left in its place
-    quarantined = list(mpath.parent.glob("manifest.json.corrupt.*"))
+    quarantined = list(mpath.parent.glob("snapshots.json.corrupt.*"))
     assert len(quarantined) == 1
     assert quarantined[0].read_text() == "{ this is not json"
     assert not mpath.exists()
@@ -272,7 +272,7 @@ def test_vintage_root_override_keeps_tree_outside_a_mirrored_store(store_env, tm
     res = _fetch(vintage, http, _clock())
 
     assert res["new_files"] == 1
-    assert (outside / "manifest.json").exists()
+    assert (outside / "snapshots.json").exists()
     assert list(outside.rglob("*.zip"))
     assert not (store_env / "vintage").exists()  # nothing written into the synced store
 

@@ -158,6 +158,38 @@ arrival. The per-half files under `manifests/` are disjoint and merge correctly.
 
 Run `cotdata-update --migrate-manifests` once per store, then delete `manifest.json`.
 
+### `vintage/` is irreplaceable, so where it is WRITTEN matters
+
+The vintage tree (`vintage/raw/`, `observations/`, `revisions/`, `snapshots.json`) records
+CFTC data *as published*. CFTC serves current state only and there is no vintage archive,
+so a deleted vintage snapshot can never be re-fetched. Treat it as write-once.
+
+**Capture on the producer, never on a replica.** Vintage capture fetches from CFTC, so it
+is a producer action and belongs beside the COT half (`run-vintage.cmd`, chained after
+`run-cot.cmd`, daily). Written on the producer it propagates outward like any other store
+content. Written on a **replica** it is destroyed by the next `/MIR` or `--delete` pass,
+for the same reason `citpy` is (below): the source has no such directory, so the mirror
+removes it. `citpy` is regenerable; vintage data is not.
+
+If a replica genuinely must capture, point `COTDATA_VINTAGE_ROOT` at a path **outside**
+the mirrored store. That box then holds the only copy, so give it its own backup.
+
+Per replica in this deployment:
+
+| Target | Carries `vintage/`? | Why |
+|---|---|---|
+| Mac (research) | **Yes, in full** | Natural second copy of irreplaceable bytes, ~1 GB/yr, and research may query revisions |
+| Linux dash VPS | **No** | cot-analyzer reads prices and COT only; it would carry ~1 GB/yr of archives it never opens |
+
+**Naming gotcha, already handled:** the vintage provenance index is `snapshots.json`, not
+`manifest.json`. Both sync scripts exclude `manifest.json` *unanchored* (robocopy `/XF`
+and rsync `--exclude` both match by name at any depth), so a `vintage/manifest.json` would
+have been stripped in transit and the replica would receive raw archives with no index.
+Do not rename it back.
+
+Exclude `*.part` alongside `*.tmp`: raw downloads land via a `.part` file plus an atomic
+replace, and a sync running mid-capture must not carry the partial.
+
 ## Check before you mirror
 
 `--delete` and `/MIR` are silent when they destroy something. Run the preflight first:
