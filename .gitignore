@@ -9,6 +9,9 @@ dist/
 # never commit the data store itself
 /store/
 *.parquet
+# ...except the tiny committed golden fixture that guards current/ byte-identity
+# (tests/test_current_baseline.py). Regenerate with tests/_gen_golden.py.
+!tests/fixtures/golden/*.parquet
 
 # local Task Scheduler / cron wrapper scripts (machine-specific paths, and on
 # Linux a Databento API key). Copy templates from docs/examples/ into here.

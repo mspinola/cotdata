@@ -7,6 +7,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **COT vintage capture** (`cotdata-vintage fetch`) — an immutable, hashed landing
+  zone for as-published CFTC files under `$COTDATA_STORE/vintage/raw/`, with
+  provenance (etag, last-modified, sha256, size, retrieved-at) recorded in a
+  self-owned `vintage/manifest.json`. Purely additive: the current-state store is
+  byte-identical (guarded by `tests/test_current_baseline.py`). This is step 1 of
+  the vintage/revision-tracking subsystem — capture must start now because an
+  uncaptured weekly release is irrecoverable; ingest/diff/PIT land next and run
+  retroactively over retained raw bytes. Decision recorded in crucible-stack
+  ADR-0008; design in `docs/design/cot_vintage.md`.
 - **`propadj` price adjustment** — a proportional (ratio) back-adjusted view
   derived on read from the stored `unadj` + `backadj` series via
   `get_prices(symbol, adjustment="propadj")`. It preserves daily percentage

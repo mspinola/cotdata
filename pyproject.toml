@@ -45,6 +45,7 @@ dev = ["pytest>=7", "ruff==0.15.22"]
 cotdata-update = "cotdata.update:main"
 cotdata-cot = "cotdata.update:main_cot"
 cotdata-prices = "cotdata.update:main_prices"
+cotdata-vintage = "cotdata.vintage_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
