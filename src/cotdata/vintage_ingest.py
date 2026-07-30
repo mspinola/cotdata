@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +32,10 @@ VALUE_FIELDS = ["long_contracts", "short_contracts", "spread_contracts",
                 "trader_count_long", "trader_count_short", "open_interest",
                 "cr4_net_long", "cr4_net_short", "cr8_net_long", "cr8_net_short"]
 
+# market_name is descriptive, not a value: it is deliberately OUT of the hash, so a CFTC
+# market rename never registers as a revision. Consequence to know before debugging it:
+# once a natural key is written, its stored market_name is never updated by a later
+# ingest (that row is a change-only skip). The market_code is the identity.
 PROVENANCE_FIELDS = ["release_date", "release_date_source", "market_name",
                      "observed_at", "snapshot_id", "row_sha256", "is_tombstone"]
 
@@ -77,10 +82,33 @@ def _naive_utc(ts) -> pd.Timestamp:
 
 
 def _norm(v) -> str:
-    if v is None or (isinstance(v, float) and pd.isna(v)) or v is pd.NA:
+    """Canonical string form of one value, for hashing and field comparison.
+
+    Deliberately independent of any third-party scalar formatting: numpy/pandas scalars
+    are unwrapped to Python natives via ``.item()`` and formatted explicitly. The hash is
+    a PERMANENT artifact — if it moved with a numpy/pandas formatting change (numpy 2.0
+    already changed scalar repr once) every stored row would appear revised at once, a
+    silent mass revision event across every market. Non-integer floats only occur in the
+    cr4/cr8 ratios, which is exactly where that would bite.
+    """
+    if v is None:
         return ""
-    if isinstance(v, float) and float(v).is_integer():
-        return str(int(v))
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass  # non-scalar or unsupported type → fall through to explicit formatting
+    if hasattr(v, "item"):
+        try:
+            v = v.item()  # np.int64/np.float64/np.bool_ → int/float/bool
+        except (AttributeError, ValueError):
+            pass
+    if isinstance(v, bool):  # must precede int: bool is a subclass of int
+        return "1" if v else "0"
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else format(v, ".10g")
+    if isinstance(v, int):
+        return str(v)
     return str(v)
 
 
@@ -129,6 +157,18 @@ def canonicalize_legacy(wide: pd.DataFrame, *, combined: bool = False) -> pd.Dat
 # ── Validation (§5) ─────────────────────────────────────────────────────────
 class ValidationError(ValueError):
     pass
+
+
+class ConsistencyError(RuntimeError):
+    """The change-hash and the field-level diff disagreed.
+
+    These are two different comparison paths: the hash compares a STORED row_sha256
+    against a freshly computed one, while the field loop compares parquet-read values
+    against fresh ones. If they ever disagree we would write an observation row with no
+    corresponding revision rows — a revision that silently lost its detail. Raising turns
+    any future dtype/round-trip drift into a loud failure instead of a data-quality
+    mystery discovered months later.
+    """
 
 
 def validate(canonical: pd.DataFrame) -> list[str]:
@@ -190,8 +230,51 @@ def _latest_by_key(obs: pd.DataFrame) -> pd.DataFrame:
     if obs.empty:
         return obs
     ordered = obs.sort_values(["observed_at", "snapshot_id"], kind="mergesort")
-    idx = ordered.groupby(NATURAL_KEY, dropna=False, sort=False).tail(1).index
-    return obs.loc[idx]
+    # Return the grouped rows DIRECTLY. Round-tripping through obs.loc[idx] would be a
+    # duplicate-label hazard: any caller that built `obs` without ignore_index=True has
+    # repeated index labels, and .loc on those returns EVERY matching row — silently
+    # yielding several rows per natural key, which reads as data corruption rather than
+    # an indexing bug.
+    return ordered.groupby(NATURAL_KEY, dropna=False, sort=False).tail(1)
+
+
+class _WriteLock:
+    """Advisory single-writer lock over the vintage subtree.
+
+    The observation/revision writes are read-concat-rewrite: atomic per file, but two
+    concurrent ingest processes would resolve last-writer-wins and silently drop one
+    side's rows. The COT producer is single-writer by design (the same reason the store
+    manifests are split per half), so this lock exists to convert that silent data-loss
+    mode into a loud error, not to support concurrency.
+    """
+
+    def __init__(self, root: Path):
+        self.path = root / ".ingest.lock"
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            holder = ""
+            try:
+                holder = f" (held by pid {self.path.read_text().strip()})"
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"another cotdata vintage ingest is writing this store{holder}. "
+                f"The vintage writers are single-writer by design. If no such process is "
+                f"running, remove the stale lock: {self.path}") from None
+        with os.fdopen(fd, "w") as fh:
+            fh.write(str(os.getpid()))
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        return False
 
 
 def _append_parquet(path: Path, new_rows: pd.DataFrame) -> None:
@@ -249,6 +332,7 @@ def ingest_canonical(canonical: pd.DataFrame, *, snapshot_id: str,
         if prev is not None:
             report_date = pd.Timestamp(rec["report_date"])
             age_days = int((detected_at.normalize() - report_date.normalize()).days)
+            n_before = len(revisions)
             for f in VALUE_FIELDS:
                 old, new = prev.get(f), rec.get(f)
                 if _norm(old) == _norm(new):
@@ -271,19 +355,26 @@ def ingest_canonical(canonical: pd.DataFrame, *, snapshot_id: str,
                         f"{key}|{f}|{prev.get('snapshot_id')}|{snapshot_id}".encode()
                     ).hexdigest()[:16],
                 })
+            if len(revisions) == n_before:
+                raise ConsistencyError(
+                    f"row_sha256 changed for {key} but no VALUE_FIELDS differ "
+                    f"(stored {prev['row_sha256'][:12]} vs computed {rec['row_sha256'][:12]}). "
+                    f"The hash and the field-diff comparison paths disagree — refusing to "
+                    f"write an observation with no revision detail.")
 
     n_obs = 0
-    for ry, recs in new_obs.items():
-        frame = pd.DataFrame(recs).reindex(columns=ALL_COLUMNS)
-        _append_parquet(_obs_path(ry), frame)
-        n_obs += len(recs)
+    with _WriteLock(vintage.vintage_root()):
+        for ry, recs in new_obs.items():
+            frame = pd.DataFrame(recs).reindex(columns=ALL_COLUMNS)
+            _append_parquet(_obs_path(ry), frame)
+            n_obs += len(recs)
 
-    if revisions:
-        by_year: dict[int, list] = {}
-        for rv in revisions:
-            by_year.setdefault(pd.Timestamp(rv["detected_at"]).year, []).append(rv)
-        for dy, recs in by_year.items():
-            _append_parquet(_rev_path(dy), pd.DataFrame(recs))
+        if revisions:
+            by_year: dict[int, list] = {}
+            for rv in revisions:
+                by_year.setdefault(pd.Timestamp(rv["detected_at"]).year, []).append(rv)
+            for dy, recs in by_year.items():
+                _append_parquet(_rev_path(dy), pd.DataFrame(recs))
 
     return {"observations": n_obs, "revisions": len(revisions), "warnings": warnings}
 

@@ -108,6 +108,55 @@ def test_backfill_is_idempotent_and_does_not_downgrade_observed(store_env):
     assert list(obs1["release_date"]) == list(obs2["release_date"])
 
 
+def test_observed_uses_first_sighting_not_the_revised_row(store_env):
+    """A later revision must not drag the `observed` release date forward. The release
+    date is the FIRST time the report was seen, not when a given vintage was written."""
+    from cotdata import vintage_ingest as vi
+    from cotdata import vintage_schedule as vs
+    # first seen 3 days after report_date (a live capture)…
+    _ingest_one("2026-07-21", observed_at=dt.datetime(2026, 7, 24, 16, tzinfo=dt.timezone.utc))
+    # …then revised months later
+    idx = pd.to_datetime(["2026-07-21"])
+    idx.name = "Report_Date_as_MM_DD_YYYY"
+    revised = pd.DataFrame({
+        "Market_and_Exchange_Names": ["GOLD"], "CFTC_Contract_Market_Code": ["088691"],
+        "Open_Interest_All": [500000],
+        "Comm_Positions_Long_All": [200000], "Comm_Positions_Short_All": [999999],
+        "NonComm_Positions_Long_All": [150000], "NonComm_Positions_Short_All": [90000],
+        "NonRept_Positions_Long_All": [40000], "NonRept_Positions_Short_All": [30000],
+        "Traders_Comm_Long_All": [50], "Traders_Comm_Short_All": [55],
+        "Traders_NonComm_Long_All": [60], "Traders_NonComm_Short_All": [45],
+    }, index=idx)
+    vi.ingest_canonical(vi.canonicalize_legacy(revised), snapshot_id="s2",
+                        observed_at=dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc))
+
+    counts = vs.backfill(schedule=pd.DataFrame(
+        columns=["report_date", "release_date", "source", "note", "ingested_at"]))
+    obs = vi.read_observations()
+    # every row (including the revised vintage) carries the FIRST-sighting release date
+    assert set(obs["release_date_source"]) == {"observed"}
+    assert {pd.Timestamp(d).date() for d in obs["release_date"]} == {dt.date(2026, 7, 24)}
+    assert counts["observed"] == len(obs) and counts["derived"] == 0
+
+
+def test_observed_window_rejects_negative_offset(store_env):
+    """observed_at before report_date is impossible (clock skew / tz bug) and must NOT
+    be absorbed as a valid `observed` release date."""
+    from cotdata import vintage_schedule as vs
+    # "observed" two days BEFORE the report's as-of date
+    _ingest_one("2026-07-21", observed_at=dt.datetime(2026, 7, 19, tzinfo=dt.timezone.utc))
+    counts = vs.backfill(schedule=pd.DataFrame(
+        columns=["report_date", "release_date", "source", "note", "ingested_at"]))
+    assert counts["observed"] == 0 and counts["derived"] == 3  # fell through to derived
+
+
+def test_published_outranks_observed():
+    from cotdata.vintage_schedule import resolve_release_date
+    val, src = resolve_release_date("2026-07-21", published="2026-07-24",
+                                    observed="2026-07-25", scheduled="2026-07-26")
+    assert src == "published" and val == dt.date(2026, 7, 24)
+
+
 def test_announcement_parse_is_best_effort():
     from cotdata.vintage_schedule import _parse_announcements
     html = "<ul><li>January 5, 2026: revised gold report</li><li></li></ul>"

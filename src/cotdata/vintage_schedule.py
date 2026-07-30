@@ -27,7 +27,14 @@ import pandas as pd
 from . import vintage
 from . import vintage_ingest as vi
 
-PRECEDENCE = ("observed", "announced", "scheduled", "derived", "unknown")
+# `published` outranks `observed`: it is the weekly-static HTTP Last-Modified, a TRUE
+# publication timestamp (spike 2026-07-30), whereas `observed` is only the first time WE
+# saw the report — accurate to the polling interval. They must not share a bucket, so it
+# stays possible to tell later which weeks carry a real publication time.
+# NOTE: nothing populates `published` yet — mapping a weekly static to its report_date
+# requires parsing that file, which handoff §10 defers. The slot and precedence are here
+# so the wiring lands without a taxonomy migration.
+PRECEDENCE = ("published", "observed", "announced", "scheduled", "derived", "unknown")
 
 
 # ── Paths ───────────────────────────────────────────────────────────────────
@@ -50,12 +57,12 @@ def derive_release_date(report_date) -> dt.date:
     return d
 
 
-def resolve_release_date(report_date, *, observed=None, announced=None,
+def resolve_release_date(report_date, *, published=None, observed=None, announced=None,
                          scheduled=None) -> tuple[dt.date | None, str]:
-    """Return ``(release_date, source)`` by the §4.6 precedence. ``observed`` /
-    ``announced`` / ``scheduled`` are optional resolved dates for this report_date."""
-    for value, source in ((observed, "observed"), (announced, "announced"),
-                          (scheduled, "scheduled")):
+    """Return ``(release_date, source)`` by the §4.6 precedence. Each argument is an
+    optional resolved date for this report_date; the first present wins."""
+    for value, source in ((published, "published"), (observed, "observed"),
+                          (announced, "announced"), (scheduled, "scheduled")):
         if value is not None and not pd.isna(value):
             return pd.Timestamp(value).date(), source
     return derive_release_date(report_date), "derived"
@@ -127,14 +134,25 @@ def backfill(*, schedule: pd.DataFrame | None = None,
         df = pd.read_parquet(part)
         if df.empty:
             continue
+        # FIRST sighting per report_date, not the row's own observed_at. A row is one
+        # VINTAGE of a natural key: a revised row's observed_at can be months after
+        # publication, so using it per-row would make every `observed` release date
+        # systematically late by however long that row went unrevised.
+        norm_rd = df["report_date"].map(lambda x: pd.Timestamp(x).normalize())
+        first_seen = df.assign(_rd=norm_rd).groupby("_rd")["observed_at"].min()
+
         rel_dates, rel_srcs = [], []
         for _, r in df.iterrows():
             rd = pd.Timestamp(r["report_date"]).normalize()
             observed = None
-            oa = r.get("observed_at")
+            oa = first_seen.get(rd)
             if oa is not None and not pd.isna(oa):
                 oa = vi._naive_utc(oa)
-                if abs((oa.normalize() - rd).days) <= observed_window_days:
+                # Directional, NOT abs(): a report cannot be observed BEFORE its own
+                # as-of date, so a negative offset means clock skew or a timezone bug.
+                # abs() would silently absorb that as a valid release date.
+                delta = (oa.normalize() - rd).days
+                if 0 <= delta <= observed_window_days:
                     observed = oa
             sched = smap.get(rd)
             announced = sched[0] if sched and sched[1] == "announced" else None

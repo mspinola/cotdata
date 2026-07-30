@@ -143,6 +143,56 @@ def test_asof_tiebreak_is_deterministic(store_env):
     assert again[again["category"] == "commercial"].iloc[0]["snapshot_id"] == "z-late"
 
 
+def test_norm_is_independent_of_numpy_scalar_formatting():
+    """The hash must not depend on numpy/pandas str() behaviour: np scalars unwrap to
+    Python natives, and int-valued floats unify with ints."""
+    np = pytest.importorskip("numpy")
+    from cotdata.vintage_ingest import _norm, row_sha256
+    assert _norm(np.int64(250000)) == _norm(250000) == _norm(np.float64(250000.0)) == "250000"
+    assert _norm(np.bool_(True)) == _norm(True) == "1"
+    assert _norm(None) == _norm(pd.NA) == _norm(float("nan")) == ""
+    # a non-integer ratio formats explicitly, not via numpy's repr
+    assert _norm(np.float64(0.4375)) == _norm(0.4375) == "0.4375"
+    # whole-row: numpy-typed and python-typed rows hash identically
+    a = {"long_contracts": np.int64(10), "cr4_net_long": np.float64(0.25)}
+    b = {"long_contracts": 10, "cr4_net_long": 0.25}
+    assert row_sha256(a) == row_sha256(b)
+
+
+def test_asof_returns_one_row_per_key_with_duplicate_index(store_env):
+    """_latest_by_key must not round-trip through .loc on a duplicated index — that
+    returns every matching label and yields several rows per natural key."""
+    from cotdata import vintage_ingest as vi
+    t = dt.datetime(2026, 7, 24, 16, tzinfo=dt.timezone.utc)
+    vi.ingest_canonical(_canon("2026-07-21"), snapshot_id="s1", observed_at=t)
+    obs = vi.read_observations()
+    dup = pd.concat([obs, obs])  # duplicated index labels, as a naive concat would give
+    latest = vi._latest_by_key(dup)
+    assert len(latest) == 3  # 3 categories, not 6
+    assert latest.groupby(vi.NATURAL_KEY, dropna=False).size().max() == 1
+
+
+def test_hash_change_without_field_diff_raises(store_env, monkeypatch):
+    """The consistency invariant: if the stored hash says 'changed' but no VALUE_FIELDS
+    differ, refuse to write an observation with no revision detail."""
+    from cotdata import vintage_ingest as vi
+    vi.ingest_canonical(_canon("2026-07-21"), snapshot_id="s1")
+    # corrupt the comparison: make every freshly computed hash differ, while the actual
+    # field values stay identical — exactly the drift the invariant guards against.
+    monkeypatch.setattr(vi, "row_sha256", lambda row: "deadbeef" * 8)
+    with pytest.raises(vi.ConsistencyError, match="no VALUE_FIELDS differ"):
+        vi.ingest_canonical(_canon("2026-07-21"), snapshot_id="s2")
+
+
+def test_concurrent_ingest_lock_fails_loudly(store_env):
+    """A second writer must error, not silently last-writer-wins over the first."""
+    from cotdata import vintage
+    from cotdata import vintage_ingest as vi
+    with vi._WriteLock(vintage.vintage_root()):
+        with pytest.raises(RuntimeError, match="single-writer"):
+            vi.ingest_canonical(_canon("2026-07-21"), snapshot_id="s1")
+
+
 def test_oi_over_sum_warns_not_raises(store_env):
     from cotdata import vintage_ingest as vi
     # commercial long+short (200000+250000) already < OI; force a breach on OI instead
