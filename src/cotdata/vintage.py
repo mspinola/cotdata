@@ -120,6 +120,11 @@ def _http_get(url: str, *, etag: str | None, last_modified: str | None) -> HttpR
     """Conditional GET with If-None-Match / If-Modified-Since. Real network path.
 
     Injected as ``http_get`` in tests so the capture logic runs fully offline.
+
+    MEASURED 2026-07-30: cftc.gov serves NO ETag on any of these files, so If-None-Match
+    can never fire — it is sent only in case that changes. If-Modified-Since does work
+    (verified 304 against both a static year and the current year), and is what makes an
+    --all sweep cheap: only the current and immediately-prior year actually transfer.
     """
     import requests  # local import: keeps the module importable without network deps
 

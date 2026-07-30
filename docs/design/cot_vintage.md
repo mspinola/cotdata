@@ -75,19 +75,64 @@ multi-MB copy retained weekly). **Measured, and it does not.**
 | `dea_fut_xls_2025.zip` | **2026-07-24** (this week) | **2026-01-02** | `Last-Modified` churns weekly; CONTENT frozen since January |
 | `dea_fut_xls_2026.zip` | 2026-07-24 | 2026-07-23 | current year: genuinely regenerated, real new data |
 
-Two consequences:
+**Caveat on the evidence.** Inner entry mtime is strong evidence, not proof: a
+regeneration that preserved source mtimes would look identical. The definitive test is
+`content_sha256` compared across two weeks, which the capture system now performs
+automatically. Week one settles it.
 
-1. **Closed years dedupe to nothing.** Their `Last-Modified` is re-touched weekly (so a
-   conditional GET may still transfer), but the bytes are identical, so `content_sha256`
-   matches and the dedupe branch retains no second copy. `--all` on a schedule is
-   therefore cheap in storage, contrary to the worry — it costs bandwidth, not disk.
-   This is precisely the case §3.4's "changed download is not a revision" exists for.
-2. **The current year does churn weekly**, correctly: a new report is appended, so the
-   sha genuinely changes and a new ~5-8 MB snapshot is retained. At the default
-   (3 annual + 1 weekly static) that is roughly **20 MB/week, ~1 GB/year** — small in
-   absolute terms but large enough that a retention policy should be a deliberate
-   decision, not a discovery. Options: keep all (simplest, ~1 GB/yr), or keep the raw
-   file only when the parsed values differ from the previous vintage.
+### Which files are actually re-touched (measured 2026-07-30)
+
+An earlier draft of this section claimed "closed years are re-touched weekly." **That was
+wrong.** The header sweep shows only the current year and the immediately-prior year move:
+
+| Year | `Last-Modified` |
+|---|---|
+| 2020 | 2021-10-29 |
+| 2021 | 2022-01-14 |
+| 2022 / 2023 / 2024 | 2026-01-15 (one bulk re-touch, not weekly) |
+| **2025** | **2026-07-24 19:27:59** |
+| **2026** | **2026-07-24 19:27:59** |
+
+2025 and 2026 share an identical timestamp: the weekly job regenerates a rolling
+current-plus-prior-year window. Everything older is static.
+
+### Conditional GET: works, and `If-None-Match` is dead weight
+
+- **No `ETag` on any CFTC file** (annual zips or weekly static). `If-None-Match` can
+  therefore never fire. It is harmless to keep sending (future-proofing if CFTC adds
+  one), but `If-Modified-Since` is the only live mechanism today.
+- **`If-Modified-Since` genuinely returns 304**, verified directly against both a static
+  year (2015) and the current year. Confirmed end-to-end in the pipeline: a second
+  `cotdata-vintage fetch` returned 304 on all four default sources, retained nothing new,
+  and recorded four check-only snapshot records.
+
+So the conditional GET is NOT decorative: on an `--all` run only the current and prior
+year actually transfer, and ~38 of ~40 annual files 304. Sha-dedupe is the backstop for
+the two that do transfer (2025 re-downloads weekly, ~8 MB, and dedupes away).
+
+### Decisions this settles
+
+1. **Retention: keep everything, no pruning.** ~1 GB/year of current-year churn is
+   immaterial relative to irreplaceability — those weekly copies *are* the vintage
+   series, so pruning them destroys the artifact being built. Recorded deliberately
+   rather than left to be discovered.
+2. **Run `--all` monthly or quarterly, not weekly, and not for backfill.** If closed-year
+   files are genuinely frozen, a `content_sha256` change on a closed year is *precisely*
+   the 2008-style retroactive-restatement signature. The point of `--all` is not to
+   collect bytes but to detect a change that should be impossible — the only automated
+   detector for the failure mode this whole subsystem exists to guard against. Weekly is
+   pointless (nothing older moves); monthly/quarterly is cheap because almost everything
+   304s.
+
+### Real-network smoke (2026-07-30, pre-merge)
+
+Default path (`cotdata-vintage fetch` = current year × 3 reports + weekly static) run
+against live cftc.gov into a throwaway store: all four URLs resolved, the UA was
+accepted, four 200s retained (legacy 4,943,331 B; disagg 1,399,661 B; TFF 403,332 B;
+weekly static 417,064 B), provenance recorded with `parse_status=pending`. The legacy sha
+matched an independent manual download. A second run returned 304 on all four and
+retained nothing. URL builders and headers are therefore verified live, not just in
+fixtures.
 
 ## 3c. Decision: futures-only, `combined` is constant-False for now
 
