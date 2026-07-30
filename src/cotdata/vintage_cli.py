@@ -135,6 +135,14 @@ def _cmd_sched_sync(args) -> int:
     return 0
 
 
+def _cmd_sched_published(args) -> int:
+    from . import vintage_schedule
+    res = vintage_schedule.sync_published()
+    print(f"schedule published: {res['published']} week(s) resolved from retained "
+          f"weekly-static Last-Modified headers (true publication timestamps).")
+    return 0
+
+
 def _cmd_sched_backfill(args) -> int:
     from . import vintage_schedule
     counts = vintage_schedule.backfill()
@@ -153,6 +161,9 @@ def main_schedule(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("sync", help="Scrape Special Announcements into the store.")
     s.set_defaults(func=_cmd_sched_sync)
+    pub = sub.add_parser("published",
+                         help="Derive true publication dates from retained weekly statics.")
+    pub.set_defaults(func=_cmd_sched_published)
     b = sub.add_parser("backfill", help="Resolve release_date/source across all observations.")
     b.set_defaults(func=_cmd_sched_backfill)
     args = p.parse_args(argv)

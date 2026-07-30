@@ -47,5 +47,21 @@ if %ERRORLEVEL% NEQ 0 (
   exit /b %ERRORLEVEL%
 )
 
+REM Resolve release dates. `published` reads the true publication timestamp out of the
+REM weekly static just captured (its HTTP Last-Modified), which beats a poll-derived
+REM `observed` bound; backfill then applies the precedence across all observations.
+REM Both are idempotent, so re-running is a cheap no-op.
+"REPLACE_WITH_VENV_PATH\Scripts\cotdata-schedule.exe" published
+if %ERRORLEVEL% NEQ 0 (
+  echo schedule published FAILED with code %ERRORLEVEL%
+  exit /b %ERRORLEVEL%
+)
+
+"REPLACE_WITH_VENV_PATH\Scripts\cotdata-schedule.exe" backfill
+if %ERRORLEVEL% NEQ 0 (
+  echo schedule backfill FAILED with code %ERRORLEVEL%
+  exit /b %ERRORLEVEL%
+)
+
 echo vintage ok
 exit /b 0

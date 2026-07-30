@@ -343,6 +343,7 @@ cotdata-vintage ingest --pending           # parse retained raw -> observations 
 cotdata-vintage diff --since 2026-01-01    # field-level revisions, with revision depth
 cotdata-vintage asof --as-of 2026-07-24T18:00:00 --report-date 2026-07-21
 cotdata-schedule sync                      # CFTC Special Announcements
+cotdata-schedule published                 # true publication dates from retained weekly statics
 cotdata-schedule backfill                  # resolve release_date + its provenance
 ```
 
@@ -363,7 +364,10 @@ How it works:
   normalized to Tuesday), and `release_date` is resolved through
   `published > observed > announced > scheduled > derived`, with the source recorded — a
   release date without provenance is worse than none, since indexing on `report_date`
-  embeds a lookahead (three days normally, weeks during a backlog).
+  embeds a lookahead (three days normally, weeks during a backlog). `published` is the
+  weekly static's HTTP `Last-Modified`, a true publication timestamp; it is forward-only
+  (that file holds one week and is overwritten), so weeks predating capture fall back
+  down the chain.
 
 **Run capture on the producer, not a replica**, and schedule it **daily**: nearly every
 request returns 304, so a daily run is close to free while catching holiday-shifted and

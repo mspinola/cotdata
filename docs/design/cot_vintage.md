@@ -232,9 +232,25 @@ nonreportable`; Disagg: `producer_merchant/swap/managed_money/other_reportable`;
 
 In: raw snapshot capture; change-only observation writes; field-level revisions;
 release schedule + announcements ingest + `release_date`/`release_date_source`
-backfill; §8 tests; `current/` byte-identical. Deferred: `vintage stats`,
-category-migration detection, tombstone *logic* (column present), weekly-static
-fetching beyond the spike.
+backfill; §8 tests; `current/` byte-identical.
+
+**`published` shipped too, contrary to the original deferral.** §10 deferred
+weekly-static work on the assumption it required parsing that file. Measurement showed
+otherwise: the weekly static is a headerless positional CSV covering exactly ONE report
+date (365 rows, 129 columns, a single distinct value in field 2), so mapping a snapshot
+to its report date reads one field, and its publication timestamp was already being
+captured into `snapshots.json`. Deriving `published` cost ~30 lines rather than a
+canonicaliser, so it landed. Verified live: report date 2026-07-21 resolves to a
+2026-07-24 ET publication date. (Full canonicalisation of the weekly static *into
+observations* remains genuinely larger and is still out of scope.)
+
+`published` is forward-only by nature — the weekly static holds one week and is
+overwritten — so it covers weeks from the first capture onward; historical weeks stay on
+`announced` / `scheduled` / `derived`.
+
+Still deferred: `vintage stats` (needs a quarter of data to measure),
+category-migration detection (needs revisions to exist), tombstone *logic* (column
+present, needs a real disappearing key to design against).
 
 ## Bottom line
 

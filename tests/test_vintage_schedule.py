@@ -157,6 +157,77 @@ def test_published_outranks_observed():
     assert src == "published" and val == dt.date(2026, 7, 24)
 
 
+def _weekly_static_bytes(report_date="2026-07-21"):
+    """A headerless positional CSV shaped like deafut.txt: field[2] is the ISO report
+    date, identical on every row (measured: one distinct date per file)."""
+    rows = [f'"WHEAT-SRW - CHICAGO BOARD OF TRADE",260721,{report_date},001602,CBT ,00,001 ,455433',
+            f'"GOLD - COMMODITY EXCHANGE INC.",260721,{report_date},088691,CMX ,00,001 ,500000']
+    return ("\n".join(rows) + "\n").encode()
+
+
+def test_report_date_read_from_one_field(store_env, tmp_path):
+    from cotdata.vintage_schedule import report_date_of_weekly_static
+    p = tmp_path / "wk.txt"
+    p.write_bytes(_weekly_static_bytes("2026-07-21"))
+    assert report_date_of_weekly_static(p) == dt.date(2026, 7, 21)
+
+
+def test_last_modified_converts_to_et_publication_date():
+    from cotdata.vintage_schedule import _last_modified_to_release_date
+    # 19:27:59 UTC on a Friday = 15:27 ET the SAME day (the ~15:30 ET release)
+    assert _last_modified_to_release_date("Fri, 24 Jul 2026 19:27:59 GMT") == dt.date(2026, 7, 24)
+    # a UTC timestamp after midnight belongs to the PREVIOUS ET day
+    assert _last_modified_to_release_date("Sat, 25 Jul 2026 02:00:00 GMT") == dt.date(2026, 7, 24)
+    assert _last_modified_to_release_date("not a date") is None
+
+
+def test_published_beats_observed_end_to_end(store_env):
+    """A retained weekly static gives a true publication date that outranks the
+    poll-derived `observed` bound."""
+    from cotdata import vintage
+    from cotdata import vintage_ingest as vi
+    from cotdata import vintage_schedule as vs
+
+    # capture a weekly static whose Last-Modified is the real publication moment
+    lm = "Fri, 24 Jul 2026 19:27:59 GMT"
+
+    def http(url, *, etag=None, last_modified=None):
+        from cotdata.vintage import HttpResult
+        return HttpResult(200, _weekly_static_bytes("2026-07-21") + b"\x00" * 2048,
+                          etag='"e"', last_modified=lm)
+
+    vintage.fetch(sources=[vintage.WEEKLY_STATIC], http_get=http, rate_limit_s=0,
+                  now_fn=lambda: dt.datetime(2026, 7, 27, 21, tzinfo=dt.timezone.utc))
+    # and an observation captured 3 days after the report date (would resolve `observed`)
+    _ingest_one("2026-07-21", observed_at=dt.datetime(2026, 7, 24, 21, tzinfo=dt.timezone.utc))
+
+    derived = vs.published_from_snapshots()
+    assert len(derived) == 1
+    assert pd.Timestamp(derived.iloc[0]["report_date"]).date() == dt.date(2026, 7, 21)
+    assert pd.Timestamp(derived.iloc[0]["release_date"]).date() == dt.date(2026, 7, 24)
+
+    counts = vs.backfill()  # production path folds published in automatically
+    obs = vi.read_observations()
+    assert set(obs["release_date_source"]) == {"published"}
+    assert counts["published"] == len(obs) and counts["observed"] == 0
+
+
+def test_sync_published_is_idempotent(store_env):
+    from cotdata import vintage
+    from cotdata import vintage_schedule as vs
+
+    def http(url, *, etag=None, last_modified=None):
+        from cotdata.vintage import HttpResult
+        return HttpResult(200, _weekly_static_bytes() + b"\x00" * 2048, etag='"e"',
+                          last_modified="Fri, 24 Jul 2026 19:27:59 GMT")
+
+    vintage.fetch(sources=[vintage.WEEKLY_STATIC], http_get=http, rate_limit_s=0,
+                  now_fn=lambda: dt.datetime(2026, 7, 27, 21, tzinfo=dt.timezone.utc))
+    assert vs.sync_published() == {"published": 1}
+    vs.sync_published()
+    assert len(vs.read_release_schedule()) == 1  # no duplicate row
+
+
 def test_announcement_parse_is_best_effort():
     from cotdata.vintage_schedule import _parse_announcements
     html = "<ul><li>January 5, 2026: revised gold report</li><li></li></ul>"

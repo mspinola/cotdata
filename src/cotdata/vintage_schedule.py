@@ -19,21 +19,22 @@ so it is fully testable offline. See docs/design/cot_vintage.md.
 """
 from __future__ import annotations
 
+import csv
 import datetime as dt
+from email.utils import parsedate_to_datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from . import vintage
+from . import config, vintage
 from . import vintage_ingest as vi
 
 # `published` outranks `observed`: it is the weekly-static HTTP Last-Modified, a TRUE
 # publication timestamp (spike 2026-07-30), whereas `observed` is only the first time WE
 # saw the report — accurate to the polling interval. They must not share a bucket, so it
 # stays possible to tell later which weeks carry a real publication time.
-# NOTE: nothing populates `published` yet — mapping a weekly static to its report_date
-# requires parsing that file, which handoff §10 defers. The slot and precedence are here
-# so the wiring lands without a taxonomy migration.
+# Populated by published_from_snapshots() below, folded into backfill automatically.
 PRECEDENCE = ("published", "observed", "announced", "scheduled", "derived", "unknown")
 
 
@@ -98,16 +99,109 @@ def write_announcements(df: pd.DataFrame) -> None:
     _write(announcements_path(), df)
 
 
+# ── `published`: true publication time from the weekly static ───────────────
+# The weekly static is a headerless positional CSV covering exactly ONE report date
+# (measured 2026-07-30: 365 rows, 129 columns, a single distinct value in field 2), so
+# mapping a retained snapshot to its report_date reads one field rather than parsing the
+# file. Its HTTP Last-Modified is a true publication timestamp, which is what makes this
+# strictly better than `observed` (accurate only to the polling interval).
+_WEEKLY_STATIC_DATE_FIELD = 2
+PUBLISH_TZ = "America/New_York"  # CFTC publishes on ET; convert before taking a date
+
+
+def report_date_of_weekly_static(path) -> dt.date | None:
+    """The single report_date a retained weekly-static file covers, or None."""
+    try:
+        with open(path, newline="") as fh:
+            for row in csv.reader(fh):
+                if len(row) > _WEEKLY_STATIC_DATE_FIELD:
+                    try:
+                        return pd.Timestamp(row[_WEEKLY_STATIC_DATE_FIELD]).date()
+                    except (ValueError, TypeError):
+                        return None
+    except OSError:
+        return None
+    return None
+
+
+def _last_modified_to_release_date(lm: str) -> dt.date | None:
+    """RFC 2822 Last-Modified -> publication DATE in ET."""
+    try:
+        ts = parsedate_to_datetime(lm)
+    except (TypeError, ValueError):
+        return None
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+    return ts.astimezone(ZoneInfo(PUBLISH_TZ)).date()
+
+
+def published_from_snapshots(snapshots=None, *, store_root=None) -> pd.DataFrame:
+    """Derive `published` release-schedule rows from retained weekly-static snapshots.
+
+    Forward-only by nature: the weekly static holds one week and is overwritten, so this
+    covers weeks captured from the first run onward and can never reach back. Historical
+    weeks stay on announced/scheduled/derived.
+    """
+    from . import vintage
+    if snapshots is None:
+        snapshots = vintage.read_snapshots()
+    root = Path(store_root) if store_root else config.store_root()
+
+    rows, seen = [], set()
+    for s in snapshots:
+        if s.get("source_kind") != "weekly_static":
+            continue
+        lp, lm = s.get("local_path"), s.get("http_last_modified")
+        if not lp or not lm:
+            continue
+        p = Path(lp)
+        if not p.is_absolute():
+            p = root / lp
+        rd = report_date_of_weekly_static(p)
+        rel = _last_modified_to_release_date(lm)
+        if rd is None or rel is None or rd in seen:
+            continue
+        seen.add(rd)
+        rows.append({
+            "report_date": pd.Timestamp(rd),
+            "release_date": pd.Timestamp(rel),
+            "source": "published",
+            "note": f"weekly-static Last-Modified ({lm})",
+            "ingested_at": pd.Timestamp(s.get("retrieved_at") or pd.Timestamp.now("UTC")),
+        })
+    if not rows:
+        return pd.DataFrame(columns=["report_date", "release_date", "source", "note",
+                                     "ingested_at"])
+    return pd.DataFrame(rows)
+
+
+def sync_published() -> dict:
+    """Merge derived `published` rows into release_schedule.parquet. Idempotent."""
+    derived = published_from_snapshots()
+    if derived.empty:
+        return {"published": 0}
+    existing = read_release_schedule()
+    merged = pd.concat([existing, derived], ignore_index=True) if not existing.empty else derived
+    merged = merged.drop_duplicates(subset=["report_date", "source"], keep="last")
+    write_release_schedule(merged)
+    return {"published": len(derived)}
+
+
 # ── Backfill ────────────────────────────────────────────────────────────────
+_SOURCE_RANK = {"published": 3, "announced": 2, "scheduled": 1}
+
+
 def _schedule_map(schedule: pd.DataFrame) -> dict:
-    """report_date -> (release_date, source) from the schedule table. `announced` rows
-    win over `scheduled` rows for the same report_date."""
+    """report_date -> (release_date, source) from the schedule table, keeping the
+    highest-precedence source per date (published > announced > scheduled)."""
     out: dict = {}
     for _, r in schedule.iterrows():
         rd = pd.Timestamp(r["report_date"]).normalize()
         src = r.get("source", "scheduled")
         prev = out.get(rd)
-        if prev is None or (prev[1] == "scheduled" and src == "announced"):
+        if prev is None or _SOURCE_RANK.get(src, 0) > _SOURCE_RANK.get(prev[1], 0):
             out[rd] = (pd.Timestamp(r["release_date"]).date(), src)
     return out
 
@@ -122,7 +216,13 @@ def backfill(*, schedule: pd.DataFrame | None = None,
     bulk-ingested long afterwards (a bulk ingest's observed_at is not a release date).
     """
     if schedule is None:
-        schedule = read_release_schedule()
+        # Production path: fold in `published` rows derived from retained weekly statics,
+        # so a plain `cotdata-schedule backfill` picks up true publication timestamps
+        # without a separate step. Tests pass an explicit schedule to isolate precedence.
+        stored = read_release_schedule()
+        derived = published_from_snapshots()
+        parts = [d for d in (stored, derived) if not d.empty]
+        schedule = pd.concat(parts, ignore_index=True) if parts else stored
     smap = _schedule_map(schedule)
 
     obs_dir = vi._obs_dir()
@@ -155,10 +255,12 @@ def backfill(*, schedule: pd.DataFrame | None = None,
                 if 0 <= delta <= observed_window_days:
                     observed = oa
             sched = smap.get(rd)
+            published = sched[0] if sched and sched[1] == "published" else None
             announced = sched[0] if sched and sched[1] == "announced" else None
             scheduled = sched[0] if sched and sched[1] == "scheduled" else None
             rdate, src = resolve_release_date(
-                rd, observed=observed, announced=announced, scheduled=scheduled)
+                rd, published=published, observed=observed,
+                announced=announced, scheduled=scheduled)
             rel_dates.append(pd.Timestamp(rdate) if rdate is not None else pd.NaT)
             rel_srcs.append(src)
             counts[src] += 1
