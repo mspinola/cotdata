@@ -57,7 +57,48 @@ def _cmd_ingest(args) -> int:
             vintage.update_snapshot(s["snapshot_id"], parse_status="failed", parse_error=str(e))
             print(f"  {s['snapshot_id']}: FAILED — {e}")
     print(f"vintage ingest: {total_obs} new observation(s), {total_rev} revision(s).")
+
+    # Surface revisions rather than only recording them. A scheduled run's stdout goes
+    # nowhere, so a silent exit-0 after detecting a retroactive restatement would defeat
+    # the point of the subsystem. Anything noteworthy exits non-zero, which Task Scheduler
+    # and cron both report as a failed run, and prints the detail for the log.
+    # Scoped to the snapshots THIS run processed, not to every snapshot ever recorded.
+    # A store-wide scan would keep firing on every subsequent run once a single
+    # restatement had been seen, and an alert that never clears is one that gets ignored.
+    suspects = [s for s in snaps if s.get("restatement_suspect")]
+    if total_rev or suspects:
+        _report_revisions(total_rev, suspects)
+        raise SystemExit(
+            f"cotdata-vintage: {total_rev} revision(s)"
+            + (f", {len(suspects)} closed-year restatement suspect(s)" if suspects else "")
+            + " — review with 'cotdata-vintage diff'. Non-zero so a scheduler surfaces this; "
+              "the data IS committed, this is a notification, not a failure.")
     return 0
+
+
+def _report_revisions(total_rev: int, suspects: list) -> None:
+    from . import vintage_ingest
+    if suspects:
+        print("\n*** CLOSED-YEAR RESTATEMENT SUSPECT ***")
+        for s in suspects[-5:]:
+            print(f"    {s.get('report_type')} {s.get('report_year')} "
+                  f"changed content at {s.get('retrieved_at')}")
+        print("    A closed year should be frozen. This is the retroactive-restatement")
+        print("    signature the vintage store exists to detect.")
+    if not total_rev:
+        return
+    rev = vintage_ingest.read_revisions()
+    if rev.empty:
+        return
+    recent = rev.sort_values("detected_at").tail(20)
+    print(f"\n{len(rev)} revision row(s) recorded; most recent:")
+    cols = ["report_date", "market_code", "category", "field", "old_value",
+            "new_value", "age_days"]
+    print(recent[[c for c in cols if c in recent.columns]].to_string(index=False))
+    deep = recent[recent["age_days"] > 30] if "age_days" in recent.columns else None
+    if deep is not None and not deep.empty:
+        print(f"\n{len(deep)} of these reach back more than 30 days — revisions inside the")
+        print("calibration window rewrite the baseline every historical reading used.")
 
 
 def _cmd_diff(args) -> int:

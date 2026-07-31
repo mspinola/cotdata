@@ -193,6 +193,63 @@ def test_concurrent_ingest_lock_fails_loudly(store_env):
             vi.ingest_canonical(_canon("2026-07-21"), snapshot_id="s1")
 
 
+def test_cli_ingest_exits_nonzero_when_revisions_are_recorded(store_env, capsys):
+    """A scheduled run's stdout goes nowhere, so a silent exit-0 after detecting a
+    restatement would defeat the subsystem. Revisions must surface as a non-zero exit."""
+    from cotdata import vintage, vintage_cli
+    from cotdata import vintage_ingest as vi
+
+    # two vintages of the same report date, second one revised
+    vi.ingest_canonical(_canon("2026-07-21", comm_short=250000), snapshot_id="s1",
+                        observed_at=dt.datetime(2026, 7, 24, tzinfo=dt.timezone.utc))
+    vi.ingest_canonical(_canon("2026-07-21", comm_short=251000), snapshot_id="s2",
+                        observed_at=dt.datetime(2026, 7, 31, tzinfo=dt.timezone.utc))
+    assert not vi.read_revisions().empty
+
+    # drive the real CLI path: a snapshot whose raw file re-parses to the revised values
+    raw = store_env / "vintage" / "raw" / "annual_zip" / "2026"
+    raw.mkdir(parents=True, exist_ok=True)
+    (raw / "f.zip").write_bytes(b"x")
+    vintage._write_manifest({"schema_version": 1, "snapshots": [{
+        "snapshot_id": "s3", "report_type": "legacy", "source_kind": "annual_zip",
+        "local_path": "vintage/raw/annual_zip/2026/f.zip", "parse_status": "pending",
+        "restatement_suspect": True, "report_year": 2025,
+        "retrieved_at": "2026-07-31T21:00:00Z",
+    }]})
+
+    with pytest.raises(SystemExit) as exc:
+        vintage_cli.main(["ingest", "--pending"])
+    msg = str(exc.value)
+    assert "restatement suspect" in msg and "cotdata-vintage diff" in msg
+    assert "notification, not a failure" in msg  # the data IS committed
+    assert "RESTATEMENT SUSPECT" in capsys.readouterr().out
+
+
+def test_restatement_alert_does_not_fire_forever(store_env):
+    """A suspect recorded in an EARLIER run must not keep failing every later run —
+    an alert that never clears is one that gets switched off."""
+    from cotdata import vintage, vintage_cli
+    vintage._write_manifest({"schema_version": 1, "snapshots": [{
+        "snapshot_id": "old", "report_type": "legacy", "source_kind": "annual_zip",
+        "local_path": "vintage/raw/annual_zip/2025/old.zip", "parse_status": "ok",
+        "restatement_suspect": True, "report_year": 2025,
+        "retrieved_at": "2026-01-01T00:00:00Z",
+    }]})
+    # --pending selects nothing (that snapshot is already parse_status=ok), so a later
+    # run is quiet even though the store still remembers the suspect.
+    assert vintage_cli.main(["ingest", "--pending"]) == 0
+
+
+def test_restatement_suspect_is_reported_prominently(store_env, capsys):
+    from cotdata import vintage_cli
+    suspects = [{"report_type": "legacy", "report_year": 2025,
+                 "retrieved_at": "2026-07-31T21:00:00Z"}]
+    vintage_cli._report_revisions(0, suspects)
+    out = capsys.readouterr().out
+    assert "CLOSED-YEAR RESTATEMENT SUSPECT" in out
+    assert "legacy 2025" in out
+
+
 def test_oi_over_sum_warns_not_raises(store_env):
     from cotdata import vintage_ingest as vi
     # commercial long+short (200000+250000) already < OI; force a breach on OI instead
