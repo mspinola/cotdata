@@ -70,10 +70,16 @@ def test_current_cot_legacy_output_matches_pre_vintage_baseline(store_env):
 
     pd.testing.assert_frame_equal(
         produced, expected,
-        check_dtype=False,      # CI spans pandas 2 and 3, which disagree on the string dtype
+        check_dtype=False,       # CI spans pandas 2 and 3, which disagree on the string dtype
+        check_index_type=False,  # ...and on datetime resolution: pandas 3 writes us, 2 reads ns.
+                                 # check_dtype does NOT cover the index, which needs this.
         check_freq=False,
         obj="current/ cot_legacy output changed — the vintage layer is no longer additive",
     )
+    # Values, columns, order and index CONTENT are still compared exactly above; only the
+    # storage dtypes are relaxed, and only because they are the library's choice not ours.
+    assert list(produced.columns) == list(expected.columns)
+    assert [str(d.date()) for d in produced.index] == [str(d.date()) for d in expected.index]
 
 
 def test_current_write_path_is_deterministic_within_an_environment(store_env):
