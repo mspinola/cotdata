@@ -226,6 +226,31 @@ def _latest_for_url(snapshots: list[dict], url: str) -> dict | None:
     return max(prev, key=lambda t: (t[0], t[1]))[2]
 
 
+def _latest_with_content(snapshots: list[dict], url: str) -> dict | None:
+    """Most recent snapshot for a URL that actually carries content.
+
+    Distinct from ``_latest_for_url`` on purpose, and the distinction is load-bearing.
+    A FAILURE record has ``content_sha256``, ``http_etag`` and ``http_last_modified`` all
+    None, so comparing against it means the next fetch sends no If-Modified-Since, cannot
+    match the dedupe test, and is classified as changed content.
+
+    On a frozen year that produces a FALSE RESTATEMENT ALERT from a single network blip:
+    the one alarm this subsystem exists to raise, fired by an event that says nothing
+    about the data. It also re-retains bytes already on disk under a second filename
+    carrying the identical sha. Both were reproduced before this was split out.
+
+    Content questions ("is this the same file?") must therefore look past failures to the
+    last snapshot that actually saw bytes. Outcome questions ("what happened last time?")
+    must not, which is why the edge-trigger still uses ``_latest_for_url``.
+    """
+    prev = [(s.get("retrieved_at") or "", i, s)
+            for i, s in enumerate(snapshots)
+            if s.get("source_url") == url and s.get("content_sha256")]
+    if not prev:
+        return None
+    return max(prev, key=lambda t: (t[0], t[1]))[2]
+
+
 def _snapshot_id(retrieved_at: str, url: str, tag: str) -> str:
     """Unique per (retrieval second, url, content-state).
 
@@ -385,10 +410,15 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
     changed sha does not imply changed data, and an unchanged sha means nothing new to
     retain). Raw bytes, once written, are never rewritten.
     """
+    # Two different "previous" snapshots, and conflating them fires false restatement
+    # alerts. `content` is the last snapshot that actually saw bytes and answers "is this
+    # the same file?"; `prev` is the last snapshot of any kind and answers "what happened
+    # last time?", which is what the tripwire edge-triggers on. See _latest_with_content.
+    content = _latest_with_content(snapshots, source.url)
     prev = _latest_for_url(snapshots, source.url)
     res = http_get(source.url,
-                   etag=(prev or {}).get("http_etag"),
-                   last_modified=(prev or {}).get("http_last_modified"))
+                   etag=(content or {}).get("http_etag"),
+                   last_modified=(content or {}).get("http_last_modified"))
     retrieved_at = _iso(now)
     base = {
         "source_url": source.url,
@@ -406,11 +436,11 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             **base,
             "snapshot_id": _snapshot_id(retrieved_at, source.url, "304"),
             "http_status": 304,
-            "http_etag": (prev or {}).get("http_etag"),
-            "http_last_modified": (prev or {}).get("http_last_modified"),
-            "content_sha256": (prev or {}).get("content_sha256"),
+            "http_etag": (content or {}).get("http_etag"),
+            "http_last_modified": (content or {}).get("http_last_modified"),
+            "content_sha256": (content or {}).get("content_sha256"),
             "byte_size": None,
-            "local_path": (prev or {}).get("local_path"),
+            "local_path": (content or {}).get("local_path"),
             "note": "304 not-modified",
         }, prev=prev, now=now)
 
@@ -422,7 +452,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             f"legitimate snapshot.")
 
     sha = hashlib.sha256(res.content).hexdigest()
-    if prev and prev.get("content_sha256") == sha:
+    if content and content.get("content_sha256") == sha:
         # Byte-identical to what we already retained (zips regenerate): dedupe, no rewrite.
         return _annotate({
             **base,
@@ -432,7 +462,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             "http_last_modified": res.last_modified,
             "content_sha256": sha,
             "byte_size": len(res.content),
-            "local_path": prev.get("local_path"),
+            "local_path": content.get("local_path"),
             "note": "unchanged bytes (deduped)",
         }, prev=prev, now=now)
 
@@ -465,7 +495,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
     # the human-readable reason; this flag stays because it is the field ``ingest`` and
     # every stored snapshot already key off.
     restatement_suspect = (
-        prev is not None and source.report_year is not None
+        content is not None and source.report_year is not None
         and source.report_year < now.year)
 
     return _annotate({
@@ -545,8 +575,17 @@ def fetch(year: int | None = None, *, all_years: bool = False,
             new_files += 1
         # Write after EVERY source, not once at the end: the manifest is small and its
         # replace is atomic, so this costs nothing measurable and shrinks the crash window
-        # from a whole run to a single source. Combined with the atomic raw write, an
-        # interrupted run leaves a consistent store rather than unrecorded blobs.
+        # from a whole run to a single source.
+        #
+        # It does NOT eliminate that window, and an earlier version of this comment
+        # claimed it did (caught in adversarial review). Raw bytes are written and
+        # os.replace'd inside capture_source, then the manifest entry is appended here, so
+        # a crash in between leaves a retained blob with no index entry. That is the
+        # deliberate direction to fail in: the reverse ordering would leave an index entry
+        # pointing at a file that does not exist, which is a lie rather than an omission.
+        # The blob is also self-describing, since its filename carries the sha8 prefix, and
+        # the only cost of the orphan is that the next fetch re-downloads and retains a
+        # duplicate copy of bytes already on disk.
         _write_manifest(m)
         if rate_limit_s and i < len(sources) - 1:
             time.sleep(rate_limit_s)

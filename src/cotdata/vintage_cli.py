@@ -48,9 +48,19 @@ def _snapshot_path(local_path: str):
     Normalising here rather than at write time keeps every snapshot already recorded on
     the Windows producer readable.
     """
-    from pathlib import Path
-    return config.store_root().joinpath(*str(local_path).replace("\\", "/").split("/")) \
-        if local_path else Path()
+    from pathlib import Path, PureWindowsPath
+    if not local_path:
+        return Path()
+    raw = str(local_path)
+    # An ABSOLUTE local_path means COTDATA_VINTAGE_ROOT pointed outside the store, which
+    # vintage_root() calls mandatory on a mirrored replica. Blindly re-rooting it under
+    # store_root() turns /Volumes/ext/vintage/... into <store>/Volumes/ext/vintage/...,
+    # so every ingest raises FileNotFoundError, gets swallowed, and marks the snapshot
+    # parse_status="failed", which --pending never re-selects. One run would drain the
+    # entire backlog to failed with no CLI able to reset it.
+    if PureWindowsPath(raw).is_absolute() or Path(raw).is_absolute():
+        return Path(raw.replace("\\", "/"))
+    return config.store_root().joinpath(*raw.replace("\\", "/").split("/"))
 
 
 # Each report type maps to (parser, canonicaliser). Legacy is indexed by report date
@@ -77,7 +87,15 @@ def _cmd_ingest(args) -> int:
     snaps = vintage.read_snapshots()
     if args.snapshot:
         snaps = [s for s in snaps if s.get("snapshot_id") == args.snapshot]
-    elif args.pending:
+    elif not args.all_snapshots:
+        # Default to pending even with no flag. A bare `ingest` used to select EVERY
+        # snapshot ever recorded and re-ingest each one, which is not a no-op: replaying
+        # an older snapshot after a revision writes the superseded value back with a
+        # NEWER observed_at, emitting a reversed revision (35 -> 30) followed by a
+        # re-revision (30 -> 35), and inflating age_days on both. revisions/ is the
+        # primary artifact here and age_days is what tells a consumer whether a
+        # restatement reached into its calibration window, so forging either is worse
+        # than doing nothing. --all-snapshots still allows a deliberate full replay.
         snaps = [s for s in snaps if s.get("parse_status") == "pending"]
     canon = _canonicalisers()
     total_obs = total_rev = 0
@@ -99,7 +117,14 @@ def _cmd_ingest(args) -> int:
         path = _snapshot_path(s["local_path"])
         try:
             canonical = fn(path)
-            res = vintage_ingest.ingest_canonical(canonical, snapshot_id=s["snapshot_id"])
+            # observed_at is the snapshot's OWN retrieval time, not the clock at ingest.
+            # "When did we observe this value" is a property of the capture, so a late or
+            # repeated ingest of retained bytes must not move it: doing so would let a
+            # replay of an old snapshot outrank the newer one in the point-in-time read
+            # and hand back the pre-revision value for a timestamp after the revision.
+            res = vintage_ingest.ingest_canonical(
+                canonical, snapshot_id=s["snapshot_id"],
+                observed_at=s.get("retrieved_at") or None)
             vintage.update_snapshot(s["snapshot_id"], parse_status="ok", parse_error=None)
             total_obs += res["observations"]
             total_rev += res["revisions"]
@@ -255,7 +280,11 @@ def main(argv=None) -> int:
     ing = sub.add_parser("ingest", help="Parse retained raw files into change-only observations.")
     g = ing.add_mutually_exclusive_group()
     g.add_argument("--snapshot", default=None, help="Ingest one snapshot id.")
-    g.add_argument("--pending", action="store_true", help="Ingest all parse_status=pending.")
+    g.add_argument("--pending", action="store_true",
+                   help="Ingest all parse_status=pending. This is also the default.")
+    g.add_argument("--all-snapshots", action="store_true", dest="all_snapshots",
+                   help="Replay EVERY recorded snapshot, including already-ingested ones. "
+                        "Only for rebuilding a store from retained raw bytes.")
     ing.set_defaults(func=_cmd_ingest)
 
     d = sub.add_parser("diff", help="Show recorded field-level revisions.")

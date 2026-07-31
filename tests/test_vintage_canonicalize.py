@@ -203,3 +203,38 @@ def test_tff_and_disagg_rows_never_collide_in_the_natural_key(tmp_path, monkeypa
     r = vi.ingest_canonical(vi.canonicalize_tff(_tff_wide()), snapshot_id="s2")
     assert (r["observations"], r["revisions"]) == (5, 0)   # 5 new, nothing overwritten
     assert len(vi.read_observations()) == 10
+
+
+def test_duplicate_natural_keys_in_one_frame_are_refused():
+    """Found by adversarial review. Two rows for one key get identical
+    (observed_at, snapshot_id), which exhausts _latest_by_key's tie-break and leaves the
+    stored 'latest' decided by append order. Both also diff against the same prior row, so
+    revisions/ gains two contradictory entries for one detection."""
+    from cotdata import vintage_ingest as vi
+    doubled = pd.concat([_disagg_wide(), _disagg_wide(Open_Interest_All=1001)],
+                        ignore_index=True)
+    with pytest.raises(vi.ValidationError, match="natural key"):
+        vi.validate(vi.canonicalize_disagg(doubled))
+
+
+def test_a_column_coerced_entirely_to_null_raises_instead_of_being_stored():
+    """Spec section 5 requires a null-rate band, and nothing implemented it. errors="coerce"
+    is right for CFTC's '.' suppression marker but would silently swallow a changed VALUE
+    FORMAT in a column whose name never moved. The nulls would be written as real
+    observations and the next genuine value recorded as a revision that never happened."""
+    from cotdata import vintage_ingest as vi
+    reformatted = _disagg_wide(M_Money_Positions_Long_All="4,00")   # thousands separator
+    with pytest.raises(vi.ValidationError, match="null"):
+        vi.validate(vi.canonicalize_disagg(reformatted))
+
+
+def test_suppressed_trader_counts_do_not_trip_the_null_band():
+    """CFTC genuinely suppresses about half of all trader counts, so the band must apply
+    to position columns only or it would fire on every real file."""
+    from cotdata import vintage_ingest as vi
+    allsupp = _disagg_wide(**{c: "." for c in
+                              ("Traders_Prod_Merc_Long_All", "Traders_Prod_Merc_Short_All",
+                               "Traders_Swap_Long_All", "Traders_Swap_Short_All",
+                               "Traders_M_Money_Long_All", "Traders_M_Money_Short_All",
+                               "Traders_Other_Rept_Long_All", "Traders_Other_Rept_Short_All")})
+    assert vi.validate(vi.canonicalize_disagg(allsupp)) == []

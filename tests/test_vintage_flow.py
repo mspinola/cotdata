@@ -122,3 +122,23 @@ def test_missing_columns_raise_rather_than_silently_producing_nothing():
     can = _rows(WEEKS[:2], longs=[1, 2], shorts=[1, 1]).drop(columns=["short_contracts"])
     with pytest.raises(vf.FlowError, match="missing columns"):
         vf.decompose(can)
+
+
+def test_a_week_where_nothing_moved_is_quiet_not_long_liquidation():
+    """Found by adversarial review. `long_dominates & (d_long <= 0)` swallows d_long == 0,
+    so every flat week was labelled long_liquidation. Measured over the real 2026 Legacy
+    file that was 3,308 of 29,787 transitions (11.1%), which made long_liquidation the
+    modal state with a third of its bucket being weeks where nothing happened.
+
+    Zero is not a small number, it is the absence of a change, so this must NOT depend on
+    the min_frac_oi dead zone, which is off by default."""
+    from cotdata import vintage_flow as vf
+    can = _rows(WEEKS[:3], longs=[100, 100, 100], shorts=[50, 50, 50])
+    assert list(vf.decompose(can)["state"]) == [vf.QUIET, vf.QUIET]
+
+
+def test_a_one_contract_move_is_still_classified():
+    """The quiet rule must catch only exact zero, or it becomes an unstated threshold."""
+    from cotdata import vintage_flow as vf
+    can = _rows(WEEKS[:2], longs=[100, 101], shorts=[50, 50])
+    assert vf.decompose(can)["state"].iloc[0] == vf.NEW_LONGS

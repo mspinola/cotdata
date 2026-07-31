@@ -433,3 +433,63 @@ def _default_sources(vintage, this_year, **kw):
         seen.append(vintage.Source(rec["report_type"], rec["source_kind"], "zip",
                                    rec["source_url"], rec["report_year"]))
     return seen
+
+
+def test_a_fetch_failure_does_not_defeat_dedupe_or_fire_a_false_tripwire(store_env):
+    """Found by adversarial review, reproduced before fixing.
+
+    A failure record carries no sha, no etag and no Last-Modified. Comparing the next
+    fetch against it means no If-Modified-Since is sent, the dedupe test cannot match, and
+    byte-identical content is classified as CHANGED. On a frozen year that turns one
+    network blip into a false restatement alert, which is the single alarm this whole
+    subsystem exists to raise, and re-retains megabytes already on disk."""
+    from cotdata import vintage
+    body = _body(b"2025-frozen")
+
+    class _Flaky:
+        def __init__(self):
+            self.n = 0
+
+        def __call__(self, url, *, etag=None, last_modified=None):
+            from cotdata.vintage import HttpResult
+            self.n += 1
+            if self.n == 3:
+                raise ConnectionError("network down")
+            if self.n == 2:
+                return HttpResult(304, None)
+            return HttpResult(200, body, etag=None, last_modified="lm1")
+
+    http, now, src = _Flaky(), _clock(), _one(LEGACY_2025, 2025)
+    for _ in range(3):
+        vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+    recovered = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+
+    rec = recovered["records"][0]
+    assert rec["outcome"] == vintage.OUTCOME_DEDUPED       # not "changed"
+    assert rec["tripwire_alert"] is None                   # no false restatement alert
+    assert not rec.get("restatement_suspect")  # absent on a dedupe, which is falsy
+    assert recovered["new_files"] == 0                     # nothing re-retained
+    assert len(list((store_env / "vintage" / "raw").rglob("*.zip"))) == 1
+
+
+def test_a_304_after_a_failure_still_resolves_its_prior_file(store_env):
+    """The 304 branch reuses the previous snapshot's sha and local_path. Taken from a
+    failure record those are both None, leaving a snapshot that points nowhere."""
+    from cotdata import vintage
+    from cotdata.vintage import HttpResult
+    body = _body(b"frozen")
+    seq = [lambda: HttpResult(200, body, etag=None, last_modified="lm1"),
+           lambda: (_ for _ in ()).throw(ConnectionError("down")),
+           lambda: HttpResult(304, None)]
+    n = [0]
+
+    def http(url, *, etag=None, last_modified=None):
+        n[0] += 1
+        return seq[n[0] - 1]()
+
+    now, src = _clock(), _one(LEGACY_2025, 2025)
+    for _ in range(3):
+        res = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+    rec = res["records"][0]
+    assert rec["content_sha256"] is not None
+    assert rec["local_path"] is not None

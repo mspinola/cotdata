@@ -192,9 +192,18 @@ vintage/release_schedule.parquet
 vintage/announcements.parquet
 ```
 
-Manifest: a new `vintage` block on the **cot-half** file (`manifests/cot.json`), so it
+Manifest: ~~a new `vintage` block on the **cot-half** file (`manifests/cot.json`), so it
 stays on the CFTC producer's side of the ADR-0007 seam. `store._DOMAIN_HALF` gains
-`vintage -> cot`.
+`vintage -> cot`.~~
+
+**Corrected 2026-07-30** (caught in adversarial review; this paragraph described the plan,
+not what shipped). Provenance lives in a **self-owned `vintage/snapshots.json`**, and
+`store._DOMAIN_HALF` has no `vintage` key. Two reasons, both discovered during the build:
+`store.reconcile_manifest` prunes any manifest entry lacking a matching `{name}.parquet`,
+and raw snapshot ids are not parquet files, so they would have been ghost-pruned; and both
+deployed sync scripts exclude the name `manifest.json` unanchored, so a
+`vintage/manifest.json` would have been stripped in transit. The handoff's §12.4 recorded
+this deviation correctly, so this file was the stale one.
 
 ### §4.6 amendment (confirmed, not contingent)
 The spike upgrades the `observed` mechanism: capturing the weekly-static
@@ -483,6 +492,66 @@ is Windows, so the real store carries `vintage\raw\annual_zip\2026\....zip`. On 
 Linux that is a single filename containing backslashes, so ingest on either replica failed
 with "no such file" on a file plainly sitting there. Normalised on read rather than on
 write, so every snapshot already recorded on the producer stays readable.
+
+## 9. Adversarial review, 2026-07-30
+
+The subsystem was reviewed by an agent given the spec and the diff and **no prior context**,
+specifically because every earlier review had been done by its author and would have shared
+its blind spots. That was worth doing: it found six confirmed defects, four of them in code
+written the same day, and one of them fires on an event as ordinary as a dropped network
+connection. It also confirmed the hash-purity property empirically rather than by reading,
+which is the one property the whole design rests on.
+
+### Fixed in this pass
+
+| # | Defect | Why it mattered |
+|---|---|---|
+| 1 | A **fetch failure poisoned the dedupe comparison**. Failure records carry no sha, etag or Last-Modified, so the next fetch sent no `If-Modified-Since`, could not match the dedupe test, and was classified as changed content. | One network blip on a frozen year produced a **false restatement alert**, which is the single alarm this subsystem exists to raise, and re-retained megabytes already on disk. Split into `_latest_with_content` (content questions) versus `_latest_for_url` (outcome questions). |
+| 2 | An **absolute `local_path` was re-rooted under the store**, turning `/Volumes/ext/...` into `<store>/Volumes/ext/...`. | `COTDATA_VINTAGE_ROOT` is *mandatory* on a mirrored replica, so on exactly those hosts every ingest failed, was swallowed, and marked the snapshot `failed`, which `--pending` never re-selects. One run drained the entire backlog with no CLI able to reset it. |
+| 3 | A bare `ingest` with no flags **replayed every snapshot ever recorded** with `observed_at = now`. | Replaying an older snapshot after a revision wrote the superseded value back with a newer timestamp, emitting a reversed revision (35 to 30) then a re-revision (30 to 35) and inflating `age_days` on both. `revisions/` is the primary artifact and `age_days` is what tells a consumer whether a restatement reached its calibration window. Now defaults to pending, `--all-snapshots` opts into a replay, and `observed_at` comes from the snapshot's own `retrieved_at`. |
+| 4 | **`schedule backfill` bypassed the write lock** while doing a read-modify-write of every observations partition. | Run beside an ingest it silently dropped that ingest's appended rows, leaving a revision row asserting a change to a value no longer present in `observations/`. Per-file atomicity was never the missing piece. |
+| 5 | **Every flat week was labelled `long_liquidation`**, because `d_long <= 0` swallows zero and the dead zone is off by default. | Measured on the real 2026 Legacy file: 3,308 of 29,787 transitions (11.1%), which made `long_liquidation` the modal state with a third of its bucket being weeks where nothing happened. That `value_counts()` is the CLI's headline output. Zero is now `quiet` unconditionally, with no threshold involved. |
+| 6 | **`validate()` accepted duplicate natural keys**, and **had no null-rate band** despite spec §5 requiring one. | Duplicates get identical `(observed_at, snapshot_id)`, exhausting the tie-break so append order decides the stored value. The null band closes the gap `errors="coerce"` opened: a changed value *format* in a column whose *name* never moved would coerce to nulls, which get written as observations and then read as revisions when the values return. Checked per category, since one broken column is only 1/n of a melted frame. |
+
+### Confirmed clean, by measurement rather than by reading
+
+Hash purity, the property everything else depends on, was exercised directly: mutating
+`observed_at`, `snapshot_id`, `release_date`, `release_date_source`, `market_name`,
+`is_tombstone`, every natural-key column and an unknown extra column all leave
+`row_sha256` unchanged, while each of the ten `VALUE_FIELDS` changes it. Scalar stability
+holds across `int`, `np.int64/32`, `float`, `np.float64/32`, `str`, `Decimal` and pandas
+nullable `Int64`. A release-date backfill was confirmed empirically not to move any hash.
+
+Atomicity was clean everywhere it was checked: `_write_manifest`, `_append_parquet`,
+`vintage_schedule._write`, backfill's per-file write and the raw `.part` write all use
+temp plus `os.replace`, and `_WriteLock` uses `O_CREAT|O_EXCL` and fails loudly.
+
+### NOT fixed, recorded as a real gap: the `announced` tier is unreachable
+
+**Acceptance criterion 5 is unmet.** `sync()` scrapes the Special Announcements page into
+`announcements.parquet`, but nothing ever writes a `source="announced"` row into
+`release_schedule.parquet`, and `backfill` reads only the schedule table plus
+`published_from_snapshots()`. So the Oct-Dec 2025 backlog weeks, the named target of that
+criterion and §6's "single largest PIT hole", can only ever resolve to `derived` in
+production. The precedence logic itself is correct and tested; the tests pass because they
+inject a schedule frame directly.
+
+The plumbing is not the missing piece: `write_release_schedule` already accepts a `source`
+column, so an `announced` row would flow through correctly. What is missing is a producer,
+and building one means extracting a `(report_date, release_date)` pair from free-text
+announcement prose. `_parse_announcements` deliberately never raises and captures only
+`announcement_date` plus `raw_text`. **Writing that extractor against no corpus of real
+announcements would be guessing**, and a release date resolved by a guess is worse than a
+`derived` one, because it carries a provenance flag claiming it was announced. Left
+unbuilt, and recorded here rather than quietly assumed to work.
+
+### Known and accepted
+
+`ingest_canonical` reloads every observation and builds a per-key dict with `iterrows()`
+on each call, about 2.3 seconds against a 31k-row store. Fine for the daily path (three
+snapshots), but a cold-start `fetch --all` plus `ingest` is roughly 120 snapshots against a
+store growing into the millions of rows, so a full historical rebuild is hours rather than
+minutes. Not on the daily path, so not fixed here.
 
 ## Bottom line
 

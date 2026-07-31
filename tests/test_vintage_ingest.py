@@ -298,3 +298,49 @@ def test_oi_over_sum_warns_not_raises(store_env):
     res = vi.ingest_canonical(c, snapshot_id="s1")
     assert res["warnings"]  # soft warning emitted
     assert res["observations"] == 3  # still ingested
+
+
+def test_an_absolute_local_path_is_not_re_rooted_under_the_store(store_env):
+    """Found by adversarial review. COTDATA_VINTAGE_ROOT outside the store records an
+    ABSOLUTE local_path, and vintage_root() calls that override mandatory on a mirrored
+    replica. Re-rooting it turned /Volumes/ext/... into <store>/Volumes/ext/..., so every
+    ingest raised FileNotFoundError, got swallowed, and marked the snapshot failed, which
+    --pending never re-selects. One run drained the whole backlog with no way to reset."""
+    from cotdata import vintage_cli
+    assert str(vintage_cli._snapshot_path("/ext/vintage/raw/a/x.zip")) == "/ext/vintage/raw/a/x.zip"
+    assert str(vintage_cli._snapshot_path(r"D:\vintage\raw\a\x.zip")) == "D:/vintage/raw/a/x.zip"
+    rel = vintage_cli._snapshot_path(r"vintage\raw\annual_zip\2026\x.zip")
+    assert rel == store_env / "vintage" / "raw" / "annual_zip" / "2026" / "x.zip"
+
+
+def test_backfill_takes_the_same_write_lock_as_ingest(store_env):
+    """Found by adversarial review. backfill read-modify-writes every observations
+    partition, so running it beside an ingest drops that ingest's appended rows and leaves
+    a revision row asserting a change to a value no longer present in observations/."""
+    import pytest as _pytest
+
+    from cotdata import vintage, vintage_ingest, vintage_schedule
+    vintage_ingest.ingest_canonical(_canon("2026-07-21"), snapshot_id="s1")
+    with vintage_ingest._WriteLock(vintage.vintage_root()):
+        with _pytest.raises(RuntimeError, match="single-writer"):
+            vintage_schedule.backfill()
+    vintage_schedule.backfill()   # and succeeds once the lock is released
+
+
+def test_a_replayed_snapshot_keeps_its_own_observed_at(store_env):
+    """observed_at is a property of the CAPTURE, not of when ingest happened. Taking it
+    from the clock let a replay of an older snapshot outrank a newer one in the
+    point-in-time read and hand back the pre-revision value."""
+    import pandas as pd
+
+    from cotdata import vintage_ingest as vi
+    early = _canon("2026-07-21", comm_long=100)
+    late = _canon("2026-07-21", comm_long=200)
+    vi.ingest_canonical(early, snapshot_id="s1", observed_at="2026-07-24T19:00:00Z")
+    vi.ingest_canonical(late, snapshot_id="s2", observed_at="2026-07-31T19:00:00Z")
+    # replay the OLD snapshot after the new one, exactly as `ingest --all-snapshots` would
+    vi.ingest_canonical(early, snapshot_id="s1", observed_at="2026-07-24T19:00:00Z")
+
+    now = vi.asof(pd.Timestamp("2026-08-01"), report_date="2026-07-21")
+    comm = now[now.category == "commercial"]
+    assert list(comm["long_contracts"]) == [200]   # the newer value still wins

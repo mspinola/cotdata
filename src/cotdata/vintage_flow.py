@@ -127,6 +127,19 @@ def _classify(df: pd.DataFrame, *, prior_oi, min_frac_oi: float) -> pd.Series:
     state = state.mask(~long_dominates & (d_short > 0), NEW_SHORTS)
     state = state.mask(~long_dominates & (d_short <= 0), SHORT_COVERING)
 
+    # A week where NEITHER leg moved is `quiet` unconditionally, with no threshold
+    # involved. Without this it falls through `long_dominates & (d_long <= 0)` and is
+    # labelled long_liquidation, which is not a judgement call gone wrong but a plain
+    # misstatement: nothing was liquidated. Measured over the real 2026 Legacy file it is
+    # 3,308 of 29,787 transitions (11.1%), and it made long_liquidation the modal state
+    # with 36% of that bucket being weeks where nothing happened. The CLI prints exactly
+    # that value_counts() as its headline.
+    #
+    # Deliberately NOT folded into min_frac_oi. Zero is not a small number, it is the
+    # absence of a change, so recognising it needs no parameter and must not be switched
+    # off by leaving the dead zone at its default.
+    state = state.mask((d_long == 0) & (d_short == 0), QUIET)
+
     if min_frac_oi and prior_oi is not None:
         dead = prior_oi.astype("float64") * float(min_frac_oi)
         state = state.mask((mag_l <= dead) & (mag_s <= dead), QUIET)

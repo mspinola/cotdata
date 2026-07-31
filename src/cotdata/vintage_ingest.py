@@ -24,6 +24,12 @@ from . import vintage
 # ── Schema ──────────────────────────────────────────────────────────────────
 NATURAL_KEY = ["report_date", "market_code", "report_type", "combined", "category"]
 
+# Ceiling on how much of a POSITION column may be null before ingest refuses (spec §5's
+# "null-rate per column within a sane band"). Generous on purpose: it exists to catch a
+# format change that coerced a whole column away, not to police the odd blank cell.
+# Measured on the real 2026 files, the true null rate on these columns is 0%.
+_MAX_NULL_RATE = 0.20
+
 # Fields that constitute the *value* of an observation. row_sha256 is computed over
 # these only: not over provenance (observed_at/snapshot_id), not over release_date
 # (resolved separately, so a release-date backfill must NOT read as a data revision),
@@ -384,7 +390,51 @@ def validate(canonical: pd.DataFrame) -> list[str]:
         if bad:
             raise ValidationError(f"categories {bad} outside vocabulary for {rt!r}")
 
+    # Duplicate natural keys within ONE frame. The read side already refuses these
+    # (vintage_flow._require_panel); the write side must too, and for a worse reason.
+    # Ingesting both writes two rows sharing an identical (observed_at, snapshot_id), which
+    # exhausts _latest_by_key's tie-break and leaves the winner decided by append order.
+    # Both also diff against the same prior row, so revisions/ gains two contradictory
+    # entries for one detection. Raising is the only safe answer: there is no principled
+    # way to pick which of two rows claiming the same key is the real one.
+    dup = canonical.duplicated(subset=NATURAL_KEY, keep=False)
+    if dup.any():
+        sample = canonical.loc[dup, NATURAL_KEY].head(3).to_dict("records")
+        raise ValidationError(
+            f"{int(dup.sum())} rows share a natural key within one frame, e.g. {sample}. "
+            f"Two rows for one key have no defined ordering, so the stored 'latest' would "
+            f"be whichever happened to be appended last.")
+
     warnings = []
+
+    # NULL-RATE BAND (spec §5). The canonicalisers coerce every value field with
+    # errors="coerce", which is correct for CFTC's "." suppression marker but is exactly
+    # the mechanism that would silently swallow a CHANGED VALUE FORMAT in a column whose
+    # name never moved (thousands separators appearing, a unit suffix, a footnote glyph).
+    # _resolve catches a renamed column; nothing caught a renamed *format*, and the
+    # consequence is worse than a crash: the nulls get written as real observations, and
+    # the next genuine value is then recorded as a revision that never happened. Raising
+    # on a mass-null column turns that into a loud failure at the point of ingest.
+    # Checked PER CATEGORY, not over the whole frame. Each canonical category is melted
+    # from its own source column, so one broken column is only 1/n of the rows: with five
+    # disaggregated categories a wholly-coerced Managed Money column is a 20% frame-wide
+    # null rate, which any band loose enough to be safe would wave straight through. Per
+    # category the same failure is 100%, which is unmissable.
+    fields = [f for f in ("long_contracts", "short_contracts", "open_interest")
+              if f in canonical.columns]
+    for (rt, cat), grp in canonical.groupby(["report_type", "category"],
+                                            dropna=False, sort=False):
+        for f in fields:
+            null_rate = grp[f].isna().mean()
+            if null_rate > _MAX_NULL_RATE:
+                raise ValidationError(
+                    f"{null_rate:.0%} of {f!r} is null for {rt}/{cat}, above the "
+                    f"{_MAX_NULL_RATE:.0%} band. A position column is never mostly blank "
+                    f"in a real CFTC file, so this is a parse or format change, not data. "
+                    f"Refusing to write nulls as observations: they would be recorded as "
+                    f"revisions when the values return. (Trader counts are excluded, "
+                    f"since CFTC genuinely suppresses roughly half of them.)")
+
     if "open_interest" not in canonical.columns:
         return warnings
     keys = ["report_date", "market_code", "report_type", "combined"]
