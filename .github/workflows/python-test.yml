@@ -25,7 +25,13 @@ jobs:
         python -m pip install --upgrade pip
         python -m pip install -e ".[dev]"
     - name: Run linting
-      run: python -m ruff check src tests
+      # scripts/ is included deliberately. The selected rules (E/F/W/I, E501 ignored) are
+      # mostly not style: pyflakes F catches undefined names and unused imports, which are
+      # crashes waiting to happen, and scripts/vintage_alert_selftest.py is a diagnostic
+      # users are told to run -- a broken one is worse than none. Leaving a source root
+      # unlinted also fails open: scripts/ had quietly accumulated 26 errors before anyone
+      # looked. To revert, drop `scripts` here; nothing else depends on it.
+      run: python -m ruff check src tests scripts
     - name: Run tests
       run: |
         # Create a dummy store for the test environment to prevent COTDATA_STORE missing errors
