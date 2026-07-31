@@ -28,11 +28,29 @@ REM single sync carries both the current-state update and the new vintage snapsh
 REM NOTIFICATION: Task Scheduler discards stdout, so everything below is ALSO appended to
 REM a log file, and `ingest` exits NON-ZERO whenever it records a revision or spots a
 REM closed-year restatement. That is a notification, not a failure -- the data is already
-REM committed. Point Task Scheduler's "send mail"/alert at this task, or just read the log.
-REM Without it a retroactive restatement would be detected and silently swallowed.
+REM committed.
+REM
+REM Task Scheduler's own "Send an e-mail" / "Display a message" actions are DEPRECATED and
+REM non-functional on Windows 8 / Server 2012 and later, so a non-zero exit on its own only
+REM shows up passively as Last Run Result 0x1 in the Task Scheduler UI. This script therefore
+REM does its own notifying: on any run that records a revision it writes a MARKER FILE,
+REM
+REM     <store>\vintage\REVISIONS_<yyyy-MM-dd>.txt
+REM
+REM holding that run's output. It lives inside vintage\, so the existing robocopy /MIR push
+REM carries it to the Mac and the alert shows up on the machine you actually work on.
 setlocal
 set COTDATA_STORE=REPLACE_WITH_STORE_PATH
 set VINTAGE_LOG=REPLACE_WITH_STORE_PATH\vintage\run.log
+set VINTAGE_RUNOUT=REPLACE_WITH_STORE_PATH\vintage\.last_ingest.tmp
+
+REM Locale-independent date. %DATE% is formatted per the machine's regional settings, so it
+REM is not safe in a filename; PowerShell gives a stable yyyy-MM-dd on any box.
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set TODAY=%%i
+set VINTAGE_MARKER=REPLACE_WITH_STORE_PATH\vintage\REVISIONS_%TODAY%.txt
+
+REM The store may not exist yet on a first run; the vintage dir must, to hold the log.
+if not exist "REPLACE_WITH_STORE_PATH\vintage" mkdir "REPLACE_WITH_STORE_PATH\vintage"
 REM Optional: identify yourself to CFTC. Defaults to the repo URL if unset.
 REM set COTDATA_USER_AGENT=cotdata-vintage/0.1 (+contact you@example.com)
 
@@ -47,11 +65,26 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM Parse whatever was just retained into change-only observations + revisions.
 REM Safe to re-run: re-ingesting identical bytes writes zero rows.
-"REPLACE_WITH_VENV_PATH\Scripts\cotdata-vintage.exe" ingest --pending >> "%VINTAGE_LOG%" 2>&1
+REM Captured to its OWN file first, so the marker can hold just THIS run's output rather
+REM than the whole appended history, then folded into the running log.
+"REPLACE_WITH_VENV_PATH\Scripts\cotdata-vintage.exe" ingest --pending > "%VINTAGE_RUNOUT%" 2>&1
 REM NON-ZERO HERE MEANS "revisions were recorded", not "the run broke". The data is
 REM already written. Remember it, keep going, and re-raise at the end so the scheduler
 REM shows the task as attention-needed.
 set VINTAGE_REVISED=%ERRORLEVEL%
+type "%VINTAGE_RUNOUT%" >> "%VINTAGE_LOG%"
+
+REM Write the marker HERE, not at the end. The revision is already committed at this
+REM point, so an unrelated failure in a later step must not be able to suppress the
+REM alert. Appends rather than overwrites, so two revision runs on one day both survive.
+if NOT "%VINTAGE_REVISED%"=="0" (
+  echo ================================================================ >> "%VINTAGE_MARKER%"
+  echo cotdata vintage: REVISIONS RECORDED %TODAY% >> "%VINTAGE_MARKER%"
+  echo Expand with:  cotdata-vintage diff >> "%VINTAGE_MARKER%"
+  echo ================================================================ >> "%VINTAGE_MARKER%"
+  type "%VINTAGE_RUNOUT%" >> "%VINTAGE_MARKER%"
+  echo. >> "%VINTAGE_MARKER%"
+)
 
 REM Resolve release dates. `published` reads the true publication timestamp out of the
 REM weekly static just captured (its HTTP Last-Modified), which beats a poll-derived
@@ -70,9 +103,13 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 if NOT "%VINTAGE_REVISED%"=="0" (
-  echo vintage ok, but REVISIONS WERE RECORDED -- see "%VINTAGE_LOG%" and run: cotdata-vintage diff
-  type "%VINTAGE_LOG%"
+  echo vintage ok, but REVISIONS WERE RECORDED
+  echo   marker: "%VINTAGE_MARKER%"   ^(syncs to the Mac with the store^)
+  echo   log:    "%VINTAGE_LOG%"
+  type "%VINTAGE_RUNOUT%"
+  del "%VINTAGE_RUNOUT%" 2>nul
   exit /b %VINTAGE_REVISED%
 )
+del "%VINTAGE_RUNOUT%" 2>nul
 echo vintage ok, no revisions
 exit /b 0
