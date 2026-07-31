@@ -1,4 +1,4 @@
-# Step 2: contract master and normalisation — PROPOSAL
+# Step 2: contract master and normalisation: PROPOSAL
 
 **Status: proposed, not accepted.** Written before any step-2 code, per the request to
 propose the approach first. Module spec: [crowdmon_futures_cot_module.md](crowdmon_futures_cot_module.md)
