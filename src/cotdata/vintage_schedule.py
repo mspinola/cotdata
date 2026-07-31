@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import re
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -189,6 +190,103 @@ def sync_published() -> dict:
     return {"published": len(derived)}
 
 
+# ── `scheduled`: the CFTC published release calendar ────────────────────────
+# The page lists RELEASE dates for one year, month by month, marking holiday-delayed ones
+# with an asterisk ("*Delayed release date due to a federal holiday."). Those asterisks are
+# the entire value here: on a normal week `derived` (report_date + 3, weekend-adjusted)
+# already lands on the right Friday, so seeding the calendar changes few dates. What it
+# changes is (a) the handful of holiday weeks where derived is wrong by one to three days,
+# and (b) the PROVENANCE of every matched row, from `derived` (a guess) to `scheduled` (a
+# published fact) — which is what lets strict point-in-time evaluation trust the date.
+_MONTHS = {m: i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"], start=1)}
+
+
+def _strip_tags(html: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
+
+
+def report_date_for_release(release: dt.date) -> dt.date:
+    """The Tuesday whose positions a given release reports.
+
+    COT is Tuesday-dated and published the following Friday. A federal holiday pushes the
+    RELEASE later but never moves the as-of date, so the report date is the latest Tuesday
+    at least three days before the release. That rule handles both the normal Friday case
+    (Tuesday + 3) and a delayed Monday release (the previous week's Tuesday), without
+    needing a holiday calendar of our own.
+    """
+    d = pd.Timestamp(release).date() - dt.timedelta(days=3)
+    while d.weekday() != 1:  # 1 == Tuesday
+        d -= dt.timedelta(days=1)
+    return d
+
+
+def parse_release_schedule(html: str) -> pd.DataFrame:
+    """Parse the CFTC release-schedule page into schedule rows.
+
+    Tag-tolerant by design: the year lives inside nested markup
+    (``<h3><strong>2026 Release Schedule</strong></h3>``), so it is read from tag-stripped
+    text rather than from an assumed tag shape. Raises rather than returning an empty
+    frame if the year or table cannot be found — a silent empty parse would look exactly
+    like "CFTC published nothing", and would quietly leave every row on `derived`.
+    """
+    text = _strip_tags(html)
+    ym = re.search(r"(20\d{2})\s+Release Schedule", text, re.I)
+    if not ym:
+        raise ValueError("release schedule: could not find the '<YYYY> Release Schedule' "
+                         "heading; the page layout has probably changed.")
+    year = int(ym.group(1))
+
+    tm = re.search(r"<table.*?</table>", html, re.S | re.I)
+    if not tm:
+        raise ValueError("release schedule: no <table> found on the page.")
+    cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tm.group(0), re.S | re.I)
+
+    rows, month = [], None
+    for cell in cells:
+        val = _strip_tags(cell).replace("\xa0", " ").replace("&nbsp;", " ").strip()
+        if not val:
+            continue
+        if val in _MONTHS:
+            month = _MONTHS[val]
+            continue
+        m = re.fullmatch(r"(\d{1,2})\s*(\*?)", val)
+        if not m or month is None:
+            continue
+        release = dt.date(year, month, int(m.group(1)))
+        delayed = bool(m.group(2))
+        rows.append({
+            "report_date": pd.Timestamp(report_date_for_release(release)),
+            "release_date": pd.Timestamp(release),
+            "source": "scheduled",
+            "note": ("delayed by a federal holiday" if delayed
+                     else "published CFTC release schedule"),
+            "ingested_at": pd.Timestamp.now("UTC"),
+        })
+    if not rows:
+        raise ValueError("release schedule: table found but no dates parsed out of it.")
+    return pd.DataFrame(rows)
+
+
+def sync_release_schedule(*, fetch_html=None) -> dict:
+    """Fetch and store the published release calendar. Idempotent.
+
+    Covers ONE year: the page only ever shows the current schedule, and CFTC does not
+    publish past calendars here, so earlier years cannot be recovered this way and stay
+    on `announced` or `derived`.
+    """
+    fetch_html = fetch_html or _fetch_html
+    parsed = parse_release_schedule(fetch_html(RELEASE_SCHEDULE_URL))
+    existing = read_release_schedule()
+    merged = (pd.concat([existing, parsed], ignore_index=True)
+              if not existing.empty else parsed)
+    merged = merged.drop_duplicates(subset=["report_date", "source"], keep="last")
+    write_release_schedule(merged)
+    delayed = int((parsed["note"] == "delayed by a federal holiday").sum())
+    return {"scheduled": len(parsed), "holiday_delayed": delayed}
+
+
 # ── Backfill ────────────────────────────────────────────────────────────────
 _SOURCE_RANK = {"published": 3, "announced": 2, "scheduled": 1}
 
@@ -296,8 +394,12 @@ def sync(*, fetch_html=_fetch_html, now=None) -> dict:
     html = fetch_html(ANNOUNCEMENTS_URL)
     rows = _parse_announcements(html, url=ANNOUNCEMENTS_URL, scraped_at=now)
     if rows:
+        fresh = pd.DataFrame(rows)
         existing = read_announcements()
-        merged = pd.concat([existing, pd.DataFrame(rows)], ignore_index=True)
+        # Skip the concat when there is nothing to merge into. Concatenating an all-empty
+        # frame is deprecated in pandas and changes dtype inference, so an empty store
+        # would otherwise warn now and silently shift column dtypes later.
+        merged = pd.concat([existing, fresh], ignore_index=True) if not existing.empty else fresh
         merged = merged.drop_duplicates(subset=["announcement_date", "raw_text"])
         write_announcements(merged)
     return {"announcements": len(rows)}

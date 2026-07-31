@@ -182,8 +182,12 @@ def main(argv=None) -> int:
 # ── schedule ────────────────────────────────────────────────────────────────
 def _cmd_sched_sync(args) -> int:
     from . import vintage_schedule
+    cal = vintage_schedule.sync_release_schedule()
+    print(f"schedule sync: {cal['scheduled']} release date(s) from the published "
+          f"calendar ({cal['holiday_delayed']} holiday-delayed).")
     res = vintage_schedule.sync()
     print(f"schedule sync: {res['announcements']} announcement row(s) scraped.")
+    print("run 'cotdata-schedule backfill' to apply them to stored observations.")
     return 0
 
 
