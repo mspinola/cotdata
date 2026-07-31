@@ -545,6 +545,61 @@ announcements would be guessing**, and a release date resolved by a guess is wor
 `derived` one, because it carries a provenance flag claiming it was announced. Left
 unbuilt, and recorded here rather than quietly assumed to work.
 
+### Second review pass, on the six fixes themselves
+
+The fixes were then reviewed by a second cold agent, because they had been written by the
+same person who wrote the code being fixed and nobody had looked at them. It downloaded
+**every real CFTC annual file, 41 Legacy years plus 17 Disaggregated and 17 TFF years,
+roughly 1.6 million canonical rows**, and put all of it through the two new raising checks.
+
+Its verdict on fix 6 is the most valuable result in either review: **no legitimate
+duplicate natural key exists in 40 years of any report type, and the null rate on
+`long_contracts` / `short_contracts` / `open_interest` is exactly 0.0 in every
+`(report_type, category)` group of every year.** So neither new raise can hard-fail a
+historical backfill. Fixes 4 and 5 came back sound, with fix 5's 11.1% figure reproducing
+to the row. Fix 2 is sound for every path this deployment can reach.
+
+Two fixes closed their reproducer but not their class, and both are now finished:
+
+| Was | Now |
+|---|---|
+| Fix 1 re-pointed `restatement_suspect` at the content-bearing snapshot but left the FIRST/CHANGED classification keyed to `prev`, so a fetch failure as the **first** record for a URL still fired the false restatement alert, with the two signals disagreeing | `_annotate` takes `content` and classifies FIRST from it |
+| Fix 3 corrected the `observed_at` stamp but not the comparison: `ingest_canonical` still diffed against whatever was newest, so `--all-snapshots` fabricated a reversed revision plus a re-revision and grew `revisions/` without bound on every pass | The diff is filtered to `observed_at <= observed_ts`, making the comparison genuinely bitemporal. A replay is now a true no-op, verified three passes deep on real data |
+
+Four further findings, all fixed:
+
+- **The blind-detector alert could not fire at the year rollover.** It required
+  `prev_outcome == deduped`, but a year that churned all through 2025 has
+  `prev_outcome == changed` on the January morning it becomes frozen-in-window. The
+  rollover is the most likely moment for CFTC's window to shift, which made it the worst
+  possible blind spot. Now keys on whether the previous fetch saw bytes at all.
+- **A fetch failure was a tripwire condition.** Connectivity is not provenance: a dropped
+  connection says nothing about whether CFTC restated anything, and routing it here turned
+  one blip into a frozen-year restatement alarm. Failures are now counted and printed by
+  `fetch`, where an operational problem belongs.
+- **A run where every snapshot failed to parse exited 0**, reporting success to Task
+  Scheduler while the store gained nothing, with `failed` being terminal. Now non-zero, in
+  a single combined message: an earlier draft raised on the failure first and silently
+  swallowed a restatement suspect in the same run, which is the more serious of the two.
+  **`ingest --retry-failed`** is the way back, and it is the only one: nothing else ever
+  wrote `parse_status` back to `pending`, and two separate defects had stranded whole
+  backlogs there.
+- **Disaggregated and TFF were fetched from 2006**, but cftc.gov serves 404 for
+  `fut_disagg_txt_2006..2009` and `fut_fin_txt_2006..2009` (verified live in both the
+  review and here). Every `fetch --all` recorded eight permanent failure snapshots that
+  could never succeed. First year corrected to 2010.
+- **The null band was vacuous for Legacy**, because `canonicalize_legacy` never coerced. A
+  value arriving as `"200,000"` stayed an object column, passed every check, and hashed
+  differently from the numeric form: precisely the fabricated-revision failure the band
+  exists to prevent, on the one report type where it could not see it. Legacy now coerces
+  like the other two. **Proved not to move any stored hash**: across 95 markets and 448,236
+  canonical rows the real values are already `int64`, so the coercion is an identity.
+
+One caveat carried forward from the review rather than fixed: fix 5's headline 11.1% is
+measured over all 418 markets in the 2026 file. Over the 51 markets in the current-state
+store the flat-week rate is 0.07%. Both numbers are honest; they describe different
+populations, and the tracked universe is much less affected than the full CFTC file.
+
 ### Known and accepted
 
 `ingest_canonical` reloads every observation and builds a per-key dict with `iterrows()`

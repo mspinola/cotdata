@@ -238,3 +238,24 @@ def test_suppressed_trader_counts_do_not_trip_the_null_band():
                                "Traders_M_Money_Long_All", "Traders_M_Money_Short_All",
                                "Traders_Other_Rept_Long_All", "Traders_Other_Rept_Short_All")})
     assert vi.validate(vi.canonicalize_disagg(allsupp)) == []
+
+
+def test_the_null_band_is_not_vacuous_for_legacy():
+    """Second review pass. canonicalize_legacy did not coerce, so a Legacy value arriving
+    as "200,000" stayed an object column, passed every check, and hashed differently from
+    the numeric form: exactly the fabricated-revision failure the band exists to prevent,
+    on the one report type where it could not see it."""
+    import pandas as _pd
+
+    from cotdata import vintage_ingest as vi
+    wide = _pd.DataFrame([{
+        "CFTC_Contract_Market_Code": "088691", "Market_and_Exchange_Names": "GOLD",
+        "Open_Interest_All": 1000, "Comm_Positions_Long_All": "200,000",
+        "Comm_Positions_Short_All": 400, "NonComm_Positions_Long_All": 300,
+        "NonComm_Positions_Short_All": 100, "NonRept_Positions_Long_All": 50,
+        "NonRept_Positions_Short_All": 50, "Traders_Comm_Long_All": 5,
+        "Traders_Comm_Short_All": 5, "Traders_NonComm_Long_All": 5,
+        "Traders_NonComm_Short_All": 5,
+    }], index=_pd.DatetimeIndex([_pd.Timestamp("2026-07-21")]))
+    with pytest.raises(vi.ValidationError, match="null"):
+        vi.validate(vi.canonicalize_legacy(wide))

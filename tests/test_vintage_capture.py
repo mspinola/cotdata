@@ -493,3 +493,94 @@ def test_a_304_after_a_failure_still_resolves_its_prior_file(store_env):
     rec = res["records"][0]
     assert rec["content_sha256"] is not None
     assert rec["local_path"] is not None
+
+
+def test_a_failure_as_the_FIRST_record_does_not_fire_a_false_tripwire(store_env):
+    """Second review pass. The first fix re-pointed restatement_suspect at the
+    content-bearing snapshot but left the FIRST/CHANGED classification keyed to `prev`, so
+    when the very first record for a URL was a fetch failure the recovering fetch still
+    fired the false restatement alert, with outcome and restatement_suspect disagreeing."""
+    from cotdata import vintage
+    from cotdata.vintage import HttpResult
+    body = _body(b"2025-frozen")
+    n = [0]
+
+    def http(url, *, etag=None, last_modified=None):
+        n[0] += 1
+        if n[0] == 1:
+            raise ConnectionError("network down on the very first attempt")
+        return HttpResult(200, body, etag=None, last_modified="lm1")
+
+    now, src = _clock(), _one(LEGACY_2025, 2025)
+    vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+    res = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+
+    rec = res["records"][0]
+    assert rec["outcome"] == vintage.OUTCOME_FIRST     # never seen bytes before, so FIRST
+    assert rec["tripwire_alert"] is None
+    assert not rec["restatement_suspect"]              # and the two signals agree
+
+
+def test_the_blind_alert_fires_at_the_year_rollover(store_env):
+    """Second review pass. The blind trigger required prev_outcome == deduped, but a year
+    that churned all through 2025 has prev_outcome == changed on the January morning it
+    becomes frozen-in-window. The rollover is the single most likely moment for CFTC's
+    regeneration window to shift, so it was the worst possible blind spot."""
+    import datetime as dt
+
+    from cotdata import vintage
+    from cotdata.vintage import HttpResult
+    n = [0]
+
+    def http(url, *, etag=None, last_modified=None):
+        n[0] += 1
+        if n[0] == 1:
+            return HttpResult(200, _body(b"dec"), etag=None, last_modified="lm1")
+        return HttpResult(304, None)
+
+    src = _one(LEGACY_2025, 2025)
+    dec = lambda: dt.datetime(2025, 12, 26, 17, tzinfo=dt.timezone.utc)   # noqa: E731
+    jan = lambda: dt.datetime(2026, 1, 2, 17, tzinfo=dt.timezone.utc)     # noqa: E731
+    r1 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=dec)
+    assert r1["records"][0]["expectation"] == vintage.EXPECT_CHURN   # 2025 in 2025
+    r2 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=jan)
+
+    rec = r2["records"][0]
+    assert rec["expectation"] == vintage.EXPECT_FROZEN_IN_WINDOW    # 2025 in 2026
+    assert rec["outcome"] == vintage.OUTCOME_NOT_MODIFIED
+    assert rec["tripwire_alert"] and "gone blind" in rec["tripwire_alert"]
+
+
+def test_a_fetch_failure_is_not_a_tripwire_condition(store_env):
+    """Connectivity is not provenance. A dropped connection says nothing about whether
+    CFTC restated anything, and routing it into the frozen-year alarm turned one blip into
+    a restatement alert on the daily run. Failures are counted by fetch instead."""
+    from cotdata import vintage
+    from cotdata.vintage import HttpResult
+    body = _body(b"frozen")
+    n = [0]
+
+    def http(url, *, etag=None, last_modified=None):
+        n[0] += 1
+        if n[0] <= 2:
+            return HttpResult(200, body, etag=None, last_modified="lm1")
+        raise ConnectionError("blip")
+
+    now, src = _clock(), _one(LEGACY_2025, 2025)
+    vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)   # first
+    vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)   # deduped
+    res = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)  # fails
+
+    assert res["records"][0]["outcome"] == vintage.OUTCOME_FAILED
+    assert res["tripwire_alerts"] == []      # no alarm
+    assert res["failed"] == 1                # but it IS counted
+
+
+def test_disagg_and_tff_start_in_2010_not_2006():
+    """cftc.gov serves 404 for fut_disagg_txt_2006..2009 and fut_fin_txt_2006..2009
+    (verified live), so 2006 made every `fetch --all` record eight permanent failure
+    snapshots that could never succeed."""
+    from cotdata import vintage
+    assert [s.report_type for s in vintage.annual_sources(2009)] == ["legacy"]
+    assert {s.report_type for s in vintage.annual_sources(2010)} == {
+        "legacy", "disaggregated", "tff"}

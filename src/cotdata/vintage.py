@@ -115,9 +115,17 @@ def _legacy_zip_url(year: int) -> str:
     return f"https://www.cftc.gov/files/dea/history/dea_fut_xls_{year}.zip"
 
 
+# Disaggregated and TFF history at these URLs starts in 2010, NOT 2006. The reports
+# themselves begin in 2006, which is what the providers record and what an earlier version
+# of this list used, but cftc.gov serves 404 for fut_disagg_txt_2006..2009 and
+# fut_fin_txt_2006..2009 (verified live in review). Using 2006 made every `fetch --all`
+# record eight permanent failure snapshots that could never succeed.
+_DISAGG_TFF_FIRST_YEAR = 2010
+
+
 def annual_sources(year: int) -> list[Source]:
     out = [Source("legacy", "annual_zip", "zip", _legacy_zip_url(year), year)]
-    if year >= 2006:
+    if year >= _DISAGG_TFF_FIRST_YEAR:
         out.append(Source("disaggregated", "annual_zip", "zip",
                           f"https://www.cftc.gov/files/dea/history/fut_disagg_txt_{year}.zip", year))
         out.append(Source("tff", "annual_zip", "zip",
@@ -326,6 +334,10 @@ OUTCOME_DEDUPED = "deduped"          # 200, bytes byte-identical to the last ret
 OUTCOME_NOT_MODIFIED = "not_modified"  # 304, server declined to re-send
 OUTCOME_FAILED = "failed"
 
+# Outcomes where bytes actually arrived and could therefore be hashed. "Did we see content
+# last time?" is the question the blind-detector transition turns on.
+_SAW_BYTES = (OUTCOME_FIRST, OUTCOME_CHANGED, OUTCOME_DEDUPED)
+
 
 def _tripwire_alert(expectation: str, outcome: str, prev_outcome: str | None) -> str | None:
     """The alert reason for one capture, or None.
@@ -336,12 +348,25 @@ def _tripwire_alert(expectation: str, outcome: str, prev_outcome: str | None) ->
     bytes sitting next to the old ones, so it is diffable, and two restatements in
     consecutive weeks are two things worth knowing about, not one.
 
-    **The detector went blind** (a frozen-in-window year that 304s or fails) alerts only on
-    the TRANSITION into that state. It is a standing condition: if CFTC stopped re-touching
-    the prior year's Last-Modified, a level-triggered alert would fire every single day
-    forever, and an alert that never clears is one that gets ignored. Same reasoning
-    that scopes the ingest revision alert to this run's snapshots. Edge-triggering means it
-    is reported once, loudly, and then stays quiet until the pattern changes back.
+    **The detector went blind** (a frozen-in-window year that starts returning 304) alerts
+    only on the TRANSITION into that state. It is a standing condition: if CFTC stopped
+    re-touching the prior year's Last-Modified, a level-triggered alert would fire every
+    single day forever, and an alert that never clears is one that gets ignored. Same
+    reasoning that scopes the ingest revision alert to this run's snapshots.
+
+    The transition is "last time we received bytes, this time we did not", which is why it
+    keys on ``_SAW_BYTES`` rather than on ``deduped`` alone. Requiring ``deduped``
+    specifically left a hole at the YEAR ROLLOVER, found in review: a year that churned all
+    through 2025 has ``prev_outcome == changed`` on the January morning it becomes
+    frozen-in-window, so if CFTC stopped re-serving it at exactly that boundary the
+    detector went blind and never said so. The rollover is the single most likely moment
+    for CFTC's regeneration window to shift, which made it the worst possible blind spot.
+
+    A FETCH FAILURE is deliberately NOT a tripwire condition. Connectivity is not
+    provenance: a dropped connection says nothing about whether CFTC restated anything, and
+    routing it here turned one blip into a frozen-year restatement alarm on the daily run.
+    Failures are counted and printed by ``fetch`` itself, which is where an operational
+    problem belongs.
 
     Note what is NOT an alert: a frozen year outside the two-year window returning 304.
     That is the correct, expected outcome there, and it is also the reason the prior-year
@@ -352,10 +377,10 @@ def _tripwire_alert(expectation: str, outcome: str, prev_outcome: str | None) ->
             return ("content changed on the frozen prior year: CFTC re-serves this file "
                     "weekly and it has been byte-identical, so a new sha here is the "
                     "retroactive-restatement signature")
-        if outcome in (OUTCOME_NOT_MODIFIED, OUTCOME_FAILED) and prev_outcome == OUTCOME_DEDUPED:
-            return (f"the frozen prior year stopped being re-served ({outcome}) after "
-                    f"previously deduping. The weekly content check has gone blind, so a "
-                    f"restatement would no longer be detected here")
+        if outcome == OUTCOME_NOT_MODIFIED and prev_outcome in _SAW_BYTES:
+            return ("the frozen prior year stopped being re-served (304) after previously "
+                    "returning content. The weekly content check has gone blind, so a "
+                    "restatement would no longer be detected here")
         return None
     if expectation == EXPECT_FROZEN_OUT_OF_WINDOW and outcome == OUTCOME_CHANGED:
         return ("content changed on a closed year outside CFTC's regeneration window, "
@@ -363,15 +388,25 @@ def _tripwire_alert(expectation: str, outcome: str, prev_outcome: str | None) ->
     return None
 
 
-def _annotate(rec: dict, *, prev: dict | None, now: dt.datetime) -> dict:
-    """Attach expectation / outcome / tripwire_alert to a capture record."""
+def _annotate(rec: dict, *, prev: dict | None, content: dict | None,
+              now: dt.datetime) -> dict:
+    """Attach expectation / outcome / tripwire_alert to a capture record.
+
+    ``prev`` is the previous snapshot of any kind and answers "what happened last time?".
+    ``content`` is the previous snapshot that actually carried bytes and answers "have we
+    ever seen this file?". Classifying FIRST off ``prev`` was the half of the earlier
+    dedupe fix that got missed: when the first record for a URL is a fetch failure, the
+    recovering fetch found ``prev`` non-None, fell through to CHANGED, and fired the same
+    false restatement alert the fix existed to remove. It also left ``outcome`` and
+    ``restatement_suspect`` disagreeing, since only the latter had been re-pointed.
+    """
     expectation = capture_expectation(rec.get("report_year"), now.year)
     note = rec.get("note") or ""
     if note.startswith("fetch failed"):
         outcome = OUTCOME_FAILED
     elif rec.get("http_status") == 304:
         outcome = OUTCOME_NOT_MODIFIED
-    elif prev is None:
+    elif content is None:
         outcome = OUTCOME_FIRST
     elif rec.get("note") == "unchanged bytes (deduped)":
         outcome = OUTCOME_DEDUPED
@@ -442,7 +477,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             "byte_size": None,
             "local_path": (content or {}).get("local_path"),
             "note": "304 not-modified",
-        }, prev=prev, now=now)
+        }, prev=prev, content=content, now=now)
 
     floor = _MIN_BYTES.get(source.source_kind, _MIN_BYTES_DEFAULT)
     if len(res.content) < floor:
@@ -464,7 +499,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             "byte_size": len(res.content),
             "local_path": content.get("local_path"),
             "note": "unchanged bytes (deduped)",
-        }, prev=prev, now=now)
+        }, prev=prev, content=content, now=now)
 
     # New bytes: retain immutably, via a .part file + atomic replace. A crash during a
     # plain write_bytes would leave a TRUNCATED file already carrying the full sha in its
@@ -509,7 +544,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
         "byte_size": len(res.content),
         "local_path": rel,
         "note": None,
-    }, prev=prev, now=now)
+    }, prev=prev, content=content, now=now)
 
 
 def fetch(year: int | None = None, *, all_years: bool = False,
@@ -565,7 +600,9 @@ def fetch(year: int | None = None, *, all_years: bool = False,
             # and dies at the first naming variant or missing disagg year otherwise. The
             # failure is RECORDED (so it is visible and retryable), then the run goes on —
             # matching what the ingest path already does.
-            rec = _failure_record(src, now, e, prev=_latest_for_url(snapshots, src.url))
+            rec = _failure_record(src, now, e,
+                                  prev=_latest_for_url(snapshots, src.url),
+                                  content=_latest_with_content(snapshots, src.url))
             failed += 1
             print(f"  {src.report_type}/{src.source_kind} {src.report_year or ''}: "
                   f"fetch failed — {e}")
@@ -596,7 +633,7 @@ def fetch(year: int | None = None, *, all_years: bool = False,
 
 
 def _failure_record(source: Source, now: dt.datetime, error: Exception,
-                    *, prev: dict | None = None) -> dict:
+                    *, prev: dict | None = None, content: dict | None = None) -> dict:
     retrieved_at = _iso(now)
     return _annotate({
         "source_url": source.url,
@@ -614,4 +651,4 @@ def _failure_record(source: Source, now: dt.datetime, error: Exception,
         "parse_status": "pending",
         "parse_error": None,
         "note": f"fetch failed: {error}",
-    }, prev=prev, now=now)
+    }, prev=prev, content=content, now=now)

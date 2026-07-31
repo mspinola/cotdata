@@ -21,7 +21,8 @@ def _cmd_fetch(args) -> int:
                         include_weekly=not args.no_weekly,
                         include_prior_year=not args.no_prior_year)
     print(f"vintage fetch: {res['checks']} source(s) checked, "
-          f"{res['new_files']} new raw file(s) retained.")
+          f"{res['new_files']} new raw file(s) retained"
+          + (f", {res['failed']} FAILED." if res.get("failed") else "."))
     for rec in res["records"]:
         print(f"  {rec['report_type']:<13} {rec['source_kind']:<13} "
               f"{rec.get('report_year') or '':<6} {rec.get('expectation') or '':<22} "
@@ -87,6 +88,18 @@ def _cmd_ingest(args) -> int:
     snaps = vintage.read_snapshots()
     if args.snapshot:
         snaps = [s for s in snaps if s.get("snapshot_id") == args.snapshot]
+    elif args.retry_failed:
+        # The ONLY route back from parse_status="failed", which is otherwise terminal:
+        # --pending does not select it and nothing else ever writes the field back. Two
+        # separate defects have reached that state en masse (a stale lock, and a path that
+        # would not resolve), and in both cases the entire backlog was stranded with no
+        # command able to recover it. Raw bytes are retained, so a retry is always safe.
+        for s_ in [x for x in snaps if x.get("parse_status") == "failed"]:
+            vintage.update_snapshot(s_["snapshot_id"], parse_status="pending",
+                                    parse_error=None)
+        snaps = vintage.read_snapshots()
+        snaps = [x for x in snaps if x.get("parse_status") == "pending"]
+        print(f"vintage ingest: reset {len(snaps)} failed snapshot(s) to pending.")
     elif not args.all_snapshots:
         # Default to pending even with no flag. A bare `ingest` used to select EVERY
         # snapshot ever recorded and re-ingest each one, which is not a no-op: replaying
@@ -98,7 +111,7 @@ def _cmd_ingest(args) -> int:
         # than doing nothing. --all-snapshots still allows a deliberate full replay.
         snaps = [s for s in snaps if s.get("parse_status") == "pending"]
     canon = _canonicalisers()
-    total_obs = total_rev = 0
+    total_obs = total_rev = n_failed = 0
     for s in snaps:
         fn = canon.get(s.get("report_type"))
         if fn is None or s.get("source_kind") != "annual_zip":
@@ -131,8 +144,10 @@ def _cmd_ingest(args) -> int:
             print(f"  {s['snapshot_id']}: +{res['observations']} obs, +{res['revisions']} rev")
         except Exception as e:  # noqa: BLE001 — record the failure, don't abort the batch
             vintage.update_snapshot(s["snapshot_id"], parse_status="failed", parse_error=str(e))
-            print(f"  {s['snapshot_id']}: FAILED — {e}")
-    print(f"vintage ingest: {total_obs} new observation(s), {total_rev} revision(s).")
+            n_failed += 1
+            print(f"  {s['snapshot_id']}: FAILED: {e}")
+    print(f"vintage ingest: {total_obs} new observation(s), {total_rev} revision(s)"
+          + (f", {n_failed} FAILED." if n_failed else "."))
 
     # Surface revisions rather than only recording them. A scheduled run's stdout goes
     # nowhere, so a silent exit-0 after detecting a retroactive restatement would defeat
@@ -147,18 +162,34 @@ def _cmd_ingest(args) -> int:
     # need the same exit path: this is the only step that can exit non-zero without
     # skipping downstream work.
     alerts = [s for s in snaps if s.get("tripwire_alert")]
+    if not (total_rev or suspects or alerts or n_failed):
+        return 0
+
+    # ONE exit describing everything noteworthy. A parse failure and a restatement suspect
+    # in the same run are two separate things the operator needs, and an earlier draft
+    # raised on the failure first, which silently swallowed the suspect: the more serious
+    # of the two, reported by the less serious one arriving first.
+    _report_revisions(total_rev, suspects, alerts)
+    parts = []
     if total_rev or suspects or alerts:
-        _report_revisions(total_rev, suspects, alerts)
-        parts = [f"{total_rev} revision(s)"]
-        if suspects:
-            parts.append(f"{len(suspects)} closed-year restatement suspect(s)")
-        if alerts:
-            parts.append(f"{len(alerts)} frozen-year tripwire alert(s)")
-        raise SystemExit(
-            "cotdata-vintage: " + ", ".join(parts)
-            + " — review with 'cotdata-vintage diff'. Non-zero so a scheduler surfaces this; "
-              "the data IS committed, this is a notification, not a failure.")
-    return 0
+        parts.append(f"{total_rev} revision(s)")
+    if suspects:
+        parts.append(f"{len(suspects)} closed-year restatement suspect(s)")
+    if alerts:
+        parts.append(f"{len(alerts)} frozen-year tripwire alert(s)")
+    # A run where every snapshot failed to parse used to exit 0, because non-zero was
+    # reserved for revisions. On an unattended producer that reports success to Task
+    # Scheduler while the store gains nothing, and 'failed' is terminal, so it was a silent
+    # data-loss route rather than a cosmetic one.
+    if n_failed:
+        parts.append(f"{n_failed} snapshot(s) FAILED to parse (raw bytes retained, so "
+                     f"nothing is lost: fix the cause and re-run with "
+                     f"'cotdata-vintage ingest --retry-failed', which is the only way back "
+                     f"since 'failed' is not 'pending')")
+    raise SystemExit(
+        "cotdata-vintage: " + "; ".join(parts)
+        + ". Review with 'cotdata-vintage diff'. Non-zero so a scheduler surfaces this; "
+          "any data shown above IS committed, so this is a notification, not a rollback.")
 
 
 def _report_revisions(total_rev: int, suspects: list, alerts: list = ()) -> None:
@@ -282,6 +313,9 @@ def main(argv=None) -> int:
     g.add_argument("--snapshot", default=None, help="Ingest one snapshot id.")
     g.add_argument("--pending", action="store_true",
                    help="Ingest all parse_status=pending. This is also the default.")
+    g.add_argument("--retry-failed", action="store_true", dest="retry_failed",
+                   help="Reset parse_status=failed snapshots to pending and re-ingest "
+                        "them. The only way back from a failed parse.")
     g.add_argument("--all-snapshots", action="store_true", dest="all_snapshots",
                    help="Replay EVERY recorded snapshot, including already-ingested ones. "
                         "Only for rebuilding a store from retained raw bytes.")

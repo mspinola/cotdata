@@ -221,7 +221,12 @@ def test_cli_ingest_exits_nonzero_when_revisions_are_recorded(store_env, capsys)
         vintage_cli.main(["ingest", "--pending"])
     msg = str(exc.value)
     assert "restatement suspect" in msg and "cotdata-vintage diff" in msg
-    assert "notification, not a failure" in msg  # the data IS committed
+    # the unparseable fixture ALSO fails, and both must appear: an earlier draft raised on
+    # the failure first and swallowed the suspect, which is the more serious of the two
+    assert "FAILED to parse" in msg
+    # wording is "not a rollback" rather than "not a failure": with a parse failure in
+    # the same message, calling the whole run not-a-failure would be untrue
+    assert "notification, not a rollback" in msg  # the data IS committed
     assert "RESTATEMENT SUSPECT" in capsys.readouterr().out
 
 
@@ -242,7 +247,9 @@ def test_unparseable_sources_drain_out_of_pending(store_env):
          "local_path": "gone.zip", "parse_status": "pending",
          "retrieved_at": "2026-07-31T00:00:00Z"},
     ]})
-    assert vintage_cli.main(["ingest", "--pending"]) == 0
+    # the missing file makes d1 fail, and a failed parse is itself now a non-zero exit
+    with pytest.raises(SystemExit, match="FAILED to parse"):
+        vintage_cli.main(["ingest", "--pending"])
 
     after = {s["snapshot_id"]: s for s in vintage.read_snapshots()}
     assert after["w1"]["parse_status"] == "skipped"
@@ -344,3 +351,60 @@ def test_a_replayed_snapshot_keeps_its_own_observed_at(store_env):
     now = vi.asof(pd.Timestamp("2026-08-01"), report_date="2026-07-21")
     comm = now[now.category == "commercial"]
     assert list(comm["long_contracts"]) == [200]   # the newer value still wins
+
+
+def test_replaying_an_old_snapshot_is_a_true_no_op(store_env):
+    """Second review pass. Taking observed_at from the snapshot fixed the TIMESTAMP but not
+    the COMPARISON: ingest_canonical still diffed against whatever was newest in the store,
+    so a replay emitted a reversed revision (300 -> 100) plus a re-revision, and grew
+    revisions/ without bound on every pass. The diff is now bitemporal."""
+    from cotdata import vintage_ingest as vi
+    caps = [("s1", 100, "2026-07-24T19:00:00Z"), ("s2", 200, "2026-07-31T19:00:00Z"),
+            ("s3", 300, "2026-08-07T19:00:00Z")]
+    for sid, v, at in caps:
+        vi.ingest_canonical(_canon("2026-07-21", comm_long=v), snapshot_id=sid,
+                            observed_at=at)
+    n_obs, n_rev = len(vi.read_observations()), len(vi.read_revisions())
+    assert n_rev == 2   # 100 -> 200 -> 300, both forward
+
+    for _ in range(3):                      # three full replays
+        for sid, v, at in caps:
+            vi.ingest_canonical(_canon("2026-07-21", comm_long=v), snapshot_id=sid,
+                                observed_at=at)
+    assert (len(vi.read_observations()), len(vi.read_revisions())) == (n_obs, n_rev)
+    rev = vi.read_revisions()
+    assert list(rev["old_value"]) == ["100", "200"]   # no reversed pair was invented
+    assert list(rev["new_value"]) == ["200", "300"]
+
+
+def test_retry_failed_is_the_way_back_from_a_failed_parse(store_env):
+    """`failed` is otherwise terminal: --pending does not select it and nothing else writes
+    the field back. Two separate defects stranded whole backlogs there."""
+    import pytest as _pytest
+
+    from cotdata import vintage, vintage_cli
+    vintage._write_manifest({"schema_version": 1, "snapshots": [
+        {"snapshot_id": "d1", "report_type": "legacy", "source_kind": "annual_zip",
+         "local_path": "gone.zip", "parse_status": "pending",
+         "retrieved_at": "2026-07-31T00:00:00Z"}]})
+    with _pytest.raises(SystemExit, match="FAILED to parse"):
+        vintage_cli.main(["ingest", "--pending"])
+    assert vintage.read_snapshots()[0]["parse_status"] == "failed"
+
+    assert vintage_cli.main(["ingest", "--pending"]) == 0        # terminal: not re-selected
+    with _pytest.raises(SystemExit):                             # but --retry-failed does
+        vintage_cli.main(["ingest", "--retry-failed"])
+
+
+def test_a_run_where_every_snapshot_failed_does_not_report_success(store_env):
+    """It used to exit 0, because non-zero was reserved for revisions. On an unattended
+    producer that reports success to Task Scheduler while the store gains nothing."""
+    import pytest as _pytest
+
+    from cotdata import vintage, vintage_cli
+    vintage._write_manifest({"schema_version": 1, "snapshots": [
+        {"snapshot_id": f"d{i}", "report_type": "legacy", "source_kind": "annual_zip",
+         "local_path": f"gone{i}.zip", "parse_status": "pending",
+         "retrieved_at": "2026-07-31T00:00:00Z"} for i in range(3)]})
+    with _pytest.raises(SystemExit, match="3 snapshot"):
+        vintage_cli.main(["ingest", "--pending"])

@@ -157,7 +157,20 @@ def canonicalize_legacy(wide: pd.DataFrame, *, combined: bool = False) -> pd.Dat
                 "cr4_net_long": pd.NA, "cr4_net_short": pd.NA,
                 "cr8_net_long": pd.NA, "cr8_net_short": pd.NA,
             })
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    # Coerce exactly as the disagg/TFF path does. Without this the null-rate band in
+    # validate() is VACUOUS for Legacy (found in review): a value arriving as "200,000"
+    # after a CFTC format change stays an object column, passes every check, and hashes
+    # differently from the numeric form, which is precisely the fabricated-revision failure
+    # the band exists to prevent, on the one report type where it could not see it.
+    #
+    # Confirmed not to move any stored hash: across all 95 markets and 40 years the real
+    # values are already int64, so to_numeric is an identity and row_sha256 is unchanged.
+    # _norm normalises int/float/numpy alike, so the dtype could not have mattered anyway.
+    for f in VALUE_FIELDS:
+        if f in out.columns:
+            out[f] = pd.to_numeric(out[f], errors="coerce")
+    return out
 
 
 # ── Disaggregated / TFF canonicalisation ────────────────────────────────────
@@ -574,7 +587,20 @@ def ingest_canonical(canonical: pd.DataFrame, *, snapshot_id: str,
         observed_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     observed_ts = _naive_utc(observed_at)
 
-    prior = _latest_by_key(read_observations())
+    # Diff against what was known AS OF this snapshot's observed_at, not against whatever
+    # is newest in the store. Without the filter the comparison is not bitemporal at all:
+    # re-ingesting an older snapshot compares it to a LATER value and emits a reversed
+    # revision (300 -> 100) plus a re-revision, growing revisions/ without bound on every
+    # replay. Found in review, after a first fix corrected only the observed_at stamp.
+    #
+    # On the forward path this changes nothing, because observed_at is then the newest
+    # timestamp in the store and the filter admits every row. On a replay it makes the
+    # operation a true no-op: the row the snapshot itself wrote is the latest as of its own
+    # observed_at, so the hash matches and nothing is written.
+    obs = read_observations()
+    if not obs.empty:
+        obs = obs[obs["observed_at"] <= observed_ts]
+    prior = _latest_by_key(obs)
     prior_by_key = {}
     for _, r in prior.iterrows():
         prior_by_key[tuple(r[k] for k in NATURAL_KEY)] = r
