@@ -258,6 +258,115 @@ def update_snapshot(snapshot_id: str, **fields) -> bool:
     return hit
 
 
+# ── The frozen-year tripwire ────────────────────────────────────────────────
+# CFTC's weekly regeneration job touches a ROLLING TWO-YEAR WINDOW: the current year and
+# the immediately-prior year, nothing older (measured 2026-07-30: 2025 and 2026 shared an
+# identical Last-Modified while 2022/2023/2024 sat on a single January bulk re-touch; see
+# docs/design/cot_vintage_store_handoff.md §12.2). That gives three regimes, and each has a
+# DIFFERENT expected outcome, which is what makes a violation meaningful rather than noise:
+#
+#   current year          new bytes every week. Real new data. Nothing to assert.
+#   prior year (frozen)   re-served every week but byte-IDENTICAL, so the expected record
+#                         is exactly "unchanged bytes (deduped)". This is the only regime
+#                         where CFTC hands us a free weekly content check on closed data.
+#   older (frozen)        never re-touched, so If-Modified-Since 304s and no bytes arrive.
+#                         Content is not verified at all; a 200 with new bytes is the alert.
+#
+# The prior-year slot is the load-bearing one. It is the sole automated detector for the
+# failure mode this subsystem exists to guard against (July 2008: reports restated back to
+# 2007-07-03), and it costs one ~7 MB weekly transfer that dedupes to zero bytes on disk.
+EXPECT_CHURN = "churn"                    # current year: new bytes are normal
+EXPECT_FROZEN_IN_WINDOW = "frozen_in_window"    # prior year: re-served, must be identical
+EXPECT_FROZEN_OUT_OF_WINDOW = "frozen_out_of_window"  # older: 304, content unverified
+EXPECT_WEEKLY = "weekly"                  # the weekly static: new content every Friday
+
+
+def capture_expectation(report_year: int | None, current_year: int) -> str:
+    """Which regeneration regime a source sits in. See the block comment above."""
+    if report_year is None:
+        return EXPECT_WEEKLY
+    if report_year >= current_year:
+        return EXPECT_CHURN
+    if report_year == current_year - 1:
+        return EXPECT_FROZEN_IN_WINDOW
+    return EXPECT_FROZEN_OUT_OF_WINDOW
+
+
+# What actually happened on this fetch, as a single controlled token. Recorded on every
+# snapshot so the tripwire can be EDGE-triggered off the previous record rather than
+# re-firing on a standing condition.
+OUTCOME_FIRST = "first"              # no prior snapshot for this url, a baseline
+OUTCOME_CHANGED = "changed"          # 200, bytes differ from the last retained copy
+OUTCOME_DEDUPED = "deduped"          # 200, bytes byte-identical to the last retained copy
+OUTCOME_NOT_MODIFIED = "not_modified"  # 304, server declined to re-send
+OUTCOME_FAILED = "failed"
+
+
+def _tripwire_alert(expectation: str, outcome: str, prev_outcome: str | None) -> str | None:
+    """The alert reason for one capture, or None.
+
+    Two kinds of violation, deliberately triggered differently:
+
+    **Content changed on a frozen year** always alerts. It is a discrete event with new
+    bytes sitting next to the old ones, so it is diffable, and two restatements in
+    consecutive weeks are two things worth knowing about, not one.
+
+    **The detector went blind** (a frozen-in-window year that 304s or fails) alerts only on
+    the TRANSITION into that state. It is a standing condition: if CFTC stopped re-touching
+    the prior year's Last-Modified, a level-triggered alert would fire every single day
+    forever, and an alert that never clears is one that gets ignored. Same reasoning
+    that scopes the ingest revision alert to this run's snapshots. Edge-triggering means it
+    is reported once, loudly, and then stays quiet until the pattern changes back.
+
+    Note what is NOT an alert: a frozen year outside the two-year window returning 304.
+    That is the correct, expected outcome there, and it is also the reason the prior-year
+    slot matters: it is the only closed data whose CONTENT is checked at all.
+    """
+    if expectation == EXPECT_FROZEN_IN_WINDOW:
+        if outcome == OUTCOME_CHANGED:
+            return ("content changed on the frozen prior year: CFTC re-serves this file "
+                    "weekly and it has been byte-identical, so a new sha here is the "
+                    "retroactive-restatement signature")
+        if outcome in (OUTCOME_NOT_MODIFIED, OUTCOME_FAILED) and prev_outcome == OUTCOME_DEDUPED:
+            return (f"the frozen prior year stopped being re-served ({outcome}) after "
+                    f"previously deduping. The weekly content check has gone blind, so a "
+                    f"restatement would no longer be detected here")
+        return None
+    if expectation == EXPECT_FROZEN_OUT_OF_WINDOW and outcome == OUTCOME_CHANGED:
+        return ("content changed on a closed year outside CFTC's regeneration window, "
+                "which should never be re-touched at all")
+    return None
+
+
+def _annotate(rec: dict, *, prev: dict | None, now: dt.datetime) -> dict:
+    """Attach expectation / outcome / tripwire_alert to a capture record."""
+    expectation = capture_expectation(rec.get("report_year"), now.year)
+    note = rec.get("note") or ""
+    if note.startswith("fetch failed"):
+        outcome = OUTCOME_FAILED
+    elif rec.get("http_status") == 304:
+        outcome = OUTCOME_NOT_MODIFIED
+    elif prev is None:
+        outcome = OUTCOME_FIRST
+    elif rec.get("note") == "unchanged bytes (deduped)":
+        outcome = OUTCOME_DEDUPED
+    else:
+        outcome = OUTCOME_CHANGED
+    alert = _tripwire_alert(expectation, outcome, (prev or {}).get("outcome"))
+    # Year-end finalisation is the one benign way a frozen year legitimately changes, and
+    # it happens on a known schedule. Say so in the message rather than teaching the reader
+    # to discount every January alert, which would train them to discount all of them.
+    if alert and outcome == OUTCOME_CHANGED and now.month == 1:
+        alert += (". NOTE: it is January, when CFTC finalises the year just ended, so this "
+                  "is the one time of year a frozen-year change is plausibly routine")
+    rec["expectation"] = expectation
+    rec["outcome"] = outcome
+    rec["tripwire_alert"] = alert
+    if alert:
+        print(f"  *** TRIPWIRE: {rec.get('report_type')} {rec.get('report_year')}: {alert}.")
+    return rec
+
+
 # ── Capture ─────────────────────────────────────────────────────────────────
 def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
@@ -293,7 +402,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
 
     if res.status == 304 or res.content is None:
         # Server says unchanged: record the check, retain nothing new, reuse prior file.
-        return {
+        return _annotate({
             **base,
             "snapshot_id": _snapshot_id(retrieved_at, source.url, "304"),
             "http_status": 304,
@@ -303,7 +412,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             "byte_size": None,
             "local_path": (prev or {}).get("local_path"),
             "note": "304 not-modified",
-        }
+        }, prev=prev, now=now)
 
     floor = _MIN_BYTES.get(source.source_kind, _MIN_BYTES_DEFAULT)
     if len(res.content) < floor:
@@ -315,7 +424,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
     sha = hashlib.sha256(res.content).hexdigest()
     if prev and prev.get("content_sha256") == sha:
         # Byte-identical to what we already retained (zips regenerate): dedupe, no rewrite.
-        return {
+        return _annotate({
             **base,
             "snapshot_id": _snapshot_id(retrieved_at, source.url, sha[:8]),
             "http_status": res.status,
@@ -325,7 +434,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             "byte_size": len(res.content),
             "local_path": prev.get("local_path"),
             "note": "unchanged bytes (deduped)",
-        }
+        }, prev=prev, now=now)
 
     # New bytes: retain immutably, via a .part file + atomic replace. A crash during a
     # plain write_bytes would leave a TRUNCATED file already carrying the full sha in its
@@ -349,22 +458,17 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
         rel = str(dest)  # COTDATA_VINTAGE_ROOT points outside the store
 
     # ── Restatement tripwire ────────────────────────────────────────────────
-    # A CLOSED year's content is frozen (measured: 2020-2024 static, and 2025 re-touched
-    # weekly by the rolling regeneration window but byte-identical since January). So a
-    # closed year whose sha CHANGES is the 2008-style retroactive-restatement signature —
-    # the failure mode this whole subsystem exists to detect — and it costs no extra
-    # machinery: it falls out of the ordinary dedupe path. 2025 in particular should
-    # produce exactly one "unchanged bytes (deduped)" record per week, indefinitely; the
-    # week it does not is the alert.
-    restatement_suspect = False
-    if prev is not None and source.report_year is not None and source.report_year < now.year:
-        restatement_suspect = True
-        print(f"  *** RESTATEMENT SUSPECT: {source.report_type} {source.report_year} "
-              f"content changed (sha {(prev.get('content_sha256') or '')[:8]} -> {sha[:8]}). "
-              f"A closed year should be frozen. In January this may be ordinary year-end "
-              f"finalization; otherwise treat as a retroactive restatement and diff it.")
+    # A CLOSED year's content is frozen, so a closed year whose sha CHANGES is the
+    # 2008-style retroactive-restatement signature, the failure mode this whole subsystem
+    # exists to detect, and it costs no extra machinery: it falls out of the ordinary
+    # dedupe path. ``_annotate`` below classifies which frozen regime this is and writes
+    # the human-readable reason; this flag stays because it is the field ``ingest`` and
+    # every stored snapshot already key off.
+    restatement_suspect = (
+        prev is not None and source.report_year is not None
+        and source.report_year < now.year)
 
-    return {
+    return _annotate({
         **base,
         "snapshot_id": _snapshot_id(retrieved_at, source.url, sha[:8]),
         "restatement_suspect": restatement_suspect,
@@ -375,24 +479,41 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
         "byte_size": len(res.content),
         "local_path": rel,
         "note": None,
-    }
+    }, prev=prev, now=now)
 
 
 def fetch(year: int | None = None, *, all_years: bool = False,
-          include_weekly: bool = True, sources: list[Source] | None = None,
+          include_weekly: bool = True, include_prior_year: bool = True,
+          sources: list[Source] | None = None,
           http_get=_http_get, rate_limit_s: float = _RATE_LIMIT_S, now_fn=_utcnow) -> dict:
     """Capture the release-critical CFTC files into the immutable landing zone.
 
-    Default: the current year's three annual zips (which carry the newest release) plus
-    the Legacy weekly static (for its true-publication Last-Modified). ``all_years``
-    walks 1986→current for a cold-start backfill of raw bytes. An explicit ``sources``
-    list overrides the year/weekly derivation (targeted capture; used in tests).
+    Default: the current year's three annual zips (which carry the newest release), the
+    PRIOR year's three (the frozen-year tripwire, see the block comment above
+    ``capture_expectation``), plus the Legacy weekly static (for its true-publication
+    Last-Modified). ``all_years`` walks 1986→current for a cold-start backfill of raw
+    bytes. An explicit ``sources`` list overrides the year/weekly derivation (targeted
+    capture; used in tests).
 
-    Returns ``{"records": [...], "new_files": n, "checks": n}``.
+    The prior year is in the DEFAULT set rather than only on ``--all`` because the
+    tripwire is worth nothing if it only runs when someone remembers to run it manually.
+    It costs one ~7 MB transfer per week (CFTC re-touches Last-Modified weekly, so the
+    other six days 304) and zero bytes on disk, because the content is byte-identical and
+    dedupes. That is the whole price of the only automated retroactive-restatement
+    detector in the stack. An explicit ``year`` is taken at face value, with no prior-year
+    companion: that is a targeted capture, not the scheduled sweep.
+
+    Returns ``{"records": [...], "new_files": n, "checks": n, "failed": n,
+    "tripwire_alerts": [...]}``.
     """
     if sources is None:
         this_year = now_fn().year
-        years = range(1986, this_year + 1) if all_years else [year or this_year]
+        if all_years:
+            years = list(range(1986, this_year + 1))
+        elif year is not None:
+            years = [year]
+        else:
+            years = [this_year] + ([this_year - 1] if include_prior_year else [])
         sources = []
         for y in years:
             sources.extend(annual_sources(y))
@@ -414,7 +535,7 @@ def fetch(year: int | None = None, *, all_years: bool = False,
             # and dies at the first naming variant or missing disagg year otherwise. The
             # failure is RECORDED (so it is visible and retryable), then the run goes on —
             # matching what the ingest path already does.
-            rec = _failure_record(src, now, e)
+            rec = _failure_record(src, now, e, prev=_latest_for_url(snapshots, src.url))
             failed += 1
             print(f"  {src.report_type}/{src.source_kind} {src.report_year or ''}: "
                   f"fetch failed — {e}")
@@ -431,12 +552,14 @@ def fetch(year: int | None = None, *, all_years: bool = False,
             time.sleep(rate_limit_s)
 
     return {"records": records, "new_files": new_files, "checks": len(records),
-            "failed": failed}
+            "failed": failed,
+            "tripwire_alerts": [r for r in records if r.get("tripwire_alert")]}
 
 
-def _failure_record(source: Source, now: dt.datetime, error: Exception) -> dict:
+def _failure_record(source: Source, now: dt.datetime, error: Exception,
+                    *, prev: dict | None = None) -> dict:
     retrieved_at = _iso(now)
-    return {
+    return _annotate({
         "source_url": source.url,
         "source_kind": source.source_kind,
         "report_type": source.report_type,
@@ -452,4 +575,4 @@ def _failure_record(source: Source, now: dt.datetime, error: Exception) -> dict:
         "parse_status": "pending",
         "parse_error": None,
         "note": f"fetch failed: {error}",
-    }
+    }, prev=prev, now=now)

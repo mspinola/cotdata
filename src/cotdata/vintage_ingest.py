@@ -175,8 +175,23 @@ def validate(canonical: pd.DataFrame) -> list[str]:
     """Fail loudly (raise) on structural problems; return a list of soft warnings.
 
     Raises rather than partially ingesting on: missing natural-key columns, null
-    natural-key values, or categories outside the controlled vocabulary. Warns (does
-    not fail) on ``long+short+spread > open_interest`` — definitional edge cases exist.
+    natural-key values, or categories outside the controlled vocabulary. Warns (does not
+    fail) when a SIDE total breaches open interest.
+
+    **The side total is the invariant, not the per-row sum.** An earlier version compared
+    one category's ``long + short + spread`` against total open interest, which is not a
+    real bound: the two sides of a market are counted separately, so a category holding
+    80k long and 294k short in a 383k-OI market sums to 374k without anything being wrong.
+    Measured against the real store it fired on 811 of 5,778 gold rows (14%), pure noise,
+    and a soft warning that cries wolf at that rate is one nobody reads.
+
+    What actually must hold is per side, summed across every category: every long
+    contract in the market belongs to exactly one category, so ``Σ long <= OI`` and
+    ``Σ short <= OI``. Verified against 1,926 weeks of gold: the two side totals matched
+    each other on every single week. (They fall SHORT of OI by a constant, equal amount on
+    both sides, which is the non-commercial spreading column that ``providers/cftc.py``
+    does not capture (see ``vintage_flow.zero_sum_check``). That gap is expected and is
+    not warned about.)
     """
     missing = [c for c in NATURAL_KEY if c not in canonical.columns]
     if missing:
@@ -195,13 +210,21 @@ def validate(canonical: pd.DataFrame) -> list[str]:
             raise ValidationError(f"categories {bad} outside vocabulary for {rt!r}")
 
     warnings = []
-    for _, r in canonical.iterrows():
-        oi = r.get("open_interest")
-        parts = [r.get("long_contracts"), r.get("short_contracts"), r.get("spread_contracts")]
-        s = sum(p for p in parts if p is not None and not pd.isna(p))
-        if oi is not None and not pd.isna(oi) and s > oi:
-            warnings.append(f"{r['report_date'].date()} {r['market_code']} "
-                            f"{r['category']}: long+short+spread ({s}) > OI ({oi})")
+    if "open_interest" not in canonical.columns:
+        return warnings
+    keys = ["report_date", "market_code", "report_type", "combined"]
+    for key, grp in canonical.groupby(keys, dropna=False, sort=False):
+        oi = grp["open_interest"].max()
+        if pd.isna(oi):
+            continue
+        for side in ("long_contracts", "short_contracts"):
+            total = pd.to_numeric(grp.get(side), errors="coerce").sum()
+            spread = pd.to_numeric(grp.get("spread_contracts"), errors="coerce").sum()
+            if total + spread > oi:
+                report_date, market_code = key[0], key[1]
+                warnings.append(
+                    f"{pd.Timestamp(report_date).date()} {market_code}: "
+                    f"{side} summed across categories ({total + spread:.0f}) > OI ({oi})")
     return warnings
 
 

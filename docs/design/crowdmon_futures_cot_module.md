@@ -166,6 +166,21 @@ class CotSource(Protocol):
 
 Two implementations: `LocalCotData` wrapping the existing module, and `CftcApiCotData` as a fallback and for backfill. Validation on every load — schema conformance, `long + short + spread <= OI` sanity, non-null keys, category vocabulary check.
 
+> **Amended 2026-07-30, the OI sanity check as written is wrong.** `long + short + spread
+> <= OI` is not a bound on a single category row: the two sides of a market are counted
+> separately, so a category holding 80k long and 294k short in a 383k-OI market sums to
+> 374k with nothing wrong. Implemented literally it fired on 811 of 5,778 gold rows (14%).
+>
+> The invariant that does hold is **per side, summed across every category**, since every
+> long contract in the market belongs to exactly one category: `Σ long <= OI` and
+> `Σ short <= OI`. That is now what `vintage_ingest.validate` checks, and store-wide
+> warnings went from thousands to zero.
+>
+> Stronger still, and free: **`Σ long == Σ short`**, because futures are closed and
+> zero-sum. Verified on **149,412 / 149,412 weeks** across all 95 Legacy markets, 1986 to
+> 2026. Exposed as `vintage_flow.zero_sum_check` and worth running on every adapter load,
+> because a dropped, duplicated or misrouted category column breaks it on the first week.
+
 *Open items to resolve at implementation:* the existing module's output schema and index conventions, whether history is already backfilled and from what date, and whether revisions are currently retained or overwritten. Revision retention is the one that matters most — see §5.3.
 
 > **Resolved 2026-07-30** by the vintage build (branch `claude/cot-revision-snapshots-9b196f`,
@@ -184,6 +199,15 @@ Two implementations: `LocalCotData` wrapping the existing module, and `CftcApiCo
 > - **Only futures-only is fetched**, so `combined` is constant-`False` today: the column is
 >   present and correct but not yet discriminating, and half the reportable universe is absent
 >   until the combined files are added.
+> - **`spread_contracts` is always null, and `NonComm_Positions_Spread_All` is not
+>   captured at all.** It is absent from `providers/cftc.py`'s `TARGET_COLS`, so it never
+>   reaches the stored parquet, the canonical rows, or any vintage observation. Measured as
+>   the exact, equal gap between each side total and open interest: gold on 2026-07-21 had
+>   OI 383,368 against 351,385 on both sides, a gap of 31,983 (8% of OI). Net positioning
+>   is unaffected, since spreading is long and short in equal measure, but **anything
+>   denominated as a share of open interest (§5.2 step 2) has a denominator containing
+>   contracts its numerator cannot see.** Trader counts are likewise missing from the
+>   stored table, though the vintage ingest path reads them straight from the zip.
 > - **`vintage: int` is not how it was built.** The implementation is bitemporal
 >   (`observed_at` plus change-only rows), so a point-in-time read is "greatest
 >   `observed_at <= t` per natural key". An integer vintage ordinal can be derived from that
@@ -292,6 +316,37 @@ Weekly change in net position decomposes into four states, which have different 
 | − | ~0 | Long liquidation | Position exit, not fresh selling. |
 
 A rally driven by short covering and a rally driven by new longs look identical on a chart and are entirely different setups. This decomposition is one line of code and is among the highest-value outputs in the system.
+
+> **Built 2026-07-30** as `cotdata/vintage_flow.py` (`cotdata-vintage flow`), directly on
+> the canonical schema with no prices and no contract master. It lives in `cotdata` as a
+> read-side function that writes no store domain and changes no producer/consumer contract;
+> the positioning ENGINE stays here in crowdmon, because that one needs prices, a contract
+> master and configured weights. Three things the table above does not say, all of which
+> only appear against real data:
+>
+> - **"~0" never happens.** Both legs always move. Resolved by DOMINANT LEG: whichever of
+>   |ΔLong|, |ΔShort| is larger names the state and its sign gives the direction, exact
+>   ties to the long leg. Parameter-free, so nothing to tune and nothing to overfit. An
+>   optional `min_frac_oi` dead zone adds a `quiet` state and defaults to 0.0, since any
+>   other value is a judgement of the same kind as §6.3's fragility weights.
+> - **Open interest corroborates the label, and disagrees often enough to matter.** Fresh
+>   positioning should create contracts and exits should destroy them; where it does not,
+>   the label describes a transfer between categories rather than new or closed risk.
+>   Emitted as `oi_corroborates` rather than folded into the state, because open interest
+>   here is the market total (that is what CFTC reports), so it checks a per-category label
+>   against a market-level quantity.
+> - **The weekly change is not always weekly. COT was FORTNIGHTLY until 1992-10-13.**
+>   Across the store 415,908 of 447,951 intervals are 7 days; the 14 and 15-day intervals
+>   are almost all pre-October-1992, and the rest are holiday shifts. `days_elapsed` is
+>   emitted as a column so a caller filters on it instead of discovering it in a result.
+>   This is §5.3's holiday hazard showing up in a second place: not just in the release
+>   date, but in the differencing interval.
+>
+> Worked example, gold non-commercial, week ending 2026-06-02: Δnet was **+21,760**, which
+> reads as heavy fresh buying. The decomposition says ΔShort **-16,368** against ΔLong
+> +5,392 with open interest **down 27,437**: short covering, a rally with a finite fuel
+> supply. That is the distinction this section exists to make, on the first real week
+> anyone looked at.
 
 ---
 

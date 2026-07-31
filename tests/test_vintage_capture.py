@@ -291,3 +291,145 @@ def test_changed_bytes_writes_second_immutable_snapshot(store_env):
     raws = sorted((store_env / "vintage" / "raw").rglob("*.zip"))
     assert len(raws) == 2  # both vintages retained; neither overwritten
     assert {p.read_bytes() for p in raws} == {_body(b"week1"), _body(b"week2-revised")}
+
+
+# ── Frozen-year tripwire ────────────────────────────────────────────────────
+# CFTC regenerates a ROLLING TWO-YEAR window (current + prior). The prior year is
+# therefore re-served every week but byte-identical, which is the one place we get a free
+# weekly CONTENT check on closed data, and the only automated detector for a 2008-style
+# retroactive restatement. These tests pin the three regimes and the edge-trigger rule.
+
+LEGACY_2025 = "https://www.cftc.gov/files/dea/history/dea_fut_xls_2025.zip"
+LEGACY_2019 = "https://www.cftc.gov/files/dea/history/dea_fut_xls_2019.zip"
+
+
+def _one(url, year):
+    from cotdata.vintage import Source
+    return [Source("legacy", "annual_zip", "zip", url, year)]
+
+
+def test_expectation_follows_the_rolling_two_year_regeneration_window():
+    from cotdata import vintage
+    assert vintage.capture_expectation(2026, 2026) == vintage.EXPECT_CHURN
+    assert vintage.capture_expectation(2025, 2026) == vintage.EXPECT_FROZEN_IN_WINDOW
+    assert vintage.capture_expectation(2024, 2026) == vintage.EXPECT_FROZEN_OUT_OF_WINDOW
+    assert vintage.capture_expectation(None, 2026) == vintage.EXPECT_WEEKLY
+
+
+def test_prior_year_dedupe_is_the_expected_outcome_and_never_alerts(store_env):
+    """The nominal weekly result for the frozen prior year: CFTC re-touches Last-Modified,
+    re-serves identical bytes, we dedupe. Silence here is the tripwire working."""
+    from cotdata import vintage
+    body = _body(b"2025-final")
+    http = _FakeHttp({LEGACY_2025: [(200, body, None, "lm1"), (200, body, None, "lm2")]})
+    now = _clock()
+    vintage.fetch(sources=_one(LEGACY_2025, 2025), http_get=http, rate_limit_s=0, now_fn=now)
+    r2 = vintage.fetch(sources=_one(LEGACY_2025, 2025), http_get=http, rate_limit_s=0, now_fn=now)
+
+    rec = r2["records"][0]
+    assert rec["expectation"] == vintage.EXPECT_FROZEN_IN_WINDOW
+    assert rec["outcome"] == vintage.OUTCOME_DEDUPED
+    assert rec["tripwire_alert"] is None
+    assert r2["tripwire_alerts"] == []
+
+
+def test_prior_year_content_change_alerts(store_env):
+    """Anything other than a dedupe on the frozen prior year is the alert the user asked
+    for. A changed sha there is the restatement signature."""
+    from cotdata import vintage
+    http = _FakeHttp({LEGACY_2025: [(200, _body(b"2025-final"), None, "lm1"),
+                                    (200, _body(b"2025-RESTATED"), None, "lm2")]})
+    now = _clock()
+    vintage.fetch(sources=_one(LEGACY_2025, 2025), http_get=http, rate_limit_s=0, now_fn=now)
+    r2 = vintage.fetch(sources=_one(LEGACY_2025, 2025), http_get=http, rate_limit_s=0, now_fn=now)
+
+    rec = r2["records"][0]
+    assert rec["outcome"] == vintage.OUTCOME_CHANGED
+    assert rec["tripwire_alert"] and "restatement" in rec["tripwire_alert"]
+    assert len(r2["tripwire_alerts"]) == 1
+
+
+def test_prior_year_going_quiet_alerts_once_not_forever(store_env):
+    """If CFTC stops re-serving the prior year we get a 304 and the content check has gone
+    BLIND. Worth knowing, but it is a standing condition. A level-triggered alert would
+    fire every day forever, which is how an alert gets ignored, so it is edge-triggered."""
+    from cotdata import vintage
+    body = _body(b"2025-final")
+    http = _FakeHttp({LEGACY_2025: [(200, body, None, "lm1"), (200, body, None, "lm2"),
+                                    (304, None, None, None), (304, None, None, None)]})
+    now = _clock()
+    src = _one(LEGACY_2025, 2025)
+    vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)   # first
+    vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)   # deduped
+    r3 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)  # goes quiet
+    r4 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)  # still quiet
+
+    assert r3["records"][0]["outcome"] == vintage.OUTCOME_NOT_MODIFIED
+    assert "blind" in r3["records"][0]["tripwire_alert"]
+    assert r4["records"][0]["tripwire_alert"] is None  # edge, not level
+
+
+def test_older_frozen_year_304_is_expected_and_silent(store_env):
+    """Outside the regeneration window a 304 is correct. Alerting on it would bury the
+    prior-year signal under ~35 years of noise on every --all sweep."""
+    from cotdata import vintage
+    http = _FakeHttp({LEGACY_2019: [(200, _body(b"2019"), None, "lm1"),
+                                    (304, None, None, None)]})
+    now = _clock()
+    src = _one(LEGACY_2019, 2019)
+    vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+    r2 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+
+    assert r2["records"][0]["expectation"] == vintage.EXPECT_FROZEN_OUT_OF_WINDOW
+    assert r2["records"][0]["tripwire_alert"] is None
+
+
+def test_current_year_new_bytes_never_alert(store_env):
+    """New data every week is the whole point of the current year."""
+    from cotdata import vintage
+    http = _FakeHttp(_only(LEGACY_2026, (200, _body(b"w1"), None, "lm1"),
+                           (200, _body(b"w2"), None, "lm2")))
+    now = _clock()
+    _fetch(vintage, http, now)
+    r2 = _fetch(vintage, http, now)
+    assert r2["records"][0]["expectation"] == vintage.EXPECT_CHURN
+    assert r2["tripwire_alerts"] == []
+
+
+def test_default_fetch_includes_the_prior_year_so_the_tripwire_actually_runs(store_env):
+    """The tripwire is worth nothing if it only fires when someone remembers to run
+    --all by hand, so the prior year is in the DEFAULT scheduled set."""
+    from cotdata import vintage
+    got = {(s.report_year, s.report_type) for s in _default_sources(vintage, 2026)}
+    assert (2026, "legacy") in got
+    assert (2025, "legacy") in got
+    assert (2024, "legacy") not in got
+    assert (None, "legacy") in got  # the weekly static
+
+
+def test_explicit_year_is_taken_at_face_value(store_env):
+    """A targeted capture is not the scheduled sweep: --year 2019 means 2019."""
+    from cotdata import vintage
+    years = {s.report_year for s in _default_sources(vintage, 2026, year=2019)}
+    assert years == {2019, None}
+
+
+def _default_sources(vintage, this_year, **kw):
+    """Capture the source list `fetch` derives, without any network at all."""
+    seen = []
+
+    def spy(url, *, etag=None, last_modified=None):
+        raise AssertionError("no request expected")
+
+    import datetime as dt
+
+    def now():
+        return dt.datetime(this_year, 7, 30, tzinfo=dt.timezone.utc)
+
+    # fetch() records a failure rather than raising, so the spy's AssertionError still
+    # lets every derived source land in the returned records.
+    res = vintage.fetch(http_get=spy, rate_limit_s=0, now_fn=now, **kw)
+    for rec in res["records"]:
+        seen.append(vintage.Source(rec["report_type"], rec["source_kind"], "zip",
+                                   rec["source_url"], rec["report_year"]))
+    return seen

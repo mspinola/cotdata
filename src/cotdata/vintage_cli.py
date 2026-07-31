@@ -18,11 +18,22 @@ from . import config
 def _cmd_fetch(args) -> int:
     from . import vintage
     res = vintage.fetch(year=args.year, all_years=args.all,
-                        include_weekly=not args.no_weekly)
+                        include_weekly=not args.no_weekly,
+                        include_prior_year=not args.no_prior_year)
     print(f"vintage fetch: {res['checks']} source(s) checked, "
           f"{res['new_files']} new raw file(s) retained.")
     for rec in res["records"]:
-        print(f"  {rec['report_type']:<13} {rec['source_kind']:<13} {rec.get('note') or 'NEW'}")
+        print(f"  {rec['report_type']:<13} {rec['source_kind']:<13} "
+              f"{rec.get('report_year') or '':<6} {rec.get('expectation') or '':<22} "
+              f"{rec.get('outcome') or '':<13} {rec.get('note') or 'NEW'}")
+    # Deliberately NOT a non-zero exit. The wrapper aborts the whole run on a non-zero
+    # fetch, so alerting here would skip the ingest that turns a restatement into readable
+    # revision rows, precisely the thing you want when the tripwire fires. The alert is
+    # persisted on the snapshot and re-raised by `ingest`, which is the step that can exit
+    # non-zero safely because everything downstream of it has already run.
+    for rec in res["tripwire_alerts"]:
+        print(f"  *** TRIPWIRE {rec['report_type']} {rec.get('report_year')}: "
+              f"{rec['tripwire_alert']}")
     return 0
 
 
@@ -77,18 +88,33 @@ def _cmd_ingest(args) -> int:
     # A store-wide scan would keep firing on every subsequent run once a single
     # restatement had been seen, and an alert that never clears is one that gets ignored.
     suspects = [s for s in snaps if s.get("restatement_suspect")]
-    if total_rev or suspects:
-        _report_revisions(total_rev, suspects)
+    # Tripwire alerts overlap with `suspects` on the content-changed case and add the
+    # "detector went blind" case, which has no changed sha and so no suspect flag. Both
+    # need the same exit path: this is the only step that can exit non-zero without
+    # skipping downstream work.
+    alerts = [s for s in snaps if s.get("tripwire_alert")]
+    if total_rev or suspects or alerts:
+        _report_revisions(total_rev, suspects, alerts)
+        parts = [f"{total_rev} revision(s)"]
+        if suspects:
+            parts.append(f"{len(suspects)} closed-year restatement suspect(s)")
+        if alerts:
+            parts.append(f"{len(alerts)} frozen-year tripwire alert(s)")
         raise SystemExit(
-            f"cotdata-vintage: {total_rev} revision(s)"
-            + (f", {len(suspects)} closed-year restatement suspect(s)" if suspects else "")
+            "cotdata-vintage: " + ", ".join(parts)
             + " — review with 'cotdata-vintage diff'. Non-zero so a scheduler surfaces this; "
               "the data IS committed, this is a notification, not a failure.")
     return 0
 
 
-def _report_revisions(total_rev: int, suspects: list) -> None:
+def _report_revisions(total_rev: int, suspects: list, alerts: list = ()) -> None:
     from . import vintage_ingest
+    if alerts:
+        print("\n*** FROZEN-YEAR TRIPWIRE ***")
+        for s in alerts[-5:]:
+            print(f"    {s.get('report_type')} {s.get('report_year')} "
+                  f"[{s.get('expectation')} -> {s.get('outcome')}] at {s.get('retrieved_at')}")
+            print(f"      {s.get('tripwire_alert')}")
     if suspects:
         print("\n*** CLOSED-YEAR RESTATEMENT SUSPECT ***")
         for s in suspects[-5:]:
@@ -144,6 +170,44 @@ def _cmd_asof(args) -> int:
     return 0
 
 
+def _cmd_flow(args) -> int:
+    from . import vintage_flow
+
+    if args.source == "current":
+        canonical = vintage_flow.from_current_store(args.market)
+        print(f"vintage flow: {args.market} from the CURRENT-STATE store. NOT "
+              f"point-in-time. Revisions are already applied, so this is for looking at "
+              f"history and validating the schema, never for evaluating a rule.")
+    else:
+        canonical = vintage_flow.from_vintage(as_of=args.as_of, market_code=args.market)
+        if canonical.empty:
+            print("vintage flow: no vintage observations yet. The vintage series begins "
+                  "at first capture; use --source current for history.")
+            return 0
+
+    z = vintage_flow.zero_sum_check(canonical)
+    unbalanced = int((~z["balanced"]).sum())
+    print(f"  zero-sum: {len(z) - unbalanced}/{len(z)} weeks balanced"
+          + (f"  *** {unbalanced} UNBALANCED ***" if unbalanced else ""))
+
+    fl = vintage_flow.decompose(canonical, min_frac_oi=args.min_frac_oi)
+    if args.category:
+        fl = fl[fl["category"] == args.category]
+    if fl.empty:
+        print("  no weeks to decompose.")
+        return 0
+    off = fl[fl["days_elapsed"] != 7]
+    if len(off):
+        print(f"  {len(off)} of {len(fl)} intervals are not 7 days (COT was FORTNIGHTLY "
+              f"before 1992-10-13, and holidays shift the rest). Those rows are not a "
+              f"weekly change and are not comparable to one.")
+    print(f"\n{fl['state'].value_counts().to_string()}\n")
+    cols = ["report_date", "category", "d_long", "d_short", "d_net", "d_oi",
+            "days_elapsed", "state", "oi_corroborates"]
+    print(fl.tail(args.last)[cols].to_string(index=False))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="cotdata-vintage",
@@ -154,6 +218,9 @@ def main(argv=None) -> int:
     f.add_argument("--year", type=int, default=None, help="Report year (default: current).")
     f.add_argument("--all", action="store_true", help="Every year 1986→present (cold-start).")
     f.add_argument("--no-weekly", action="store_true", help="Skip the current-week static.")
+    f.add_argument("--no-prior-year", action="store_true", dest="no_prior_year",
+                   help="Skip the prior year, disabling the frozen-year restatement "
+                        "tripwire. Saves one ~7 MB weekly transfer and nothing on disk.")
     f.set_defaults(func=_cmd_fetch)
 
     ing = sub.add_parser("ingest", help="Parse retained raw files into change-only observations.")
@@ -173,6 +240,21 @@ def main(argv=None) -> int:
     a.add_argument("--report-date", default=None, dest="report_date")
     a.add_argument("--market", default=None)
     a.set_defaults(func=_cmd_asof)
+
+    fw = sub.add_parser("flow", help="Weekly flow decomposition per market/category.")
+    fw.add_argument("--market", required=True, help="CFTC market code, e.g. 088691.")
+    fw.add_argument("--source", choices=("vintage", "current"), default="vintage",
+                    help="'vintage' is point-in-time and starts at first capture; "
+                         "'current' reads the existing store back to 1986 but has "
+                         "revisions already applied, so it is NOT point-in-time.")
+    fw.add_argument("--as-of", default=None, dest="as_of",
+                    help="Point-in-time timestamp (vintage source only).")
+    fw.add_argument("--category", default=None, help="e.g. noncommercial.")
+    fw.add_argument("--min-frac-oi", type=float, default=0.0, dest="min_frac_oi",
+                    help="Dead zone as a fraction of prior open interest; weeks under it "
+                         "on both legs are 'quiet'. Default 0.0 (no dead zone).")
+    fw.add_argument("--last", type=int, default=20, help="Rows to print (default 20).")
+    fw.set_defaults(func=_cmd_flow)
 
     args = p.parse_args(argv)
     config.store_root()  # fail fast if COTDATA_STORE unset

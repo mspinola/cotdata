@@ -337,11 +337,12 @@ This is **opt-in and purely additive**: if you never run it, the store behaves e
 before. Enabling it adds a `vintage/` subtree.
 
 ```bash
-cotdata-vintage fetch                      # capture current year + weekly static (daily)
+cotdata-vintage fetch                      # capture current + prior year + weekly static (daily)
 cotdata-vintage fetch --all                # every year 1986-present (see below)
 cotdata-vintage ingest --pending           # parse retained raw -> observations + revisions
 cotdata-vintage diff --since 2026-01-01    # field-level revisions, with revision depth
 cotdata-vintage asof --as-of 2026-07-24T18:00:00 --report-date 2026-07-21
+cotdata-vintage flow --market 088691       # weekly flow decomposition (see below)
 cotdata-schedule sync                      # CFTC Special Announcements
 cotdata-schedule published                 # true publication dates from retained weekly statics
 cotdata-schedule backfill                  # resolve release_date + its provenance
@@ -369,13 +370,28 @@ How it works:
   (that file holds one week and is overwritten), so weeks predating capture fall back
   down the chain.
 
+- **Flow decomposition.** `cotdata-vintage flow` labels each week's ΔLong versus ΔShort as
+  `new_longs` / `short_covering` / `new_shorts` / `long_liquidation`, by dominant leg, with
+  no parameters to tune. A rally driven by short covering has a finite fuel supply and one
+  driven by fresh longs does not, and they are indistinguishable on a price chart. It also
+  emits `days_elapsed`, because COT was **fortnightly until 1992-10-13** and holidays shift
+  the rest, so a "weekly" change is not always weekly.
+
 **Run capture on the producer, not a replica**, and schedule it **daily**: nearly every
 request returns 304, so a daily run is close to free while catching holiday-shifted and
-backlog releases with no schedule logic. `--all` is a **restatement tripwire** rather than
-a backfill — closed years are byte-frozen, so a checksum change on one is the retroactive-
-restatement signature; monthly or quarterly is the right cadence, and it is cheap because
-almost everything 304s. Full design notes, including the measured CFTC caching behaviour,
-are in [docs/design/cot_vintage.md](docs/design/cot_vintage.md).
+backlog releases with no schedule logic.
+
+**The frozen-year tripwire.** CFTC regenerates a rolling two-year window (current plus the
+immediately-prior year) and nothing older. The prior year is therefore re-served every week
+but byte-identical, which is the one place a **content** check on closed data comes free.
+It is in the default fetch set for that reason: it costs one roughly 7 MB transfer per week
+and zero bytes on disk, and it is the only automated retroactive-restatement detector here.
+Anything other than `unchanged bytes (deduped)` on it raises an alert, which `ingest`
+re-raises as a non-zero exit and a `REVISIONS_<date>.txt` marker file. `--no-prior-year`
+turns it off. `--all` extends the same check to every year, but since nothing older is ever
+re-served it mostly confirms 304s; monthly or quarterly is the right cadence for that. Full
+design notes, including the measured CFTC caching behaviour, are in
+[docs/design/cot_vintage.md](docs/design/cot_vintage.md).
 
 > **Replica warning.** The vintage tree must not be written on a machine whose store is
 > mirrored (`robocopy /MIR`, `rsync --delete`) from a producer: the mirror deletes

@@ -252,6 +252,142 @@ Still deferred: `vintage stats` (needs a quarter of data to measure),
 category-migration detection (needs revisions to exist), tombstone *logic* (column
 present, needs a real disappearing key to design against).
 
+## 6. The frozen-year tripwire is now automated (2026-07-30)
+
+§3b established that CFTC regenerates a **rolling two-year window**, and §12.3 of the
+handoff recorded the consequence as a decision ("`--all` is a restatement tripwire, not a
+backfill, monthly or quarterly"). That decision had a hole: a tripwire that only fires when
+somebody remembers to run `--all` by hand is not a detector, it is an intention. This pass
+closes it.
+
+Three regeneration regimes, each with a different expected outcome:
+
+| Regime | Files | Expected weekly outcome | What violates it |
+|---|---|---|---|
+| `churn` | current year | new bytes | nothing, that is the data arriving |
+| `frozen_in_window` | **prior year** | `unchanged bytes (deduped)` | a new sha (restatement), or a 304 / failure (the check went blind) |
+| `frozen_out_of_window` | 2 or more years back | `304 not-modified` | a 200 carrying new bytes |
+| `weekly` | the weekly static | new content each Friday | n/a |
+
+The prior-year slot is the load-bearing one, and it is the only place CFTC hands over a
+free weekly **content** check on closed data. Everything older is never re-served, so its
+content is not verified at all: a 304 there proves only that a header did not move.
+
+**Changed: the prior year is now in the DEFAULT fetch set.** It costs one roughly 7 MB
+transfer per week (the other six days return 304, because CFTC re-touches `Last-Modified`
+weekly) and zero bytes on disk, because the content is byte-identical and dedupes. That is
+the entire price of the only automated retroactive-restatement detector in the stack.
+`--no-prior-year` turns it off. A targeted `--year N` is still taken at face value with no
+prior-year companion, because that is a targeted capture rather than the scheduled sweep.
+
+Two alert shapes, deliberately triggered differently:
+
+- **Content changed on a frozen year: always alerts.** It is a discrete event with new
+  bytes sitting beside the old ones, so it is diffable, and two restatements in
+  consecutive weeks are two things worth knowing rather than one. In January the message
+  says so explicitly, since year-end finalisation is the one benign way this fires.
+- **The detector went blind (frozen-in-window 304 or fetch failure): alerts on the
+  TRANSITION only.** This is a standing condition. If CFTC stopped re-touching the prior
+  year, a level-triggered alert would fire every day forever, and an alert that never
+  clears is one that gets ignored. Same reasoning that scopes the ingest revision alert to
+  the current run's snapshots.
+
+`fetch` deliberately still exits zero. The Windows wrapper aborts the whole run on a
+non-zero fetch, so alerting there would skip the `ingest` that turns a restatement into
+readable revision rows, which is exactly what you want when it fires. The alert is
+persisted on the snapshot (`expectation`, `outcome`, `tripwire_alert`) and re-raised by
+`ingest`, which is the step that can exit non-zero safely because everything downstream of
+it has already run. That path already writes the `REVISIONS_<date>.txt` marker file.
+
+## 7. Flow decomposition, and what it found in the canonical schema
+
+Module spec §6.4 built as `vintage_flow.py`. Weekly ΔLong versus ΔShort per
+market/category, labelled `new_longs` / `short_covering` / `new_shorts` /
+`long_liquidation`. No prices, no contract master, no multiplier: every input is a column
+the canonical schema already stores, which is what makes it a clean smoke test of that
+schema rather than of anything else.
+
+Two design points that are not in the spec because they only appear against real data:
+
+- **Classification is by dominant leg.** The spec's table has a "~0" leg, which never
+  happens: both legs always move a little. Whichever of |ΔLong|, |ΔShort| is larger names
+  the state and its sign picks the direction, with exact ties going to the long leg so the
+  result is deterministic. This is parameter-free, so there is nothing to tune and nothing
+  to overfit. An optional `min_frac_oi` dead zone adds a `quiet` state; it defaults to 0.0
+  because any other value is a judgement in the same class as the fragility weights and
+  belongs in a caller's config where it can be swept.
+- **`oi_corroborates`.** Futures are closed and zero-sum, so contracts exist only because
+  somebody opened them: fresh positioning should coincide with rising open interest and
+  exits with falling. Where it does not, the label is describing a transfer of an existing
+  position between categories rather than new or closed risk. Kept as a separate column
+  rather than folded into the state, because open interest in the canonical schema is the
+  MARKET total (that is what CFTC reports), so it corroborates a per-category label
+  against a market-level quantity. A real check, not a proof.
+
+### Measured over the whole store (2026-07-30)
+
+95 Legacy markets, 1986 to 2026-07-21, canonicalised and decomposed:
+
+| Measure | Result |
+|---|---|
+| Zero-sum identity (Σ long across categories == Σ short) | **149,412 / 149,412 weeks balanced** |
+| Flow rows produced | 447,951 |
+| Exceptions | 0 |
+| `validate()` warnings | 0 (after the fix below) |
+
+The zero-sum result is the strongest available validation of `canonicalize_legacy`: if the
+category mapping had dropped, duplicated or misrouted a column, the identity would break on
+the first week. It does not break on any week of any market in forty years.
+
+### Finding 1: non-commercial SPREADING is not captured, and never was
+
+The side totals reconcile with each other but fall short of open interest by a constant,
+equal amount on both sides. That gap is `NonComm_Positions_Spread_All`, which is absent
+from `providers/cftc.py`'s `TARGET_COLS` and therefore from the stored parquet, from the
+canonical rows, and from every vintage observation. Gold on 2026-07-21: OI 383,368, both
+sides 351,385, gap 31,983. 64 of 95 markets have at least one week where the gap is zero
+(no spreading that week), which is the confirming case.
+
+Spreading is a matched long and short held by one trader, so it cancels out of the
+long-versus-short identity while still counting toward open interest, which is exactly why
+the gap is equal on both sides. **Consequences to know before relying on this:**
+
+- Net positioning is unaffected, because spreading is long and short in equal measure.
+- Anything denominated as a **share of open interest** (module spec §5.2 step 2, which is
+  the next build step) is measuring a numerator against a denominator that includes
+  contracts the numerator cannot see. In gold that is 8% of OI.
+- Trader counts are likewise absent from the stored table, though the vintage ingest path
+  reads them from the zip directly rather than from the parquet.
+
+Not fixed here. Adding the column changes `providers/cftc.py` output, which breaks the
+byte-identical guarantee and the `current/` golden baseline that exists to protect it, so
+it is a deliberate separate change and not a drive-by.
+
+### Finding 2: `validate()`'s open-interest warning was mis-specified
+
+It compared one category's `long + short + spread` against total open interest. That is
+not a real bound: the two sides of a market are counted separately, so a category holding
+80k long and 294k short in a 383k-OI market sums to 374k with nothing wrong. Measured, it
+fired on **811 of 5,778 gold rows (14%)**, which is noise, and a soft warning at that rate
+is one nobody reads.
+
+Corrected to the invariant that does hold: per side, summed across every category, since
+every long contract in the market belongs to exactly one category. Store-wide warnings
+went from thousands to **zero**. The module spec's §4 adapter contract said
+`long + short + spread <= OI`, so the spec was wrong too and is amended in the same pass.
+
+### Finding 3: COT was FORTNIGHTLY until 1992-10-13
+
+`days_elapsed` is emitted as a column rather than assumed to be seven, and that
+immediately showed the reason. Across the store, 415,908 of 447,951 intervals are 7 days;
+the 15-day (9,057) and 14-day (5,775) intervals are almost entirely pre-October-1992,
+when the report was published twice a month. Gold's first 7-day interval is 1992-10-13.
+
+So a "weekly change" computed over pre-1992 history is a fortnightly change and is not
+comparable to the rest of the series. The remaining off-7 intervals are holiday shifts
+(gold has 11-day gaps at 2002-01-08 and 2003-02-25). The column is the fix: callers filter
+on it rather than discovering this in a result.
+
 ## Bottom line
 
 Discovery and the spike are done. The genuine null on historical recovery holds: no
