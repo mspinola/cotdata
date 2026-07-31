@@ -199,15 +199,24 @@ Two implementations: `LocalCotData` wrapping the existing module, and `CftcApiCo
 > - **Only futures-only is fetched**, so `combined` is constant-`False` today: the column is
 >   present and correct but not yet discriminating, and half the reportable universe is absent
 >   until the combined files are added.
-> - **`spread_contracts` is always null, and `NonComm_Positions_Spread_All` is not
+> - **On LEGACY only, `spread_contracts` is null and `NonComm_Positions_Spread_All` is not
 >   captured at all.** It is absent from `providers/cftc.py`'s `TARGET_COLS`, so it never
 >   reaches the stored parquet, the canonical rows, or any vintage observation. Measured as
 >   the exact, equal gap between each side total and open interest: gold on 2026-07-21 had
 >   OI 383,368 against 351,385 on both sides, a gap of 31,983 (8% of OI). Net positioning
 >   is unaffected, since spreading is long and short in equal measure, but **anything
 >   denominated as a share of open interest (§5.2 step 2) has a denominator containing
->   contracts its numerator cannot see.** Trader counts are likewise missing from the
->   stored table, though the vintage ingest path reads them straight from the zip.
+>   contracts its numerator cannot see.**
+>   **Disaggregated and TFF do not have this defect** (canonicalisers added 2026-07-30):
+>   both publish spreading per category, and the identity closes exactly, 7,847 of 7,847
+>   Disaggregated weeks with an `oi_gap` of zero. Since the categories this document
+>   actually uses are Disaggregated and TFF categories, §5.2 rung 2 is sound for them and
+>   compromised only for Legacy.
+> - **Trader counts and CR4/CR8 are populated for Disaggregated and TFF**, per category and
+>   per market respectively, which is what §6.2's breadth-depth quadrant needs. They are
+>   absent on Legacy. Trader counts carry `.` for a suppressed value and canonicalise to
+>   null: on the 2026 Disaggregated file, 3,578 of 7,847 Managed Money long counts are
+>   suppressed, so "null" is a routine and meaningful state, not a data error.
 > - **`vintage: int` is not how it was built.** The implementation is bitemporal
 >   (`observed_at` plus change-only rows), so a point-in-time read is "greatest
 >   `observed_at <= t` per natural key". An integer vintage ordinal can be derived from that

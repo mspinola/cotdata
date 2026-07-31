@@ -90,6 +90,14 @@ retained, so this is writing two canonicalisers and their tests, not new archite
 
 **Recommendation: do the disagg and TFF canonicalisers before step 2, in `cotdata`.**
 
+> **Done, 2026-07-30.** Both canonicalisers shipped and were verified against the real
+> first production capture: 39,235 Disaggregated and 12,500 TFF canonical rows for 2026,
+> ingesting in about 5 seconds. `asof()` now returns Managed Money and Leveraged Funds
+> point-in-time, with per-category spreading, per-category trader counts and CR4/CR8, none
+> of which Legacy carries. Detail and the measured zero-sum results are in
+> [cot_vintage.md](cot_vintage.md) §8. **This section's blocker is cleared**; the rest of
+> the proposal stands as written.
+
 ### 2. Notional must use unadjusted prices, and getting it wrong is invisible today
 
 §5.1 says the unadjusted series is "retained separately for notional and margin
@@ -178,7 +186,7 @@ default makes the second option cheap.
 
 | # | Work | Where | Blocking? |
 |---|---|---|---|
-| 0 | Disaggregated + TFF vintage canonicalisers | `cotdata` | **yes**, step 2 has nothing correct to normalise without them |
+| 0 | ~~Disaggregated + TFF vintage canonicalisers~~ | `cotdata` | **done 2026-07-30** |
 | 1 | `crowdmon-futures` skeleton + boundary test | new sibling | yes |
 | 2 | `contract_master.py`, coverage report as its first output | crowdmon | |
 | 3 | `notional.py`, with the unadj/backadj split pinned by test | crowdmon | |

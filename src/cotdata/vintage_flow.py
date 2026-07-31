@@ -168,30 +168,57 @@ def zero_sum_check(canonical: pd.DataFrame) -> pd.DataFrame:
     every category must equal the same sum of ``short_contracts``. If the category mapping
     dropped, duplicated or misrouted a column, that identity breaks immediately.
 
-    ``oi_gap`` is what the sides fall short of open interest by. It is expected to be
-    NON-ZERO and EQUAL on both sides for the Legacy report as stored today: the
-    non-commercial SPREADING column is not in ``providers/cftc.py``'s ``TARGET_COLS``, so
-    it never reaches the canonical rows. Spreading is a matched long and short held by one
-    trader, which is exactly why it cancels out of the long-versus-short identity while
-    still counting toward open interest. So ``long_total == short_total`` is the assertion,
-    and ``oi_gap`` is a measurement to read, not a failure, until spreading is captured,
-    at which point it should go to zero.
+    Spreading is a matched long and short held by one trader, so it is added to BOTH side
+    totals: it cancels out of the long-versus-short identity but still counts toward open
+    interest. ``oi_gap`` is therefore what the sides fall short of open interest by, and
+    what it should be depends on the report:
+
+    | Report | Expected ``balanced`` | Expected ``oi_gap`` | Measured 2026 |
+    |---|---|---|---|
+    | Legacy | always | **non-zero**, equals the uncaptured non-commercial spreading | 149,412/149,412 balanced, gap never zero |
+    | Disaggregated | always | **zero**, spreading is captured per category | 7,847/7,847 balanced, gap 0 everywhere |
+    | TFF | to within a contract or two | zero, same reason | 2,463/2,500 exact, worst case 2 contracts |
+
+    The Legacy gap is the known defect: ``NonComm_Positions_Spread_All`` is not in
+    ``providers/cftc.py``'s ``TARGET_COLS``, so it never reaches the canonical rows. It is
+    a measurement to read, not a failure.
+
+    The TFF residual is CFTC's own rounding, not a mapping error: every one of the 37
+    off-by-one-or-two rows falls in the three "Consolidated" equity index markets (S&P 500,
+    NASDAQ-100, DJIA), which aggregate several contract sizes into a common unit and so
+    involve a division. Treat a TFF imbalance of 1 or 2 contracts in a Consolidated market
+    as expected, and anything larger or anywhere else as a real break.
 
     Returns one row per (report_date, market_code, report_type, combined) with
-    ``long_total``, ``short_total``, ``open_interest``, ``oi_gap`` and ``balanced``.
+    ``long_total``, ``short_total``, ``spread_total``, ``open_interest``, ``oi_gap``,
+    ``imbalance`` and ``balanced``.
     """
     keys = ["report_date", "market_code", "report_type", "combined"]
     missing = [c for c in keys + ["long_contracts", "short_contracts"]
                if c not in canonical.columns]
     if missing:
         raise FlowError(f"missing columns for zero-sum check: {missing}")
-    g = canonical.groupby(keys, dropna=False, sort=False)
-    out = g.agg(long_total=("long_contracts", "sum"),
-                short_total=("short_contracts", "sum"),
-                open_interest=("open_interest", "max")).reset_index()
-    out["balanced"] = out["long_total"] == out["short_total"]
+    df = canonical.copy()
+    if "spread_contracts" not in df.columns:
+        df["spread_contracts"] = pd.NA
+    for c in ("long_contracts", "short_contracts", "spread_contracts", "open_interest"):
+        df[c] = pd.to_numeric(df.get(c), errors="coerce")
+    g = df.groupby(keys, dropna=False, sort=False)
+    out = g.agg(long_side=("long_contracts", "sum"),
+                short_side=("short_contracts", "sum"),
+                spread_total=("spread_contracts", "sum"),
+                open_interest=("open_interest", "max"),
+                n_categories=("long_contracts", "size")).reset_index()
+    out["long_total"] = out["long_side"] + out["spread_total"].fillna(0)
+    out["short_total"] = out["short_side"] + out["spread_total"].fillna(0)
+    out["imbalance"] = out["long_total"] - out["short_total"]
+    out["balanced"] = out["imbalance"] == 0
+    # Exact balance is the assertion; within_tolerance is what an automated check should
+    # use, so the three Consolidated markets do not produce a permanent red light.
+    tol = out["n_categories"].map(vintage_ingest.rounding_tolerance)
+    out["within_tolerance"] = out["imbalance"].abs() <= tol
     out["oi_gap"] = out["open_interest"] - out["long_total"]
-    return out
+    return out.drop(columns=["long_side", "short_side"])
 
 
 # ── Sources ─────────────────────────────────────────────────────────────────

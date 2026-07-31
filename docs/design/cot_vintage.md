@@ -388,6 +388,102 @@ comparable to the rest of the series. The remaining off-7 intervals are holiday 
 (gold has 11-day gaps at 2002-01-08 and 2003-02-25). The column is the fix: callers filter
 on it rather than discovering this in a result.
 
+## 8. Disaggregated and TFF canonicalisers (2026-07-30)
+
+The step-2 proposal identified this as the real prerequisite, not step 2 itself: the
+registry declares 41 disaggregated and 8 TFF symbols and zero legacy, and every engine in
+the module spec keys on **Managed Money** and **Leveraged Funds**, which exist only in
+those two reports. Ingest wired Legacy only, so no point-in-time series existed for the
+categories the whole system is built around. Now it does.
+
+Both were built and verified against the **real captured snapshots** from the first
+production capture (2026-07-31 01:15Z), not fixtures.
+
+| Report | Canonical rows for 2026 | Weeks | Categories |
+|---|---|---|---|
+| Legacy | 31,041 | 10,347 | commercial, noncommercial, nonreportable |
+| Disaggregated | 39,235 | 7,847 | producer_merchant, swap, managed_money, other_reportable, nonreportable |
+| TFF | 12,500 | 2,500 | dealer, asset_manager, leveraged, other_reportable, nonreportable |
+
+Ingest of all three takes about 5 seconds. 418 distinct market codes, which is far more
+than the 95 in the current-state Legacy store, because the vintage layer canonicalises
+everything CFTC published rather than the registry universe. That is deliberate: capture
+everything, filter on read.
+
+### These two reports populate three fields Legacy never does
+
+- **Per-category spreading.** So the identity closes completely, which the Legacy defect
+  (§7 finding 1) prevents there.
+- **Per-category trader counts.** §6.2's breadth-depth quadrant needs these and cannot be
+  built from Legacy.
+- **CR4 / CR8 net concentration**, per market, repeated on each category row exactly as
+  open interest is. Only the net ratios have canonical columns; the gross ones are
+  published too and have nowhere to land.
+
+### The zero-sum identity by report, measured
+
+| Report | Exact | Within tolerance | `oi_gap` |
+|---|---|---|---|
+| Legacy | 10,321 / 10,347 | **10,347 / 10,347** | never zero (the uncaptured spreading) |
+| Disaggregated | **7,847 / 7,847** | 7,847 / 7,847 | **zero everywhere** |
+| TFF | 2,463 / 2,500 | **2,500 / 2,500** | zero on 98.6% |
+
+Disaggregated closing exactly, with a zero gap, is the confirming counterpart to the Legacy
+finding: the gap there really is the missing spreading column and nothing else.
+
+**The residual is CFTC's own rounding, and it is fully localised.** Every off-by-one-or-two
+row in *both* Legacy and TFF falls in exactly three markets:
+
+| Market code | Name | Legacy rows | TFF rows | Worst |
+|---|---|---|---|---|
+| `13874+` | S&P 500 Consolidated | 12 | 17 | 2 |
+| `20974+` | NASDAQ-100 Consolidated | 11 | 15 | 1 |
+| `12460+` | DJIA Consolidated | 3 | 5 | 1 |
+
+The `+` suffix is CFTC's own marker for a Consolidated contract, which aggregates several
+contract sizes onto a common unit and therefore involves a division. So the tolerance is
+derived from the mechanism rather than fitted: summing `n` independently rounded category
+figures admits at most `n` contracts of error, which is what `rounding_tolerance()`
+returns. Without it, 48 off-by-one warnings fire on the 2026 files alone, which is the
+same cry-wolf rate §7 finding 2 was corrected for.
+
+### Three implementation points worth knowing before debugging them
+
+1. **CFTC's header row has a typo, and it is load-bearing.**
+   `Swap__Positions_Short_All` and `Swap__Positions_Spread_All` have a double underscore;
+   `Swap_Positions_Long_All` has one. Both spellings resolve, so the day CFTC fixes it is
+   not the day Swap Dealer positions start ingesting as nulls.
+2. **A column that cannot be resolved raises.** Silently returning nulls is the worst
+   available outcome: they get written as real observations, and the next genuine value is
+   then recorded as a revision that never happened, permanently polluting the revision
+   history this subsystem exists to produce.
+3. **Trader counts arrive as strings**, because CFTC writes `.` for a suppressed count.
+   Every value field is coerced with `errors="coerce"` so a suppression marker or a stray
+   pad can never reach `row_sha256` as a literal string.
+
+### `combined` is now read from the file
+
+Both reports carry a `FutOnly_or_Combined` column. It is read rather than hardcoded, and a
+file mixing the two is refused. Today it is constant-`FutOnly`, so nothing changes, but
+adding the combined files becomes purely a fetch-list change with the canonicaliser already
+correct. §3c's carry-forward stands; the code no longer assumes it.
+
+### `canonicalize_legacy` was deliberately left alone
+
+The new code shares one vectorised helper; Legacy still uses its original per-row loop.
+That duplication is intentional. Legacy's output feeds `row_sha256`, which is a permanent
+artifact over rows already stored in production, and rewriting the code path that produced
+those hashes to save a little duplication risks registering every stored row as revised at
+once. The saving was not worth the risk.
+
+### Fixed in passing: raw paths were unreadable off the producer
+
+`snapshots.json` records `local_path` as written by the capturing machine, and the producer
+is Windows, so the real store carries `vintage\raw\annual_zip\2026\....zip`. On macOS or
+Linux that is a single filename containing backslashes, so ingest on either replica failed
+with "no such file" on a file plainly sitting there. Normalised on read rather than on
+write, so every snapshot already recorded on the producer stays readable.
+
 ## Bottom line
 
 Discovery and the spike are done. The genuine null on historical recovery holds: no

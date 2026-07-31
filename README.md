@@ -353,6 +353,11 @@ How it works:
 - **Immutable landing zone.** Every fetch is recorded (including 304s) and raw bytes are
   retained permanently under `vintage/raw/`, written atomically and never rewritten. A
   byte-identical regeneration is deduped — a changed download is not itself a revision.
+- **All three reports.** Legacy, Disaggregated and TFF canonicalise into one long schema.
+  Disagg and TFF also populate per-category spreading, per-category trader counts and
+  CR4/CR8 concentration, none of which the Legacy file carries, and they are where
+  **Managed Money** and **Leveraged Funds** live. A suppressed trader count (CFTC writes
+  `.`) canonicalises to null rather than to a string.
 - **Change-only observations.** A row is written only when its value hash differs from the
   latest for its natural key `(report_date, market_code, report_type, combined, category)`,
   so storage grows with actual revisions rather than with time.

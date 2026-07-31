@@ -225,24 +225,30 @@ def test_cli_ingest_exits_nonzero_when_revisions_are_recorded(store_env, capsys)
     assert "RESTATEMENT SUSPECT" in capsys.readouterr().out
 
 
-def test_unparseable_report_types_drain_out_of_pending(store_env):
-    """disagg/TFF/weekly-static have no canonicaliser yet. They must be marked SKIPPED,
-    not left pending: a snapshot that never drains is re-selected forever, and a suspect
-    one would then re-alert on every future run."""
+def test_unparseable_sources_drain_out_of_pending(store_env):
+    """A source with no canonicaliser must be marked SKIPPED, not left pending: one that
+    never drains is re-selected forever, and a suspect one would then re-alert on every
+    future run.
+
+    Since the disagg and TFF canonicalisers landed, the ONLY unparseable source left is
+    the weekly static (129 positional columns, a genuinely larger job than the annual
+    zips). A source whose parse FAILS must drain too, by a different route: it lands on
+    parse_status=failed, which --pending also does not select."""
     from cotdata import vintage, vintage_cli
     vintage._write_manifest({"schema_version": 1, "snapshots": [
-        {"snapshot_id": "d1", "report_type": "disaggregated", "source_kind": "annual_zip",
-         "local_path": "x", "parse_status": "pending", "retrieved_at": "2026-07-31T00:00:00Z"},
         {"snapshot_id": "w1", "report_type": "legacy", "source_kind": "weekly_static",
          "local_path": "y", "parse_status": "pending", "retrieved_at": "2026-07-31T00:00:00Z"},
+        {"snapshot_id": "d1", "report_type": "disaggregated", "source_kind": "annual_zip",
+         "local_path": "gone.zip", "parse_status": "pending",
+         "retrieved_at": "2026-07-31T00:00:00Z"},
     ]})
     assert vintage_cli.main(["ingest", "--pending"]) == 0
 
     after = {s["snapshot_id"]: s for s in vintage.read_snapshots()}
-    assert after["d1"]["parse_status"] == "skipped"
     assert after["w1"]["parse_status"] == "skipped"
-    assert "no canonicaliser" in after["d1"]["parse_error"]
-    # and a second run selects nothing, so it stays quiet
+    assert "no canonicaliser" in after["w1"]["parse_error"]
+    assert after["d1"]["parse_status"] == "failed"   # has a canonicaliser; file is missing
+    # and a second run selects neither, so it stays quiet
     assert vintage_cli.main(["ingest", "--pending"]) == 0
 
 
@@ -251,7 +257,7 @@ def test_suspect_on_an_unparseable_type_alerts_once_then_drains(store_env):
     every run forever."""
     from cotdata import vintage, vintage_cli
     vintage._write_manifest({"schema_version": 1, "snapshots": [
-        {"snapshot_id": "d1", "report_type": "disaggregated", "source_kind": "annual_zip",
+        {"snapshot_id": "d1", "report_type": "legacy", "source_kind": "weekly_static",
          "local_path": "x", "parse_status": "pending", "restatement_suspect": True,
          "report_year": 2025, "retrieved_at": "2026-07-31T00:00:00Z"},
     ]})

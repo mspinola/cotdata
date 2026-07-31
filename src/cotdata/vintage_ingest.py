@@ -154,6 +154,181 @@ def canonicalize_legacy(wide: pd.DataFrame, *, combined: bool = False) -> pd.Dat
     return pd.DataFrame(rows)
 
 
+# ── Disaggregated / TFF canonicalisation ────────────────────────────────────
+# Both reports are far richer than Legacy, and the canonical schema was designed for them
+# rather than for Legacy. Three columns that are permanently null on Legacy are populated
+# here: per-category SPREADING, per-category TRADER COUNTS, and the CR4/CR8 concentration
+# ratios. Everything the module spec's positioning engine actually keys on (Managed Money,
+# Leveraged Funds) lives only in these two reports.
+#
+# Each entry is (long, short, spread, traders_long, traders_short); None means the report
+# genuinely does not publish that field for that category, not that it is missing.
+# Producer/Merchant and Non-Reportable have no spreading column by design, and
+# Non-Reportable has no trader counts because it is defined as everyone below the
+# reporting threshold.
+_DISAGG_CATEGORIES = {
+    "producer_merchant": ("Prod_Merc_Positions_Long_All", "Prod_Merc_Positions_Short_All",
+                          None, "Traders_Prod_Merc_Long_All", "Traders_Prod_Merc_Short_All"),
+    # NOTE the double underscore in three of these. It is a typo in CFTC's own header row,
+    # present on Short and Spread but NOT on Long, and it has been there for years. Both
+    # spellings are accepted below so that the day they fix it is not the day this breaks.
+    "swap": ("Swap_Positions_Long_All", "Swap__Positions_Short_All",
+             "Swap__Positions_Spread_All", "Traders_Swap_Long_All", "Traders_Swap_Short_All"),
+    "managed_money": ("M_Money_Positions_Long_All", "M_Money_Positions_Short_All",
+                      "M_Money_Positions_Spread_All", "Traders_M_Money_Long_All",
+                      "Traders_M_Money_Short_All"),
+    "other_reportable": ("Other_Rept_Positions_Long_All", "Other_Rept_Positions_Short_All",
+                         "Other_Rept_Positions_Spread_All", "Traders_Other_Rept_Long_All",
+                         "Traders_Other_Rept_Short_All"),
+    "nonreportable": ("NonRept_Positions_Long_All", "NonRept_Positions_Short_All",
+                      None, None, None),
+}
+
+_TFF_CATEGORIES = {
+    "dealer": ("Dealer_Positions_Long_All", "Dealer_Positions_Short_All",
+               "Dealer_Positions_Spread_All", "Traders_Dealer_Long_All",
+               "Traders_Dealer_Short_All"),
+    "asset_manager": ("Asset_Mgr_Positions_Long_All", "Asset_Mgr_Positions_Short_All",
+                      "Asset_Mgr_Positions_Spread_All", "Traders_Asset_Mgr_Long_All",
+                      "Traders_Asset_Mgr_Short_All"),
+    "leveraged": ("Lev_Money_Positions_Long_All", "Lev_Money_Positions_Short_All",
+                  "Lev_Money_Positions_Spread_All", "Traders_Lev_Money_Long_All",
+                  "Traders_Lev_Money_Short_All"),
+    "other_reportable": ("Other_Rept_Positions_Long_All", "Other_Rept_Positions_Short_All",
+                         "Other_Rept_Positions_Spread_All", "Traders_Other_Rept_Long_All",
+                         "Traders_Other_Rept_Short_All"),
+    "nonreportable": ("NonRept_Positions_Long_All", "NonRept_Positions_Short_All",
+                      None, None, None),
+}
+
+# Concentration ratios are per MARKET, not per category, so they repeat on every category
+# row exactly as open_interest does. Only the NET ratios are in the canonical schema; the
+# gross ones (Conc_Gross_LE_*) are published too but have no column to land in.
+_CONCENTRATION = {
+    "cr4_net_long": "Conc_Net_LE_4_TDR_Long_All",
+    "cr4_net_short": "Conc_Net_LE_4_TDR_Short_All",
+    "cr8_net_long": "Conc_Net_LE_8_TDR_Long_All",
+    "cr8_net_short": "Conc_Net_LE_8_TDR_Short_All",
+}
+
+_REPORT_DATE_COL = "Report_Date_as_MM_DD_YYYY"
+
+
+def _resolve(wide: pd.DataFrame, name: str | None) -> pd.Series | None:
+    """Look a column up, tolerating CFTC's single/double-underscore inconsistency.
+
+    Raises rather than silently producing a null column. A canonicaliser that quietly
+    returns nulls for Managed Money because a header was renamed would write those nulls
+    as OBSERVATIONS, and the next real value would then be recorded as a revision. A
+    renamed column must fail loudly at ingest, not decay into fake revision history.
+    """
+    if name is None:
+        return None
+    if name in wide.columns:
+        return wide[name]
+    for alt in (name.replace("__", "_"), name.replace("_Positions", "__Positions")):
+        if alt in wide.columns:
+            return wide[alt]
+    raise ValidationError(
+        f"column {name!r} not found (nor an underscore variant). CFTC changed a header: "
+        f"map it explicitly rather than letting this category ingest as nulls, which would "
+        f"be recorded as real observations and then as revisions when it came back.")
+
+
+def _combined_flag(wide: pd.DataFrame, override: bool | None) -> bool:
+    """Read ``combined`` from the file instead of hardcoding it.
+
+    Disagg and TFF both carry a ``FutOnly_or_Combined`` column stating which series the
+    file is. Only futures-only files are fetched today, so this is constant-``FutOnly``,
+    but reading it means that adding the combined files later is purely a fetch-list
+    change: the canonicaliser is already correct, and the two series can never be silently
+    merged into one time series because ``combined`` is in the natural key.
+    """
+    if override is not None:
+        return override
+    if "FutOnly_or_Combined" not in wide.columns:
+        return False
+    vals = {str(v).strip().lower() for v in wide["FutOnly_or_Combined"].dropna().unique()}
+    if not vals:
+        return False
+    if len(vals) > 1:
+        raise ValidationError(
+            f"file mixes futures-only and combined rows ({sorted(vals)}). These are "
+            f"different series and must not share a time series (module spec §3).")
+    return vals.pop() == "combined"
+
+
+def _canonicalize(wide: pd.DataFrame, *, report_type: str, categories: dict,
+                  combined: bool | None) -> pd.DataFrame:
+    """Melt a wide Disagg/TFF frame into canonical long rows, one per category.
+
+    Vectorised per category rather than per row: these files are 190 columns wide and a
+    per-row loop over a cold-start backfill is minutes of pure overhead.
+    ``canonicalize_legacy`` is deliberately NOT routed through here. Its output feeds
+    ``row_sha256``, which is a permanent artifact, and rewriting the code path that
+    produces already-stored hashes to save a little duplication would risk registering
+    every stored row as revised at once.
+    """
+    if _REPORT_DATE_COL in wide.columns:
+        report_date = pd.to_datetime(wide[_REPORT_DATE_COL])
+    else:
+        report_date = pd.to_datetime(pd.Series(wide.index, index=wide.index))
+    report_date = report_date.dt.normalize()
+    is_combined = _combined_flag(wide, combined)
+
+    base = {
+        "report_date": report_date.to_numpy(),
+        "market_code": wide["CFTC_Contract_Market_Code"].astype(str).to_numpy(),
+        "market_name": wide.get("Market_and_Exchange_Names"),
+        "report_type": report_type,
+        "combined": is_combined,
+        "open_interest": _resolve(wide, "Open_Interest_All").to_numpy(),
+    }
+    for field, col in _CONCENTRATION.items():
+        base[field] = wide[col].to_numpy() if col in wide.columns else pd.NA
+
+    frames = []
+    for category, (lc, sc, sp, tl, ts) in categories.items():
+        part = pd.DataFrame(base)
+        part["category"] = category
+        part["long_contracts"] = _resolve(wide, lc).to_numpy()
+        part["short_contracts"] = _resolve(wide, sc).to_numpy()
+        for field, col in (("spread_contracts", sp), ("trader_count_long", tl),
+                           ("trader_count_short", ts)):
+            s = _resolve(wide, col)
+            part[field] = pd.NA if s is None else s.to_numpy()
+        frames.append(part)
+    out = pd.concat(frames, ignore_index=True)
+
+    # Trader-count columns arrive as STRINGS, because CFTC writes "." for a suppressed
+    # count (published counts are withheld where too few traders would be identifiable).
+    # Measured on the 2026 Disaggregated file: 3,578 of 7,847 Managed Money long counts
+    # are suppressed, so this is a routine state and not an error. Coercing to null is the
+    # correct reading of ".", and it must happen HERE rather than being left to parquet,
+    # which refuses the mixed column outright.
+    #
+    # Coercing every value field, not just the trader counts, is deliberate: the whole
+    # point is that a suppression marker or a stray pad must never reach row_sha256 as the
+    # literal string, because a later numeric value for the same key would then be
+    # recorded as a revision that never happened.
+    for f in VALUE_FIELDS:
+        if f in out.columns:
+            out[f] = pd.to_numeric(out[f], errors="coerce")
+    return out.reindex(columns=[c for c in ALL_COLUMNS if c in out.columns])
+
+
+def canonicalize_disagg(wide: pd.DataFrame, *, combined: bool | None = None) -> pd.DataFrame:
+    """Disaggregated futures report to canonical long rows (five categories per market)."""
+    return _canonicalize(wide, report_type="disaggregated",
+                         categories=_DISAGG_CATEGORIES, combined=combined)
+
+
+def canonicalize_tff(wide: pd.DataFrame, *, combined: bool | None = None) -> pd.DataFrame:
+    """Traders in Financial Futures report to canonical long rows."""
+    return _canonicalize(wide, report_type="tff",
+                         categories=_TFF_CATEGORIES, combined=combined)
+
+
 # ── Validation (§5) ─────────────────────────────────────────────────────────
 class ValidationError(ValueError):
     pass
@@ -217,15 +392,37 @@ def validate(canonical: pd.DataFrame) -> list[str]:
         oi = grp["open_interest"].max()
         if pd.isna(oi):
             continue
+        tol = rounding_tolerance(len(grp))
         for side in ("long_contracts", "short_contracts"):
             total = pd.to_numeric(grp.get(side), errors="coerce").sum()
             spread = pd.to_numeric(grp.get("spread_contracts"), errors="coerce").sum()
-            if total + spread > oi:
+            if total + spread > oi + tol:
                 report_date, market_code = key[0], key[1]
                 warnings.append(
                     f"{pd.Timestamp(report_date).date()} {market_code}: "
-                    f"{side} summed across categories ({total + spread:.0f}) > OI ({oi})")
+                    f"{side} summed across categories ({total + spread:.0f}) > OI ({oi}) "
+                    f"by more than the {tol}-contract rounding tolerance")
     return warnings
+
+
+def rounding_tolerance(n_categories: int) -> int:
+    """Contracts by which the category totals may miss open interest without it meaning
+    anything.
+
+    Derived from the mechanism, not fitted to the residual. CFTC publishes a handful of
+    **Consolidated** contracts (market codes carrying a ``+`` suffix: S&P 500, NASDAQ-100
+    and DJIA Consolidated) which aggregate several contract sizes onto one unit, so each
+    category figure is independently rounded. Summing ``n`` independently rounded values
+    admits at most ``n`` contracts of error, which is the bound returned here.
+
+    Measured against the 2026 files, the worst observed breach is well inside it: Legacy 1
+    contract (bound 3), TFF 2 (bound 5), Disaggregated 0. Every single breach in all three
+    reports falls in one of those three Consolidated markets and nowhere else, so the
+    tolerance costs no real sensitivity. Without it, 48 off-by-one warnings fire on the
+    2026 files alone, which is exactly the cry-wolf rate the previous version of this check
+    was corrected for.
+    """
+    return max(1, int(n_categories))
 
 
 # ── Observation store I/O ───────────────────────────────────────────────────

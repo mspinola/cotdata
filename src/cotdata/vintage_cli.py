@@ -37,39 +37,68 @@ def _cmd_fetch(args) -> int:
     return 0
 
 
-def _cmd_ingest(args) -> int:
-    from pathlib import Path
+def _snapshot_path(local_path: str):
+    """Resolve a recorded raw-file path on ANY platform.
 
+    ``local_path`` is stored relative to the store root, but it is written by whichever
+    machine captured it, and the producer is Windows: the real store carries
+    ``vintage\\raw\\annual_zip\\2026\\....zip``. Passed to ``Path`` on macOS or Linux that
+    is a single filename containing backslashes, which does not exist, so ingest on a
+    replica fails with a confusing "no such file" on a file that is plainly there.
+    Normalising here rather than at write time keeps every snapshot already recorded on
+    the Windows producer readable.
+    """
+    from pathlib import Path
+    return config.store_root().joinpath(*str(local_path).replace("\\", "/").split("/")) \
+        if local_path else Path()
+
+
+# Each report type maps to (parser, canonicaliser). Legacy is indexed by report date
+# because that is the shape ``providers/cftc.py`` emits; disagg and TFF keep it as a
+# column, and the canonicalisers accept either.
+def _canonicalisers():
+    from . import vintage_ingest
+    from .providers import cftc, cftc_disagg, cftc_tff
+
+    def legacy(path):
+        wide = cftc._parse_zip(path).set_index(cftc.REPORT_DATE)
+        return vintage_ingest.canonicalize_legacy(wide)
+
+    return {
+        "legacy": legacy,
+        "disaggregated": lambda p: vintage_ingest.canonicalize_disagg(cftc_disagg._parse_zip(p)),
+        "tff": lambda p: vintage_ingest.canonicalize_tff(cftc_tff._parse_zip(p)),
+    }
+
+
+def _cmd_ingest(args) -> int:
     from . import vintage, vintage_ingest
-    from .providers import cftc
 
     snaps = vintage.read_snapshots()
     if args.snapshot:
         snaps = [s for s in snaps if s.get("snapshot_id") == args.snapshot]
     elif args.pending:
         snaps = [s for s in snaps if s.get("parse_status") == "pending"]
-    # Only the Legacy annual zip is wired end-to-end this pass; disagg/TFF canonicalizers
-    # are a follow-on. Skip (don't fail) snapshots we can't yet parse.
+    canon = _canonicalisers()
     total_obs = total_rev = 0
     for s in snaps:
-        if s.get("report_type") != "legacy" or s.get("source_kind") != "annual_zip":
-            # No canonicaliser for this report type yet. Mark it SKIPPED rather than
-            # leaving it pending: a snapshot that never drains is re-selected by
-            # --pending on every future run, and if it ever carried restatement_suspect
-            # the alert below would then re-fire forever, which is how an alert gets
-            # ignored. Skipped snapshots surface once and then go quiet.
-            # Raw bytes are retained, so adding a canonicaliser later just means
-            # re-marking these pending and re-running ingest — nothing is lost.
+        fn = canon.get(s.get("report_type"))
+        if fn is None or s.get("source_kind") != "annual_zip":
+            # No canonicaliser for this source. Today that is only the weekly static,
+            # whose 129 positional columns are a genuinely larger job than the annual
+            # zips. Mark it SKIPPED rather than leaving it pending: a snapshot that never
+            # drains is re-selected by --pending on every future run, and if it ever
+            # carried restatement_suspect the alert below would re-fire forever, which is
+            # how an alert gets ignored. Raw bytes are retained, so adding a canonicaliser
+            # later just means re-marking these pending and re-running: nothing is lost.
             vintage.update_snapshot(
                 s["snapshot_id"], parse_status="skipped",
                 parse_error=f"no canonicaliser for {s.get('report_type')}/"
                             f"{s.get('source_kind')} yet")
             continue
-        path = config.store_root() / s["local_path"]
+        path = _snapshot_path(s["local_path"])
         try:
-            wide = cftc._parse_zip(Path(path))
-            wide = wide.set_index(cftc.REPORT_DATE)
-            canonical = vintage_ingest.canonicalize_legacy(wide)
+            canonical = fn(path)
             res = vintage_ingest.ingest_canonical(canonical, snapshot_id=s["snapshot_id"])
             vintage.update_snapshot(s["snapshot_id"], parse_status="ok", parse_error=None)
             total_obs += res["observations"]
