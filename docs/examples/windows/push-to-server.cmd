@@ -55,11 +55,18 @@ REM                  rides under _raw and so is excluded, per ADR-0006.
 REM   citpy          consumer-owned on the server; excluding it from --delete is
 REM                  what stops the mirror from wiping it.
 REM   manifest.json  legacy aggregate, resolved last-writer-wins across halves.
-REM   *.tmp          a producer's partial-write temp (atomic write via os.replace);
-REM                  never propagate a half-written file.
+REM   *.tmp, *.part  a producer's partial-write temps (atomic write via os.replace,
+REM                  and in-flight raw downloads); never propagate a half-written file.
+REM   vintage/       NOT pushed here, unlike the Mac sync. cot-analyzer reads prices
+REM                  and COT, never the vintage tree, so the dash would carry roughly
+REM                  1 GB/year of raw CFTC archives it never opens. The Mac keeps the
+REM                  second copy instead. Drop this exclusion if something on the dash
+REM                  ever consumes revisions -- and if so consider excluding only
+REM                  "vintage/raw/" so the small derived tables still ride along.
 "%RSYNC%" -az --delete ^
   --exclude "_cache/" --exclude "_raw/" --exclude "citpy/" ^
-  --exclude "manifest.json" --exclude "*.tmp" --exclude "manifests/" ^
+  --exclude "manifest.json" --exclude "*.tmp" --exclude "*.part" ^
+  --exclude "manifests/" --exclude "vintage/" ^
   -e "%SSH%" "%SRC%/" "%DEST%/"
 if %ERRORLEVEL% NEQ 0 ( echo push FAILED, rsync code %ERRORLEVEL% & exit /b %ERRORLEVEL% )
 

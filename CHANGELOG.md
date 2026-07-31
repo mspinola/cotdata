@@ -7,6 +7,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **COT vintage capture** (`cotdata-vintage fetch`) — an immutable, hashed landing
+  zone for as-published CFTC files under `$COTDATA_STORE/vintage/raw/`, with
+  provenance (etag, last-modified, sha256, size, retrieved-at) recorded in a
+  self-owned `vintage/manifest.json`. Purely additive: the current-state store is
+  byte-identical (guarded by `tests/test_current_baseline.py`). This is step 1 of
+  the vintage/revision-tracking subsystem — capture must start now because an
+  uncaptured weekly release is irrecoverable; ingest/diff/PIT land next and run
+  retroactively over retained raw bytes. Decision recorded in crucible-stack
+  ADR-0008; design in `docs/design/cot_vintage.md`.
+- **COT vintage ingest + revision tracking** (`cotdata-vintage ingest|diff|asof`,
+  `cotdata-schedule sync|backfill`) — parses retained raw snapshots into a change-only
+  bitemporal `observations/` table (a row is written only when its value hash differs
+  from the latest for its natural key, so storage grows with revisions not with time),
+  emits field-level `revisions/` with `age_days` revision depth, and answers
+  point-in-time `asof(t)` reads (greatest `observed_at <= t` per key). Release dates are
+  resolved with explicit provenance (`observed > announced > scheduled > derived`),
+  including a backfill that flags the Oct–Dec 2025 appropriations-lapse backlog weeks as
+  `announced` rather than silently `derived`. All pandas/pyarrow, no database.
 - **`propadj` price adjustment** — a proportional (ratio) back-adjusted view
   derived on read from the stored `unadj` + `backadj` series via
   `get_prices(symbol, adjustment="propadj")`. It preserves daily percentage

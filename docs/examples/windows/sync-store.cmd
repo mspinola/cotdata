@@ -21,9 +21,17 @@ REM                 and no producer run brings it back. Kept as a backstop: such
 REM                 files belong outside the store. See docs/SYNCING.md.
 REM /XF excludes the legacy aggregate manifest: nothing writes it, and it is the one
 REM file a sync would resolve last-writer-wins across two halves.
+REM vintage/ IS carried here, deliberately and in full (including vintage/raw). Those
+REM bytes are irreplaceable -- CFTC serves current state only, so a lost vintage cannot
+REM be re-fetched -- and the Mac is the natural second copy. It costs roughly 1 GB/year.
+REM Note the provenance index is vintage\snapshots.json, NOT manifest.json: /XF below
+REM matches by NAME AT ANY DEPTH, so had it been called manifest.json this sync would
+REM have silently delivered raw bytes with no index.
+REM /XF also drops partial-write temps (*.tmp from parquet/JSON writes, *.part from
+REM in-flight raw downloads) so a sync mid-capture never lands a truncated file.
 robocopy "REPLACE_WITH_STORE_PATH" "REPLACE_WITH_DEST_PATH" /MIR /R:2 /W:5 /NFL /NDL /NP ^
   /XD _cache _raw citpy ^
-  /XF manifest.json
+  /XF manifest.json *.tmp *.part
 
 REM robocopy uses exit codes 0-7 for SUCCESS (1 = files copied, 2 = extras present,
 REM 3 = both, and so on) and 8+ for failure. Task Scheduler treats any non-zero as a
