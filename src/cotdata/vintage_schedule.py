@@ -328,6 +328,18 @@ def backfill(*, schedule: pd.DataFrame | None = None,
     if not obs_dir.exists():
         return counts
 
+    # Under the SAME lock ingest uses. This is a read-modify-write of every observations
+    # partition, so running it concurrently with an ingest silently drops that ingest's
+    # appended rows: backfill reads the file, the ingest appends and writes, backfill
+    # writes back what it read. The store is then internally inconsistent in the worst
+    # way available here, holding a revision row asserting a change to a value that no
+    # longer exists in observations/. Each file's write is already atomic; atomicity per
+    # file was never the missing piece.
+    with vi._WriteLock(vintage.vintage_root()):
+        return _backfill_locked(obs_dir, smap, counts, observed_window_days)
+
+
+def _backfill_locked(obs_dir, smap, counts, observed_window_days: int) -> dict:
     for part in sorted(obs_dir.glob("report_year=*/observations.parquet")):
         df = pd.read_parquet(part)
         if df.empty:

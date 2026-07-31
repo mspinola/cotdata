@@ -18,56 +18,136 @@ from . import config
 def _cmd_fetch(args) -> int:
     from . import vintage
     res = vintage.fetch(year=args.year, all_years=args.all,
-                        include_weekly=not args.no_weekly)
+                        include_weekly=not args.no_weekly,
+                        include_prior_year=not args.no_prior_year)
     print(f"vintage fetch: {res['checks']} source(s) checked, "
-          f"{res['new_files']} new raw file(s) retained.")
+          f"{res['new_files']} new raw file(s) retained"
+          + (f", {res['failed']} FAILED." if res.get("failed") else "."))
     for rec in res["records"]:
-        print(f"  {rec['report_type']:<13} {rec['source_kind']:<13} {rec.get('note') or 'NEW'}")
+        print(f"  {rec['report_type']:<13} {rec['source_kind']:<13} "
+              f"{rec.get('report_year') or '':<6} {rec.get('expectation') or '':<22} "
+              f"{rec.get('outcome') or '':<13} {rec.get('note') or 'NEW'}")
+    # Deliberately NOT a non-zero exit. The wrapper aborts the whole run on a non-zero
+    # fetch, so alerting here would skip the ingest that turns a restatement into readable
+    # revision rows, precisely the thing you want when the tripwire fires. The alert is
+    # persisted on the snapshot and re-raised by `ingest`, which is the step that can exit
+    # non-zero safely because everything downstream of it has already run.
+    for rec in res["tripwire_alerts"]:
+        print(f"  *** TRIPWIRE {rec['report_type']} {rec.get('report_year')}: "
+              f"{rec['tripwire_alert']}")
     return 0
 
 
-def _cmd_ingest(args) -> int:
-    from pathlib import Path
+def _snapshot_path(local_path: str):
+    """Resolve a recorded raw-file path on ANY platform.
 
+    ``local_path`` is stored relative to the store root, but it is written by whichever
+    machine captured it, and the producer is Windows: the real store carries
+    ``vintage\\raw\\annual_zip\\2026\\....zip``. Passed to ``Path`` on macOS or Linux that
+    is a single filename containing backslashes, which does not exist, so ingest on a
+    replica fails with a confusing "no such file" on a file that is plainly there.
+    Normalising here rather than at write time keeps every snapshot already recorded on
+    the Windows producer readable.
+    """
+    from pathlib import Path, PureWindowsPath
+    if not local_path:
+        return Path()
+    raw = str(local_path)
+    # An ABSOLUTE local_path means COTDATA_VINTAGE_ROOT pointed outside the store, which
+    # vintage_root() calls mandatory on a mirrored replica. Blindly re-rooting it under
+    # store_root() turns /Volumes/ext/vintage/... into <store>/Volumes/ext/vintage/...,
+    # so every ingest raises FileNotFoundError, gets swallowed, and marks the snapshot
+    # parse_status="failed", which --pending never re-selects. One run would drain the
+    # entire backlog to failed with no CLI able to reset it.
+    if PureWindowsPath(raw).is_absolute() or Path(raw).is_absolute():
+        return Path(raw.replace("\\", "/"))
+    return config.store_root().joinpath(*raw.replace("\\", "/").split("/"))
+
+
+# Each report type maps to (parser, canonicaliser). Legacy is indexed by report date
+# because that is the shape ``providers/cftc.py`` emits; disagg and TFF keep it as a
+# column, and the canonicalisers accept either.
+def _canonicalisers():
+    from . import vintage_ingest
+    from .providers import cftc, cftc_disagg, cftc_tff
+
+    def legacy(path):
+        wide = cftc._parse_zip(path).set_index(cftc.REPORT_DATE)
+        return vintage_ingest.canonicalize_legacy(wide)
+
+    return {
+        "legacy": legacy,
+        "disaggregated": lambda p: vintage_ingest.canonicalize_disagg(cftc_disagg._parse_zip(p)),
+        "tff": lambda p: vintage_ingest.canonicalize_tff(cftc_tff._parse_zip(p)),
+    }
+
+
+def _cmd_ingest(args) -> int:
     from . import vintage, vintage_ingest
-    from .providers import cftc
 
     snaps = vintage.read_snapshots()
     if args.snapshot:
         snaps = [s for s in snaps if s.get("snapshot_id") == args.snapshot]
-    elif args.pending:
+    elif args.retry_failed:
+        # The ONLY route back from parse_status="failed", which is otherwise terminal:
+        # --pending does not select it and nothing else ever writes the field back. Two
+        # separate defects have reached that state en masse (a stale lock, and a path that
+        # would not resolve), and in both cases the entire backlog was stranded with no
+        # command able to recover it. Raw bytes are retained, so a retry is always safe.
+        for s_ in [x for x in snaps if x.get("parse_status") == "failed"]:
+            vintage.update_snapshot(s_["snapshot_id"], parse_status="pending",
+                                    parse_error=None)
+        snaps = vintage.read_snapshots()
+        snaps = [x for x in snaps if x.get("parse_status") == "pending"]
+        print(f"vintage ingest: reset {len(snaps)} failed snapshot(s) to pending.")
+    elif not args.all_snapshots:
+        # Default to pending even with no flag. A bare `ingest` used to select EVERY
+        # snapshot ever recorded and re-ingest each one, which is not a no-op: replaying
+        # an older snapshot after a revision writes the superseded value back with a
+        # NEWER observed_at, emitting a reversed revision (35 -> 30) followed by a
+        # re-revision (30 -> 35), and inflating age_days on both. revisions/ is the
+        # primary artifact here and age_days is what tells a consumer whether a
+        # restatement reached into its calibration window, so forging either is worse
+        # than doing nothing. --all-snapshots still allows a deliberate full replay.
         snaps = [s for s in snaps if s.get("parse_status") == "pending"]
-    # Only the Legacy annual zip is wired end-to-end this pass; disagg/TFF canonicalizers
-    # are a follow-on. Skip (don't fail) snapshots we can't yet parse.
-    total_obs = total_rev = 0
+    canon = _canonicalisers()
+    total_obs = total_rev = n_failed = 0
     for s in snaps:
-        if s.get("report_type") != "legacy" or s.get("source_kind") != "annual_zip":
-            # No canonicaliser for this report type yet. Mark it SKIPPED rather than
-            # leaving it pending: a snapshot that never drains is re-selected by
-            # --pending on every future run, and if it ever carried restatement_suspect
-            # the alert below would then re-fire forever, which is how an alert gets
-            # ignored. Skipped snapshots surface once and then go quiet.
-            # Raw bytes are retained, so adding a canonicaliser later just means
-            # re-marking these pending and re-running ingest — nothing is lost.
+        fn = canon.get(s.get("report_type"))
+        if fn is None or s.get("source_kind") != "annual_zip":
+            # No canonicaliser for this source. Today that is only the weekly static,
+            # whose 129 positional columns are a genuinely larger job than the annual
+            # zips. Mark it SKIPPED rather than leaving it pending: a snapshot that never
+            # drains is re-selected by --pending on every future run, and if it ever
+            # carried restatement_suspect the alert below would re-fire forever, which is
+            # how an alert gets ignored. Raw bytes are retained, so adding a canonicaliser
+            # later just means re-marking these pending and re-running: nothing is lost.
             vintage.update_snapshot(
                 s["snapshot_id"], parse_status="skipped",
                 parse_error=f"no canonicaliser for {s.get('report_type')}/"
                             f"{s.get('source_kind')} yet")
             continue
-        path = config.store_root() / s["local_path"]
+        path = _snapshot_path(s["local_path"])
         try:
-            wide = cftc._parse_zip(Path(path))
-            wide = wide.set_index(cftc.REPORT_DATE)
-            canonical = vintage_ingest.canonicalize_legacy(wide)
-            res = vintage_ingest.ingest_canonical(canonical, snapshot_id=s["snapshot_id"])
+            canonical = fn(path)
+            # observed_at is the snapshot's OWN retrieval time, not the clock at ingest.
+            # "When did we observe this value" is a property of the capture, so a late or
+            # repeated ingest of retained bytes must not move it: doing so would let a
+            # replay of an old snapshot outrank the newer one in the point-in-time read
+            # and hand back the pre-revision value for a timestamp after the revision.
+            res = vintage_ingest.ingest_canonical(
+                canonical, snapshot_id=s["snapshot_id"],
+                observed_at=s.get("retrieved_at") or None)
             vintage.update_snapshot(s["snapshot_id"], parse_status="ok", parse_error=None)
             total_obs += res["observations"]
             total_rev += res["revisions"]
             print(f"  {s['snapshot_id']}: +{res['observations']} obs, +{res['revisions']} rev")
         except Exception as e:  # noqa: BLE001 — record the failure, don't abort the batch
             vintage.update_snapshot(s["snapshot_id"], parse_status="failed", parse_error=str(e))
-            print(f"  {s['snapshot_id']}: FAILED — {e}")
-    print(f"vintage ingest: {total_obs} new observation(s), {total_rev} revision(s).")
+            n_failed += 1
+            print(f"  {s['snapshot_id']}: FAILED: {e}")
+    print(f"vintage ingest: {total_obs} new observation(s), {total_rev} revision(s)"
+          + (f", {n_failed} FAILED." if n_failed else "."))
 
     # Surface revisions rather than only recording them. A scheduled run's stdout goes
     # nowhere, so a silent exit-0 after detecting a retroactive restatement would defeat
@@ -77,18 +157,49 @@ def _cmd_ingest(args) -> int:
     # A store-wide scan would keep firing on every subsequent run once a single
     # restatement had been seen, and an alert that never clears is one that gets ignored.
     suspects = [s for s in snaps if s.get("restatement_suspect")]
-    if total_rev or suspects:
-        _report_revisions(total_rev, suspects)
-        raise SystemExit(
-            f"cotdata-vintage: {total_rev} revision(s)"
-            + (f", {len(suspects)} closed-year restatement suspect(s)" if suspects else "")
-            + " — review with 'cotdata-vintage diff'. Non-zero so a scheduler surfaces this; "
-              "the data IS committed, this is a notification, not a failure.")
-    return 0
+    # Tripwire alerts overlap with `suspects` on the content-changed case and add the
+    # "detector went blind" case, which has no changed sha and so no suspect flag. Both
+    # need the same exit path: this is the only step that can exit non-zero without
+    # skipping downstream work.
+    alerts = [s for s in snaps if s.get("tripwire_alert")]
+    if not (total_rev or suspects or alerts or n_failed):
+        return 0
+
+    # ONE exit describing everything noteworthy. A parse failure and a restatement suspect
+    # in the same run are two separate things the operator needs, and an earlier draft
+    # raised on the failure first, which silently swallowed the suspect: the more serious
+    # of the two, reported by the less serious one arriving first.
+    _report_revisions(total_rev, suspects, alerts)
+    parts = []
+    if total_rev or suspects or alerts:
+        parts.append(f"{total_rev} revision(s)")
+    if suspects:
+        parts.append(f"{len(suspects)} closed-year restatement suspect(s)")
+    if alerts:
+        parts.append(f"{len(alerts)} frozen-year tripwire alert(s)")
+    # A run where every snapshot failed to parse used to exit 0, because non-zero was
+    # reserved for revisions. On an unattended producer that reports success to Task
+    # Scheduler while the store gains nothing, and 'failed' is terminal, so it was a silent
+    # data-loss route rather than a cosmetic one.
+    if n_failed:
+        parts.append(f"{n_failed} snapshot(s) FAILED to parse (raw bytes retained, so "
+                     f"nothing is lost: fix the cause and re-run with "
+                     f"'cotdata-vintage ingest --retry-failed', which is the only way back "
+                     f"since 'failed' is not 'pending')")
+    raise SystemExit(
+        "cotdata-vintage: " + "; ".join(parts)
+        + ". Review with 'cotdata-vintage diff'. Non-zero so a scheduler surfaces this; "
+          "any data shown above IS committed, so this is a notification, not a rollback.")
 
 
-def _report_revisions(total_rev: int, suspects: list) -> None:
+def _report_revisions(total_rev: int, suspects: list, alerts: list = ()) -> None:
     from . import vintage_ingest
+    if alerts:
+        print("\n*** FROZEN-YEAR TRIPWIRE ***")
+        for s in alerts[-5:]:
+            print(f"    {s.get('report_type')} {s.get('report_year')} "
+                  f"[{s.get('expectation')} -> {s.get('outcome')}] at {s.get('retrieved_at')}")
+            print(f"      {s.get('tripwire_alert')}")
     if suspects:
         print("\n*** CLOSED-YEAR RESTATEMENT SUSPECT ***")
         for s in suspects[-5:]:
@@ -144,6 +255,44 @@ def _cmd_asof(args) -> int:
     return 0
 
 
+def _cmd_flow(args) -> int:
+    from . import vintage_flow
+
+    if args.source == "current":
+        canonical = vintage_flow.from_current_store(args.market)
+        print(f"vintage flow: {args.market} from the CURRENT-STATE store. NOT "
+              f"point-in-time. Revisions are already applied, so this is for looking at "
+              f"history and validating the schema, never for evaluating a rule.")
+    else:
+        canonical = vintage_flow.from_vintage(as_of=args.as_of, market_code=args.market)
+        if canonical.empty:
+            print("vintage flow: no vintage observations yet. The vintage series begins "
+                  "at first capture; use --source current for history.")
+            return 0
+
+    z = vintage_flow.zero_sum_check(canonical)
+    unbalanced = int((~z["balanced"]).sum())
+    print(f"  zero-sum: {len(z) - unbalanced}/{len(z)} weeks balanced"
+          + (f"  *** {unbalanced} UNBALANCED ***" if unbalanced else ""))
+
+    fl = vintage_flow.decompose(canonical, min_frac_oi=args.min_frac_oi)
+    if args.category:
+        fl = fl[fl["category"] == args.category]
+    if fl.empty:
+        print("  no weeks to decompose.")
+        return 0
+    off = fl[fl["days_elapsed"] != 7]
+    if len(off):
+        print(f"  {len(off)} of {len(fl)} intervals are not 7 days (COT was FORTNIGHTLY "
+              f"before 1992-10-13, and holidays shift the rest). Those rows are not a "
+              f"weekly change and are not comparable to one.")
+    print(f"\n{fl['state'].value_counts().to_string()}\n")
+    cols = ["report_date", "category", "d_long", "d_short", "d_net", "d_oi",
+            "days_elapsed", "state", "oi_corroborates"]
+    print(fl.tail(args.last)[cols].to_string(index=False))
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="cotdata-vintage",
@@ -154,12 +303,22 @@ def main(argv=None) -> int:
     f.add_argument("--year", type=int, default=None, help="Report year (default: current).")
     f.add_argument("--all", action="store_true", help="Every year 1986→present (cold-start).")
     f.add_argument("--no-weekly", action="store_true", help="Skip the current-week static.")
+    f.add_argument("--no-prior-year", action="store_true", dest="no_prior_year",
+                   help="Skip the prior year, disabling the frozen-year restatement "
+                        "tripwire. Saves one ~7 MB weekly transfer and nothing on disk.")
     f.set_defaults(func=_cmd_fetch)
 
     ing = sub.add_parser("ingest", help="Parse retained raw files into change-only observations.")
     g = ing.add_mutually_exclusive_group()
     g.add_argument("--snapshot", default=None, help="Ingest one snapshot id.")
-    g.add_argument("--pending", action="store_true", help="Ingest all parse_status=pending.")
+    g.add_argument("--pending", action="store_true",
+                   help="Ingest all parse_status=pending. This is also the default.")
+    g.add_argument("--retry-failed", action="store_true", dest="retry_failed",
+                   help="Reset parse_status=failed snapshots to pending and re-ingest "
+                        "them. The only way back from a failed parse.")
+    g.add_argument("--all-snapshots", action="store_true", dest="all_snapshots",
+                   help="Replay EVERY recorded snapshot, including already-ingested ones. "
+                        "Only for rebuilding a store from retained raw bytes.")
     ing.set_defaults(func=_cmd_ingest)
 
     d = sub.add_parser("diff", help="Show recorded field-level revisions.")
@@ -173,6 +332,21 @@ def main(argv=None) -> int:
     a.add_argument("--report-date", default=None, dest="report_date")
     a.add_argument("--market", default=None)
     a.set_defaults(func=_cmd_asof)
+
+    fw = sub.add_parser("flow", help="Weekly flow decomposition per market/category.")
+    fw.add_argument("--market", required=True, help="CFTC market code, e.g. 088691.")
+    fw.add_argument("--source", choices=("vintage", "current"), default="vintage",
+                    help="'vintage' is point-in-time and starts at first capture; "
+                         "'current' reads the existing store back to 1986 but has "
+                         "revisions already applied, so it is NOT point-in-time.")
+    fw.add_argument("--as-of", default=None, dest="as_of",
+                    help="Point-in-time timestamp (vintage source only).")
+    fw.add_argument("--category", default=None, help="e.g. noncommercial.")
+    fw.add_argument("--min-frac-oi", type=float, default=0.0, dest="min_frac_oi",
+                    help="Dead zone as a fraction of prior open interest; weeks under it "
+                         "on both legs are 'quiet'. Default 0.0 (no dead zone).")
+    fw.add_argument("--last", type=int, default=20, help="Rows to print (default 20).")
+    fw.set_defaults(func=_cmd_flow)
 
     args = p.parse_args(argv)
     config.store_root()  # fail fast if COTDATA_STORE unset

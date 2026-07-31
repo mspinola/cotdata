@@ -80,7 +80,16 @@ REM ----------------------------------------------------------------------------
 REM Optional: identify yourself to CFTC. Defaults to the repo URL if unset.
 REM set COTDATA_USER_AGENT=cotdata-vintage/0.1 (+contact you@example.com)
 
-REM Default path = current year's three annual reports + the Legacy weekly static.
+REM Default path = current year's three annual reports, the PRIOR year's three, and the
+REM Legacy weekly static.
+REM
+REM The prior year is the FROZEN-YEAR TRIPWIRE. CFTC regenerates a rolling two-year window
+REM and nothing older, so the prior year is re-served weekly but byte-identical: the one
+REM place a content check on closed data is free. Expected result every week is exactly
+REM "unchanged bytes (deduped)". Anything else is the retroactive-restatement signature and
+REM raises an alert that `ingest` below turns into a non-zero exit and a marker file.
+REM Costs about 7 MB of transfer per week (the other six days 304) and nothing on disk.
+REM Pass --no-prior-year to turn it off.
 REM The weekly static is fetched for its HTTP Last-Modified, which is a true
 REM publication timestamp rather than a polling-interval approximation.
 "REPLACE_WITH_VENV_PATH\Scripts\cotdata-vintage.exe" fetch >> "%VINTAGE_LOG%" 2>&1

@@ -221,28 +221,41 @@ def test_cli_ingest_exits_nonzero_when_revisions_are_recorded(store_env, capsys)
         vintage_cli.main(["ingest", "--pending"])
     msg = str(exc.value)
     assert "restatement suspect" in msg and "cotdata-vintage diff" in msg
-    assert "notification, not a failure" in msg  # the data IS committed
+    # the unparseable fixture ALSO fails, and both must appear: an earlier draft raised on
+    # the failure first and swallowed the suspect, which is the more serious of the two
+    assert "FAILED to parse" in msg
+    # wording is "not a rollback" rather than "not a failure": with a parse failure in
+    # the same message, calling the whole run not-a-failure would be untrue
+    assert "notification, not a rollback" in msg  # the data IS committed
     assert "RESTATEMENT SUSPECT" in capsys.readouterr().out
 
 
-def test_unparseable_report_types_drain_out_of_pending(store_env):
-    """disagg/TFF/weekly-static have no canonicaliser yet. They must be marked SKIPPED,
-    not left pending: a snapshot that never drains is re-selected forever, and a suspect
-    one would then re-alert on every future run."""
+def test_unparseable_sources_drain_out_of_pending(store_env):
+    """A source with no canonicaliser must be marked SKIPPED, not left pending: one that
+    never drains is re-selected forever, and a suspect one would then re-alert on every
+    future run.
+
+    Since the disagg and TFF canonicalisers landed, the ONLY unparseable source left is
+    the weekly static (129 positional columns, a genuinely larger job than the annual
+    zips). A source whose parse FAILS must drain too, by a different route: it lands on
+    parse_status=failed, which --pending also does not select."""
     from cotdata import vintage, vintage_cli
     vintage._write_manifest({"schema_version": 1, "snapshots": [
-        {"snapshot_id": "d1", "report_type": "disaggregated", "source_kind": "annual_zip",
-         "local_path": "x", "parse_status": "pending", "retrieved_at": "2026-07-31T00:00:00Z"},
         {"snapshot_id": "w1", "report_type": "legacy", "source_kind": "weekly_static",
          "local_path": "y", "parse_status": "pending", "retrieved_at": "2026-07-31T00:00:00Z"},
+        {"snapshot_id": "d1", "report_type": "disaggregated", "source_kind": "annual_zip",
+         "local_path": "gone.zip", "parse_status": "pending",
+         "retrieved_at": "2026-07-31T00:00:00Z"},
     ]})
-    assert vintage_cli.main(["ingest", "--pending"]) == 0
+    # the missing file makes d1 fail, and a failed parse is itself now a non-zero exit
+    with pytest.raises(SystemExit, match="FAILED to parse"):
+        vintage_cli.main(["ingest", "--pending"])
 
     after = {s["snapshot_id"]: s for s in vintage.read_snapshots()}
-    assert after["d1"]["parse_status"] == "skipped"
     assert after["w1"]["parse_status"] == "skipped"
-    assert "no canonicaliser" in after["d1"]["parse_error"]
-    # and a second run selects nothing, so it stays quiet
+    assert "no canonicaliser" in after["w1"]["parse_error"]
+    assert after["d1"]["parse_status"] == "failed"   # has a canonicaliser; file is missing
+    # and a second run selects neither, so it stays quiet
     assert vintage_cli.main(["ingest", "--pending"]) == 0
 
 
@@ -251,7 +264,7 @@ def test_suspect_on_an_unparseable_type_alerts_once_then_drains(store_env):
     every run forever."""
     from cotdata import vintage, vintage_cli
     vintage._write_manifest({"schema_version": 1, "snapshots": [
-        {"snapshot_id": "d1", "report_type": "disaggregated", "source_kind": "annual_zip",
+        {"snapshot_id": "d1", "report_type": "legacy", "source_kind": "weekly_static",
          "local_path": "x", "parse_status": "pending", "restatement_suspect": True,
          "report_year": 2025, "retrieved_at": "2026-07-31T00:00:00Z"},
     ]})
@@ -292,3 +305,106 @@ def test_oi_over_sum_warns_not_raises(store_env):
     res = vi.ingest_canonical(c, snapshot_id="s1")
     assert res["warnings"]  # soft warning emitted
     assert res["observations"] == 3  # still ingested
+
+
+def test_an_absolute_local_path_is_not_re_rooted_under_the_store(store_env):
+    """Found by adversarial review. COTDATA_VINTAGE_ROOT outside the store records an
+    ABSOLUTE local_path, and vintage_root() calls that override mandatory on a mirrored
+    replica. Re-rooting it turned /Volumes/ext/... into <store>/Volumes/ext/..., so every
+    ingest raised FileNotFoundError, got swallowed, and marked the snapshot failed, which
+    --pending never re-selects. One run drained the whole backlog with no way to reset."""
+    from cotdata import vintage_cli
+    assert str(vintage_cli._snapshot_path("/ext/vintage/raw/a/x.zip")) == "/ext/vintage/raw/a/x.zip"
+    assert str(vintage_cli._snapshot_path(r"D:\vintage\raw\a\x.zip")) == "D:/vintage/raw/a/x.zip"
+    rel = vintage_cli._snapshot_path(r"vintage\raw\annual_zip\2026\x.zip")
+    assert rel == store_env / "vintage" / "raw" / "annual_zip" / "2026" / "x.zip"
+
+
+def test_backfill_takes_the_same_write_lock_as_ingest(store_env):
+    """Found by adversarial review. backfill read-modify-writes every observations
+    partition, so running it beside an ingest drops that ingest's appended rows and leaves
+    a revision row asserting a change to a value no longer present in observations/."""
+    import pytest as _pytest
+
+    from cotdata import vintage, vintage_ingest, vintage_schedule
+    vintage_ingest.ingest_canonical(_canon("2026-07-21"), snapshot_id="s1")
+    with vintage_ingest._WriteLock(vintage.vintage_root()):
+        with _pytest.raises(RuntimeError, match="single-writer"):
+            vintage_schedule.backfill()
+    vintage_schedule.backfill()   # and succeeds once the lock is released
+
+
+def test_a_replayed_snapshot_keeps_its_own_observed_at(store_env):
+    """observed_at is a property of the CAPTURE, not of when ingest happened. Taking it
+    from the clock let a replay of an older snapshot outrank a newer one in the
+    point-in-time read and hand back the pre-revision value."""
+    import pandas as pd
+
+    from cotdata import vintage_ingest as vi
+    early = _canon("2026-07-21", comm_long=100)
+    late = _canon("2026-07-21", comm_long=200)
+    vi.ingest_canonical(early, snapshot_id="s1", observed_at="2026-07-24T19:00:00Z")
+    vi.ingest_canonical(late, snapshot_id="s2", observed_at="2026-07-31T19:00:00Z")
+    # replay the OLD snapshot after the new one, exactly as `ingest --all-snapshots` would
+    vi.ingest_canonical(early, snapshot_id="s1", observed_at="2026-07-24T19:00:00Z")
+
+    now = vi.asof(pd.Timestamp("2026-08-01"), report_date="2026-07-21")
+    comm = now[now.category == "commercial"]
+    assert list(comm["long_contracts"]) == [200]   # the newer value still wins
+
+
+def test_replaying_an_old_snapshot_is_a_true_no_op(store_env):
+    """Second review pass. Taking observed_at from the snapshot fixed the TIMESTAMP but not
+    the COMPARISON: ingest_canonical still diffed against whatever was newest in the store,
+    so a replay emitted a reversed revision (300 -> 100) plus a re-revision, and grew
+    revisions/ without bound on every pass. The diff is now bitemporal."""
+    from cotdata import vintage_ingest as vi
+    caps = [("s1", 100, "2026-07-24T19:00:00Z"), ("s2", 200, "2026-07-31T19:00:00Z"),
+            ("s3", 300, "2026-08-07T19:00:00Z")]
+    for sid, v, at in caps:
+        vi.ingest_canonical(_canon("2026-07-21", comm_long=v), snapshot_id=sid,
+                            observed_at=at)
+    n_obs, n_rev = len(vi.read_observations()), len(vi.read_revisions())
+    assert n_rev == 2   # 100 -> 200 -> 300, both forward
+
+    for _ in range(3):                      # three full replays
+        for sid, v, at in caps:
+            vi.ingest_canonical(_canon("2026-07-21", comm_long=v), snapshot_id=sid,
+                                observed_at=at)
+    assert (len(vi.read_observations()), len(vi.read_revisions())) == (n_obs, n_rev)
+    rev = vi.read_revisions()
+    assert list(rev["old_value"]) == ["100", "200"]   # no reversed pair was invented
+    assert list(rev["new_value"]) == ["200", "300"]
+
+
+def test_retry_failed_is_the_way_back_from_a_failed_parse(store_env):
+    """`failed` is otherwise terminal: --pending does not select it and nothing else writes
+    the field back. Two separate defects stranded whole backlogs there."""
+    import pytest as _pytest
+
+    from cotdata import vintage, vintage_cli
+    vintage._write_manifest({"schema_version": 1, "snapshots": [
+        {"snapshot_id": "d1", "report_type": "legacy", "source_kind": "annual_zip",
+         "local_path": "gone.zip", "parse_status": "pending",
+         "retrieved_at": "2026-07-31T00:00:00Z"}]})
+    with _pytest.raises(SystemExit, match="FAILED to parse"):
+        vintage_cli.main(["ingest", "--pending"])
+    assert vintage.read_snapshots()[0]["parse_status"] == "failed"
+
+    assert vintage_cli.main(["ingest", "--pending"]) == 0        # terminal: not re-selected
+    with _pytest.raises(SystemExit):                             # but --retry-failed does
+        vintage_cli.main(["ingest", "--retry-failed"])
+
+
+def test_a_run_where_every_snapshot_failed_does_not_report_success(store_env):
+    """It used to exit 0, because non-zero was reserved for revisions. On an unattended
+    producer that reports success to Task Scheduler while the store gains nothing."""
+    import pytest as _pytest
+
+    from cotdata import vintage, vintage_cli
+    vintage._write_manifest({"schema_version": 1, "snapshots": [
+        {"snapshot_id": f"d{i}", "report_type": "legacy", "source_kind": "annual_zip",
+         "local_path": f"gone{i}.zip", "parse_status": "pending",
+         "retrieved_at": "2026-07-31T00:00:00Z"} for i in range(3)]})
+    with _pytest.raises(SystemExit, match="3 snapshot"):
+        vintage_cli.main(["ingest", "--pending"])

@@ -192,9 +192,18 @@ vintage/release_schedule.parquet
 vintage/announcements.parquet
 ```
 
-Manifest: a new `vintage` block on the **cot-half** file (`manifests/cot.json`), so it
+Manifest: ~~a new `vintage` block on the **cot-half** file (`manifests/cot.json`), so it
 stays on the CFTC producer's side of the ADR-0007 seam. `store._DOMAIN_HALF` gains
-`vintage -> cot`.
+`vintage -> cot`.~~
+
+**Corrected 2026-07-30** (caught in adversarial review; this paragraph described the plan,
+not what shipped). Provenance lives in a **self-owned `vintage/snapshots.json`**, and
+`store._DOMAIN_HALF` has no `vintage` key. Two reasons, both discovered during the build:
+`store.reconcile_manifest` prunes any manifest entry lacking a matching `{name}.parquet`,
+and raw snapshot ids are not parquet files, so they would have been ghost-pruned; and both
+deployed sync scripts exclude the name `manifest.json` unanchored, so a
+`vintage/manifest.json` would have been stripped in transit. The handoff's §12.4 recorded
+this deviation correctly, so this file was the stale one.
 
 ### §4.6 amendment (confirmed, not contingent)
 The spike upgrades the `observed` mechanism: capturing the weekly-static
@@ -251,6 +260,353 @@ overwritten — so it covers weeks from the first capture onward; historical wee
 Still deferred: `vintage stats` (needs a quarter of data to measure),
 category-migration detection (needs revisions to exist), tombstone *logic* (column
 present, needs a real disappearing key to design against).
+
+## 6. The frozen-year tripwire is now automated (2026-07-30)
+
+§3b established that CFTC regenerates a **rolling two-year window**, and §12.3 of the
+handoff recorded the consequence as a decision ("`--all` is a restatement tripwire, not a
+backfill, monthly or quarterly"). That decision had a hole: a tripwire that only fires when
+somebody remembers to run `--all` by hand is not a detector, it is an intention. This pass
+closes it.
+
+Three regeneration regimes, each with a different expected outcome:
+
+| Regime | Files | Expected weekly outcome | What violates it |
+|---|---|---|---|
+| `churn` | current year | new bytes | nothing, that is the data arriving |
+| `frozen_in_window` | **prior year** | `unchanged bytes (deduped)` | a new sha (restatement), or a 304 / failure (the check went blind) |
+| `frozen_out_of_window` | 2 or more years back | `304 not-modified` | a 200 carrying new bytes |
+| `weekly` | the weekly static | new content each Friday | n/a |
+
+The prior-year slot is the load-bearing one, and it is the only place CFTC hands over a
+free weekly **content** check on closed data. Everything older is never re-served, so its
+content is not verified at all: a 304 there proves only that a header did not move.
+
+**Changed: the prior year is now in the DEFAULT fetch set.** It costs one roughly 7 MB
+transfer per week (the other six days return 304, because CFTC re-touches `Last-Modified`
+weekly) and zero bytes on disk, because the content is byte-identical and dedupes. That is
+the entire price of the only automated retroactive-restatement detector in the stack.
+`--no-prior-year` turns it off. A targeted `--year N` is still taken at face value with no
+prior-year companion, because that is a targeted capture rather than the scheduled sweep.
+
+Two alert shapes, deliberately triggered differently:
+
+- **Content changed on a frozen year: always alerts.** It is a discrete event with new
+  bytes sitting beside the old ones, so it is diffable, and two restatements in
+  consecutive weeks are two things worth knowing rather than one. In January the message
+  says so explicitly, since year-end finalisation is the one benign way this fires.
+- **The detector went blind (frozen-in-window 304 or fetch failure): alerts on the
+  TRANSITION only.** This is a standing condition. If CFTC stopped re-touching the prior
+  year, a level-triggered alert would fire every day forever, and an alert that never
+  clears is one that gets ignored. Same reasoning that scopes the ingest revision alert to
+  the current run's snapshots.
+
+`fetch` deliberately still exits zero. The Windows wrapper aborts the whole run on a
+non-zero fetch, so alerting there would skip the `ingest` that turns a restatement into
+readable revision rows, which is exactly what you want when it fires. The alert is
+persisted on the snapshot (`expectation`, `outcome`, `tripwire_alert`) and re-raised by
+`ingest`, which is the step that can exit non-zero safely because everything downstream of
+it has already run. That path already writes the `REVISIONS_<date>.txt` marker file.
+
+## 7. Flow decomposition, and what it found in the canonical schema
+
+Module spec §6.4 built as `vintage_flow.py`. Weekly ΔLong versus ΔShort per
+market/category, labelled `new_longs` / `short_covering` / `new_shorts` /
+`long_liquidation`. No prices, no contract master, no multiplier: every input is a column
+the canonical schema already stores, which is what makes it a clean smoke test of that
+schema rather than of anything else.
+
+Two design points that are not in the spec because they only appear against real data:
+
+- **Classification is by dominant leg.** The spec's table has a "~0" leg, which never
+  happens: both legs always move a little. Whichever of |ΔLong|, |ΔShort| is larger names
+  the state and its sign picks the direction, with exact ties going to the long leg so the
+  result is deterministic. This is parameter-free, so there is nothing to tune and nothing
+  to overfit. An optional `min_frac_oi` dead zone adds a `quiet` state; it defaults to 0.0
+  because any other value is a judgement in the same class as the fragility weights and
+  belongs in a caller's config where it can be swept.
+- **`oi_corroborates`.** Futures are closed and zero-sum, so contracts exist only because
+  somebody opened them: fresh positioning should coincide with rising open interest and
+  exits with falling. Where it does not, the label is describing a transfer of an existing
+  position between categories rather than new or closed risk. Kept as a separate column
+  rather than folded into the state, because open interest in the canonical schema is the
+  MARKET total (that is what CFTC reports), so it corroborates a per-category label
+  against a market-level quantity. A real check, not a proof.
+
+### Measured over the whole store (2026-07-30)
+
+95 Legacy markets, 1986 to 2026-07-21, canonicalised and decomposed:
+
+| Measure | Result |
+|---|---|
+| Zero-sum identity (Σ long across categories == Σ short) | **149,412 / 149,412 weeks balanced** |
+| Flow rows produced | 447,951 |
+| Exceptions | 0 |
+| `validate()` warnings | 0 (after the fix below) |
+
+The zero-sum result is the strongest available validation of `canonicalize_legacy`: if the
+category mapping had dropped, duplicated or misrouted a column, the identity would break on
+the first week. It does not break on any week of any market in forty years.
+
+### Finding 1: non-commercial SPREADING is not captured, and never was
+
+The side totals reconcile with each other but fall short of open interest by a constant,
+equal amount on both sides. That gap is `NonComm_Positions_Spread_All`, which is absent
+from `providers/cftc.py`'s `TARGET_COLS` and therefore from the stored parquet, from the
+canonical rows, and from every vintage observation. Gold on 2026-07-21: OI 383,368, both
+sides 351,385, gap 31,983. 64 of 95 markets have at least one week where the gap is zero
+(no spreading that week), which is the confirming case.
+
+Spreading is a matched long and short held by one trader, so it cancels out of the
+long-versus-short identity while still counting toward open interest, which is exactly why
+the gap is equal on both sides. **Consequences to know before relying on this:**
+
+- Net positioning is unaffected, because spreading is long and short in equal measure.
+- Anything denominated as a **share of open interest** (module spec §5.2 step 2, which is
+  the next build step) is measuring a numerator against a denominator that includes
+  contracts the numerator cannot see. In gold that is 8% of OI.
+- Trader counts are likewise absent from the stored table, though the vintage ingest path
+  reads them from the zip directly rather than from the parquet.
+
+Not fixed here. Adding the column changes `providers/cftc.py` output, which breaks the
+byte-identical guarantee and the `current/` golden baseline that exists to protect it, so
+it is a deliberate separate change and not a drive-by.
+
+### Finding 2: `validate()`'s open-interest warning was mis-specified
+
+It compared one category's `long + short + spread` against total open interest. That is
+not a real bound: the two sides of a market are counted separately, so a category holding
+80k long and 294k short in a 383k-OI market sums to 374k with nothing wrong. Measured, it
+fired on **811 of 5,778 gold rows (14%)**, which is noise, and a soft warning at that rate
+is one nobody reads.
+
+Corrected to the invariant that does hold: per side, summed across every category, since
+every long contract in the market belongs to exactly one category. Store-wide warnings
+went from thousands to **zero**. The module spec's §4 adapter contract said
+`long + short + spread <= OI`, so the spec was wrong too and is amended in the same pass.
+
+### Finding 3: COT was FORTNIGHTLY until 1992-10-13
+
+`days_elapsed` is emitted as a column rather than assumed to be seven, and that
+immediately showed the reason. Across the store, 415,908 of 447,951 intervals are 7 days;
+the 15-day (9,057) and 14-day (5,775) intervals are almost entirely pre-October-1992,
+when the report was published twice a month. Gold's first 7-day interval is 1992-10-13.
+
+So a "weekly change" computed over pre-1992 history is a fortnightly change and is not
+comparable to the rest of the series. The remaining off-7 intervals are holiday shifts
+(gold has 11-day gaps at 2002-01-08 and 2003-02-25). The column is the fix: callers filter
+on it rather than discovering this in a result.
+
+## 8. Disaggregated and TFF canonicalisers (2026-07-30)
+
+The step-2 proposal identified this as the real prerequisite, not step 2 itself: the
+registry declares 41 disaggregated and 8 TFF symbols and zero legacy, and every engine in
+the module spec keys on **Managed Money** and **Leveraged Funds**, which exist only in
+those two reports. Ingest wired Legacy only, so no point-in-time series existed for the
+categories the whole system is built around. Now it does.
+
+Both were built and verified against the **real captured snapshots** from the first
+production capture (2026-07-31 01:15Z), not fixtures.
+
+| Report | Canonical rows for 2026 | Weeks | Categories |
+|---|---|---|---|
+| Legacy | 31,041 | 10,347 | commercial, noncommercial, nonreportable |
+| Disaggregated | 39,235 | 7,847 | producer_merchant, swap, managed_money, other_reportable, nonreportable |
+| TFF | 12,500 | 2,500 | dealer, asset_manager, leveraged, other_reportable, nonreportable |
+
+Ingest of all three takes about 5 seconds. 418 distinct market codes, which is far more
+than the 95 in the current-state Legacy store, because the vintage layer canonicalises
+everything CFTC published rather than the registry universe. That is deliberate: capture
+everything, filter on read.
+
+### These two reports populate three fields Legacy never does
+
+- **Per-category spreading.** So the identity closes completely, which the Legacy defect
+  (§7 finding 1) prevents there.
+- **Per-category trader counts.** §6.2's breadth-depth quadrant needs these and cannot be
+  built from Legacy.
+- **CR4 / CR8 net concentration**, per market, repeated on each category row exactly as
+  open interest is. Only the net ratios have canonical columns; the gross ones are
+  published too and have nowhere to land.
+
+### The zero-sum identity by report, measured
+
+| Report | Exact | Within tolerance | `oi_gap` |
+|---|---|---|---|
+| Legacy | 10,321 / 10,347 | **10,347 / 10,347** | never zero (the uncaptured spreading) |
+| Disaggregated | **7,847 / 7,847** | 7,847 / 7,847 | **zero everywhere** |
+| TFF | 2,463 / 2,500 | **2,500 / 2,500** | zero on 98.6% |
+
+Disaggregated closing exactly, with a zero gap, is the confirming counterpart to the Legacy
+finding: the gap there really is the missing spreading column and nothing else.
+
+**The residual is CFTC's own rounding, and it is fully localised.** Every off-by-one-or-two
+row in *both* Legacy and TFF falls in exactly three markets:
+
+| Market code | Name | Legacy rows | TFF rows | Worst |
+|---|---|---|---|---|
+| `13874+` | S&P 500 Consolidated | 12 | 17 | 2 |
+| `20974+` | NASDAQ-100 Consolidated | 11 | 15 | 1 |
+| `12460+` | DJIA Consolidated | 3 | 5 | 1 |
+
+The `+` suffix is CFTC's own marker for a Consolidated contract, which aggregates several
+contract sizes onto a common unit and therefore involves a division. So the tolerance is
+derived from the mechanism rather than fitted: summing `n` independently rounded category
+figures admits at most `n` contracts of error, which is what `rounding_tolerance()`
+returns. Without it, 48 off-by-one warnings fire on the 2026 files alone, which is the
+same cry-wolf rate §7 finding 2 was corrected for.
+
+### Three implementation points worth knowing before debugging them
+
+1. **CFTC's header row has a typo, and it is load-bearing.**
+   `Swap__Positions_Short_All` and `Swap__Positions_Spread_All` have a double underscore;
+   `Swap_Positions_Long_All` has one. Both spellings resolve, so the day CFTC fixes it is
+   not the day Swap Dealer positions start ingesting as nulls.
+2. **A column that cannot be resolved raises.** Silently returning nulls is the worst
+   available outcome: they get written as real observations, and the next genuine value is
+   then recorded as a revision that never happened, permanently polluting the revision
+   history this subsystem exists to produce.
+3. **Trader counts arrive as strings**, because CFTC writes `.` for a suppressed count.
+   Every value field is coerced with `errors="coerce"` so a suppression marker or a stray
+   pad can never reach `row_sha256` as a literal string.
+
+### `combined` is now read from the file
+
+Both reports carry a `FutOnly_or_Combined` column. It is read rather than hardcoded, and a
+file mixing the two is refused. Today it is constant-`FutOnly`, so nothing changes, but
+adding the combined files becomes purely a fetch-list change with the canonicaliser already
+correct. §3c's carry-forward stands; the code no longer assumes it.
+
+### `canonicalize_legacy` was deliberately left alone
+
+The new code shares one vectorised helper; Legacy still uses its original per-row loop.
+That duplication is intentional. Legacy's output feeds `row_sha256`, which is a permanent
+artifact over rows already stored in production, and rewriting the code path that produced
+those hashes to save a little duplication risks registering every stored row as revised at
+once. The saving was not worth the risk.
+
+### Fixed in passing: raw paths were unreadable off the producer
+
+`snapshots.json` records `local_path` as written by the capturing machine, and the producer
+is Windows, so the real store carries `vintage\raw\annual_zip\2026\....zip`. On macOS or
+Linux that is a single filename containing backslashes, so ingest on either replica failed
+with "no such file" on a file plainly sitting there. Normalised on read rather than on
+write, so every snapshot already recorded on the producer stays readable.
+
+## 9. Adversarial review, 2026-07-30
+
+The subsystem was reviewed by an agent given the spec and the diff and **no prior context**,
+specifically because every earlier review had been done by its author and would have shared
+its blind spots. That was worth doing: it found six confirmed defects, four of them in code
+written the same day, and one of them fires on an event as ordinary as a dropped network
+connection. It also confirmed the hash-purity property empirically rather than by reading,
+which is the one property the whole design rests on.
+
+### Fixed in this pass
+
+| # | Defect | Why it mattered |
+|---|---|---|
+| 1 | A **fetch failure poisoned the dedupe comparison**. Failure records carry no sha, etag or Last-Modified, so the next fetch sent no `If-Modified-Since`, could not match the dedupe test, and was classified as changed content. | One network blip on a frozen year produced a **false restatement alert**, which is the single alarm this subsystem exists to raise, and re-retained megabytes already on disk. Split into `_latest_with_content` (content questions) versus `_latest_for_url` (outcome questions). |
+| 2 | An **absolute `local_path` was re-rooted under the store**, turning `/Volumes/ext/...` into `<store>/Volumes/ext/...`. | `COTDATA_VINTAGE_ROOT` is *mandatory* on a mirrored replica, so on exactly those hosts every ingest failed, was swallowed, and marked the snapshot `failed`, which `--pending` never re-selects. One run drained the entire backlog with no CLI able to reset it. |
+| 3 | A bare `ingest` with no flags **replayed every snapshot ever recorded** with `observed_at = now`. | Replaying an older snapshot after a revision wrote the superseded value back with a newer timestamp, emitting a reversed revision (35 to 30) then a re-revision (30 to 35) and inflating `age_days` on both. `revisions/` is the primary artifact and `age_days` is what tells a consumer whether a restatement reached its calibration window. Now defaults to pending, `--all-snapshots` opts into a replay, and `observed_at` comes from the snapshot's own `retrieved_at`. |
+| 4 | **`schedule backfill` bypassed the write lock** while doing a read-modify-write of every observations partition. | Run beside an ingest it silently dropped that ingest's appended rows, leaving a revision row asserting a change to a value no longer present in `observations/`. Per-file atomicity was never the missing piece. |
+| 5 | **Every flat week was labelled `long_liquidation`**, because `d_long <= 0` swallows zero and the dead zone is off by default. | Measured on the real 2026 Legacy file: 3,308 of 29,787 transitions (11.1%), which made `long_liquidation` the modal state with a third of its bucket being weeks where nothing happened. That `value_counts()` is the CLI's headline output. Zero is now `quiet` unconditionally, with no threshold involved. |
+| 6 | **`validate()` accepted duplicate natural keys**, and **had no null-rate band** despite spec §5 requiring one. | Duplicates get identical `(observed_at, snapshot_id)`, exhausting the tie-break so append order decides the stored value. The null band closes the gap `errors="coerce"` opened: a changed value *format* in a column whose *name* never moved would coerce to nulls, which get written as observations and then read as revisions when the values return. Checked per category, since one broken column is only 1/n of a melted frame. |
+
+### Confirmed clean, by measurement rather than by reading
+
+Hash purity, the property everything else depends on, was exercised directly: mutating
+`observed_at`, `snapshot_id`, `release_date`, `release_date_source`, `market_name`,
+`is_tombstone`, every natural-key column and an unknown extra column all leave
+`row_sha256` unchanged, while each of the ten `VALUE_FIELDS` changes it. Scalar stability
+holds across `int`, `np.int64/32`, `float`, `np.float64/32`, `str`, `Decimal` and pandas
+nullable `Int64`. A release-date backfill was confirmed empirically not to move any hash.
+
+Atomicity was clean everywhere it was checked: `_write_manifest`, `_append_parquet`,
+`vintage_schedule._write`, backfill's per-file write and the raw `.part` write all use
+temp plus `os.replace`, and `_WriteLock` uses `O_CREAT|O_EXCL` and fails loudly.
+
+### NOT fixed, recorded as a real gap: the `announced` tier is unreachable
+
+**Acceptance criterion 5 is unmet.** `sync()` scrapes the Special Announcements page into
+`announcements.parquet`, but nothing ever writes a `source="announced"` row into
+`release_schedule.parquet`, and `backfill` reads only the schedule table plus
+`published_from_snapshots()`. So the Oct-Dec 2025 backlog weeks, the named target of that
+criterion and §6's "single largest PIT hole", can only ever resolve to `derived` in
+production. The precedence logic itself is correct and tested; the tests pass because they
+inject a schedule frame directly.
+
+The plumbing is not the missing piece: `write_release_schedule` already accepts a `source`
+column, so an `announced` row would flow through correctly. What is missing is a producer,
+and building one means extracting a `(report_date, release_date)` pair from free-text
+announcement prose. `_parse_announcements` deliberately never raises and captures only
+`announcement_date` plus `raw_text`. **Writing that extractor against no corpus of real
+announcements would be guessing**, and a release date resolved by a guess is worse than a
+`derived` one, because it carries a provenance flag claiming it was announced. Left
+unbuilt, and recorded here rather than quietly assumed to work.
+
+### Second review pass, on the six fixes themselves
+
+The fixes were then reviewed by a second cold agent, because they had been written by the
+same person who wrote the code being fixed and nobody had looked at them. It downloaded
+**every real CFTC annual file, 41 Legacy years plus 17 Disaggregated and 17 TFF years,
+roughly 1.6 million canonical rows**, and put all of it through the two new raising checks.
+
+Its verdict on fix 6 is the most valuable result in either review: **no legitimate
+duplicate natural key exists in 40 years of any report type, and the null rate on
+`long_contracts` / `short_contracts` / `open_interest` is exactly 0.0 in every
+`(report_type, category)` group of every year.** So neither new raise can hard-fail a
+historical backfill. Fixes 4 and 5 came back sound, with fix 5's 11.1% figure reproducing
+to the row. Fix 2 is sound for every path this deployment can reach.
+
+Two fixes closed their reproducer but not their class, and both are now finished:
+
+| Was | Now |
+|---|---|
+| Fix 1 re-pointed `restatement_suspect` at the content-bearing snapshot but left the FIRST/CHANGED classification keyed to `prev`, so a fetch failure as the **first** record for a URL still fired the false restatement alert, with the two signals disagreeing | `_annotate` takes `content` and classifies FIRST from it |
+| Fix 3 corrected the `observed_at` stamp but not the comparison: `ingest_canonical` still diffed against whatever was newest, so `--all-snapshots` fabricated a reversed revision plus a re-revision and grew `revisions/` without bound on every pass | The diff is filtered to `observed_at <= observed_ts`, making the comparison genuinely bitemporal. A replay is now a true no-op, verified three passes deep on real data |
+
+Four further findings, all fixed:
+
+- **The blind-detector alert could not fire at the year rollover.** It required
+  `prev_outcome == deduped`, but a year that churned all through 2025 has
+  `prev_outcome == changed` on the January morning it becomes frozen-in-window. The
+  rollover is the most likely moment for CFTC's window to shift, which made it the worst
+  possible blind spot. Now keys on whether the previous fetch saw bytes at all.
+- **A fetch failure was a tripwire condition.** Connectivity is not provenance: a dropped
+  connection says nothing about whether CFTC restated anything, and routing it here turned
+  one blip into a frozen-year restatement alarm. Failures are now counted and printed by
+  `fetch`, where an operational problem belongs.
+- **A run where every snapshot failed to parse exited 0**, reporting success to Task
+  Scheduler while the store gained nothing, with `failed` being terminal. Now non-zero, in
+  a single combined message: an earlier draft raised on the failure first and silently
+  swallowed a restatement suspect in the same run, which is the more serious of the two.
+  **`ingest --retry-failed`** is the way back, and it is the only one: nothing else ever
+  wrote `parse_status` back to `pending`, and two separate defects had stranded whole
+  backlogs there.
+- **Disaggregated and TFF were fetched from 2006**, but cftc.gov serves 404 for
+  `fut_disagg_txt_2006..2009` and `fut_fin_txt_2006..2009` (verified live in both the
+  review and here). Every `fetch --all` recorded eight permanent failure snapshots that
+  could never succeed. First year corrected to 2010.
+- **The null band was vacuous for Legacy**, because `canonicalize_legacy` never coerced. A
+  value arriving as `"200,000"` stayed an object column, passed every check, and hashed
+  differently from the numeric form: precisely the fabricated-revision failure the band
+  exists to prevent, on the one report type where it could not see it. Legacy now coerces
+  like the other two. **Proved not to move any stored hash**: across 95 markets and 448,236
+  canonical rows the real values are already `int64`, so the coercion is an identity.
+
+One caveat carried forward from the review rather than fixed: fix 5's headline 11.1% is
+measured over all 418 markets in the 2026 file. Over the 51 markets in the current-state
+store the flat-week rate is 0.07%. Both numbers are honest; they describe different
+populations, and the tracked universe is much less affected than the full CFTC file.
+
+### Known and accepted
+
+`ingest_canonical` reloads every observation and builds a per-key dict with `iterrows()`
+on each call, about 2.3 seconds against a 31k-row store. Fine for the daily path (three
+snapshots), but a cold-start `fetch --all` plus `ingest` is roughly 120 snapshots against a
+store growing into the millions of rows, so a full historical rebuild is hours rather than
+minutes. Not on the daily path, so not fixed here.
 
 ## Bottom line
 
