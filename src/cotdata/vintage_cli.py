@@ -42,6 +42,17 @@ def _cmd_ingest(args) -> int:
     total_obs = total_rev = 0
     for s in snaps:
         if s.get("report_type") != "legacy" or s.get("source_kind") != "annual_zip":
+            # No canonicaliser for this report type yet. Mark it SKIPPED rather than
+            # leaving it pending: a snapshot that never drains is re-selected by
+            # --pending on every future run, and if it ever carried restatement_suspect
+            # the alert below would then re-fire forever, which is how an alert gets
+            # ignored. Skipped snapshots surface once and then go quiet.
+            # Raw bytes are retained, so adding a canonicaliser later just means
+            # re-marking these pending and re-running ingest — nothing is lost.
+            vintage.update_snapshot(
+                s["snapshot_id"], parse_status="skipped",
+                parse_error=f"no canonicaliser for {s.get('report_type')}/"
+                            f"{s.get('source_kind')} yet")
             continue
         path = config.store_root() / s["local_path"]
         try:

@@ -225,6 +225,41 @@ def test_cli_ingest_exits_nonzero_when_revisions_are_recorded(store_env, capsys)
     assert "RESTATEMENT SUSPECT" in capsys.readouterr().out
 
 
+def test_unparseable_report_types_drain_out_of_pending(store_env):
+    """disagg/TFF/weekly-static have no canonicaliser yet. They must be marked SKIPPED,
+    not left pending: a snapshot that never drains is re-selected forever, and a suspect
+    one would then re-alert on every future run."""
+    from cotdata import vintage, vintage_cli
+    vintage._write_manifest({"schema_version": 1, "snapshots": [
+        {"snapshot_id": "d1", "report_type": "disaggregated", "source_kind": "annual_zip",
+         "local_path": "x", "parse_status": "pending", "retrieved_at": "2026-07-31T00:00:00Z"},
+        {"snapshot_id": "w1", "report_type": "legacy", "source_kind": "weekly_static",
+         "local_path": "y", "parse_status": "pending", "retrieved_at": "2026-07-31T00:00:00Z"},
+    ]})
+    assert vintage_cli.main(["ingest", "--pending"]) == 0
+
+    after = {s["snapshot_id"]: s for s in vintage.read_snapshots()}
+    assert after["d1"]["parse_status"] == "skipped"
+    assert after["w1"]["parse_status"] == "skipped"
+    assert "no canonicaliser" in after["d1"]["parse_error"]
+    # and a second run selects nothing, so it stays quiet
+    assert vintage_cli.main(["ingest", "--pending"]) == 0
+
+
+def test_suspect_on_an_unparseable_type_alerts_once_then_drains(store_env):
+    """The alert-fatigue path this fix closes: a suspect that never drains re-fires
+    every run forever."""
+    from cotdata import vintage, vintage_cli
+    vintage._write_manifest({"schema_version": 1, "snapshots": [
+        {"snapshot_id": "d1", "report_type": "disaggregated", "source_kind": "annual_zip",
+         "local_path": "x", "parse_status": "pending", "restatement_suspect": True,
+         "report_year": 2025, "retrieved_at": "2026-07-31T00:00:00Z"},
+    ]})
+    with pytest.raises(SystemExit):      # fires once
+        vintage_cli.main(["ingest", "--pending"])
+    assert vintage_cli.main(["ingest", "--pending"]) == 0   # and then goes quiet
+
+
 def test_restatement_alert_does_not_fire_forever(store_env):
     """A suspect recorded in an EARLIER run must not keep failing every later run —
     an alert that never clears is one that gets switched off."""

@@ -49,8 +49,34 @@ REM is not safe in a filename; PowerShell gives a stable yyyy-MM-dd on any box.
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set TODAY=%%i
 set VINTAGE_MARKER=REPLACE_WITH_STORE_PATH\vintage\REVISIONS_%TODAY%.txt
 
-REM The store may not exist yet on a first run; the vintage dir must, to hold the log.
+REM The vintage dir must exist BEFORE the first redirect below. cmd opens a >> target
+REM before running the command, so without this the very first line fails with "The system
+REM cannot find the path specified", the program never runs, and the task exits having
+REM created nothing -- which looks identical to "the task never fired".
 if not exist "REPLACE_WITH_STORE_PATH\vintage" mkdir "REPLACE_WITH_STORE_PATH\vintage"
+
+REM ---- Preflight -------------------------------------------------------------------
+REM cotdata-vintage and cotdata-schedule are NEWER than the rest of the CLI, so a venv
+REM installed before they existed will not have them and every step below would fail with
+REM an unhelpful "cannot find path". Check once, up front, and say exactly what to do.
+if not exist "REPLACE_WITH_VENV_PATH\Scripts\cotdata-vintage.exe" (
+  echo PREFLIGHT FAILED: cotdata-vintage.exe not found.
+  echo   looked in: REPLACE_WITH_VENV_PATH\Scripts\
+  echo   fix:       cd to your cotdata checkout, then:  git pull ^&^& .venv\Scripts\pip install -e .
+  exit /b 9009
+)
+if not exist "REPLACE_WITH_VENV_PATH\Scripts\cotdata-schedule.exe" (
+  echo PREFLIGHT FAILED: cotdata-schedule.exe not found.
+  echo   looked in: REPLACE_WITH_VENV_PATH\Scripts\
+  echo   fix:       cd to your cotdata checkout, then:  git pull ^&^& .venv\Scripts\pip install -e .
+  exit /b 9009
+)
+if not exist "REPLACE_WITH_STORE_PATH" (
+  echo PREFLIGHT FAILED: store path does not exist: REPLACE_WITH_STORE_PATH
+  echo   Did you replace REPLACE_WITH_STORE_PATH in this file with your real store path?
+  exit /b 3
+)
+REM ----------------------------------------------------------------------------------
 REM Optional: identify yourself to CFTC. Defaults to the repo URL if unset.
 REM set COTDATA_USER_AGENT=cotdata-vintage/0.1 (+contact you@example.com)
 
