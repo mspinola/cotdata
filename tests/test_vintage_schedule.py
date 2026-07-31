@@ -2,6 +2,7 @@
 Oct–Dec 2025 backlog week resolving to its true announced release date.
 """
 import datetime as dt
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -226,6 +227,78 @@ def test_sync_published_is_idempotent(store_env):
     assert vs.sync_published() == {"published": 1}
     vs.sync_published()
     assert len(vs.read_release_schedule()) == 1  # no duplicate row
+
+
+_SCHED_FIXTURE = Path(__file__).parent / "fixtures" / "cftc_release_schedule_2026.html"
+
+
+def test_parses_the_real_cftc_release_schedule():
+    """Against a trimmed copy of the live page, so the parser is pinned to real markup."""
+    from cotdata.vintage_schedule import parse_release_schedule
+    df = parse_release_schedule(_SCHED_FIXTURE.read_text())
+
+    assert len(df) == 52                        # one release per week
+    assert set(df["source"]) == {"scheduled"}
+    # every report date is a Tuesday; every release is a Friday unless holiday-delayed
+    assert all(pd.Timestamp(d).weekday() == 1 for d in df["report_date"])
+    normal = df[~df["note"].str.contains("holiday")]
+    assert all(pd.Timestamp(d).weekday() == 4 for d in normal["release_date"])
+    # the six 2026 federal-holiday delays, which is the whole point of seeding this
+    delayed = df[df["note"].str.contains("holiday")]
+    assert len(delayed) == 6
+    assert all(pd.Timestamp(d).weekday() == 0 for d in delayed["release_date"])  # Mondays
+
+
+def test_release_schedule_agrees_with_the_published_timestamp():
+    """Independent cross-check: the calendar and the weekly-static Last-Modified must
+    give the same release date for the same report date."""
+    from cotdata.vintage_schedule import (
+        _last_modified_to_release_date,
+        parse_release_schedule,
+    )
+    df = parse_release_schedule(_SCHED_FIXTURE.read_text())
+    row = df[df["report_date"] == pd.Timestamp("2026-07-21")].iloc[0]
+    from_header = _last_modified_to_release_date("Fri, 24 Jul 2026 19:27:59 GMT")
+    assert pd.Timestamp(row["release_date"]).date() == from_header == dt.date(2026, 7, 24)
+
+
+def test_report_date_for_release_handles_holiday_shift():
+    from cotdata.vintage_schedule import report_date_for_release
+    # normal: Friday release reports the Tuesday three days earlier
+    assert report_date_for_release(dt.date(2026, 7, 24)) == dt.date(2026, 7, 21)
+    # delayed: a Monday release still reports the PREVIOUS week's Tuesday, not a new one
+    assert report_date_for_release(dt.date(2026, 7, 6)) == dt.date(2026, 6, 30)
+    assert report_date_for_release(dt.date(2026, 6, 22)) == dt.date(2026, 6, 16)
+
+
+def test_parse_raises_rather_than_returning_empty_on_layout_change():
+    """A silent empty parse is indistinguishable from 'CFTC published nothing', and would
+    quietly leave every row on `derived`."""
+    from cotdata.vintage_schedule import parse_release_schedule
+    with pytest.raises(ValueError, match="Release Schedule"):
+        parse_release_schedule("<html><body>no heading here</body></html>")
+    with pytest.raises(ValueError, match="no <table>"):
+        parse_release_schedule("<h3>2026 Release Schedule</h3><p>nothing</p>")
+
+
+def test_scheduled_upgrades_derived_rows(store_env):
+    """End to end: a report date with no other evidence goes from `derived` to
+    `scheduled`, and a holiday week gets its date CORRECTED, not just relabelled."""
+    from cotdata import vintage_ingest as vi
+    from cotdata import vintage_schedule as vs
+
+    # report 2026-06-30: derived would say Friday 2026-07-03; the calendar says Monday
+    # 2026-07-06, because Independence Day delayed it.
+    _ingest_one("2026-06-30", observed_at=dt.datetime(2026, 7, 30, tzinfo=dt.timezone.utc))
+    assert vs.derive_release_date("2026-06-30") == dt.date(2026, 7, 3)   # the wrong guess
+
+    schedule = vs.parse_release_schedule(_SCHED_FIXTURE.read_text())
+    counts = vs.backfill(schedule=schedule)
+
+    obs = vi.read_observations()
+    assert counts["scheduled"] == len(obs) and counts["derived"] == 0
+    assert set(obs["release_date_source"]) == {"scheduled"}
+    assert pd.Timestamp(obs.iloc[0]["release_date"]).date() == dt.date(2026, 7, 6)
 
 
 def test_announcement_parse_is_best_effort():
