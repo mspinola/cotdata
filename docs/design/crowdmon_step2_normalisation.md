@@ -1,9 +1,33 @@
 # Step 2: contract master and normalisation: PROPOSAL
 
-**Status: proposed, not accepted.** Written before any step-2 code, per the request to
-propose the approach first. Module spec: [crowdmon_futures_cot_module.md](crowdmon_futures_cot_module.md)
-§5.1, §5.2, §13 step 2. Everything measured below was measured against the real store on
-2026-07-30, and several measurements change what step 2 can be.
+**Status: ACCEPTED and BUILT, 2026-08-01. Superseded on one central point.** Written before
+any step-2 code, per the request to propose the approach first. Module spec:
+[crowdmon_futures_cot_module.md](crowdmon_futures_cot_module.md) §5.1, §5.2, §13 step 2.
+Everything measured below was measured against the real store on 2026-07-30, and several
+measurements change what step 2 can be.
+
+> ## Outcome, recorded 2026-08-02
+>
+> **The headline recommendation was accepted.** `crowdmon` exists as a workspace sibling with
+> the boundary test this document specifies, and rungs 3 and 4 shipped as
+> `crowdmon.futures.notional` and `crowdmon.futures.riskunits`.
+>
+> **One central claim in it was wrong, and it is the claim this document calls "the one real
+> trap".** Volatility does **not** come from the back-adjusted series. It comes from
+> **`propadj`**, the ratio-adjusted series. Every occurrence below is corrected in place and
+> marked; the reasoning behind the error is preserved rather than deleted, because it is
+> half right and therefore worth recognising again.
+>
+> Measured cost of getting it wrong, on real data: back-adjusted percent volatility is
+> **201x** too high for soybeans, **182x** for 10-year notes, and **0.47x** for gold, which
+> never goes negative and passes every implausibility screen. Detail and reproducer in
+> crowdmon's [`docs/design/amendments-2026-08-01.md`](https://github.com/mspinola/crowdmon/blob/main/docs/design/amendments-2026-08-01.md)
+> §A8.
+>
+> **Where the live answer is.** This document is the record of how step 2 was decided and is
+> not maintained against the built system. `crowdmon`'s `docs/design/` is authoritative for
+> anything about how normalisation actually behaves. Read this for the reasoning, not for the
+> current state.
 
 ---
 
@@ -45,6 +69,7 @@ is infrastructure.
 | Exchange margin | yes | `Margin` column, so §8's margin sensitivity is buildable |
 | Unadjusted prices | **yes** | `prices/<SYM>_unadj.parquet`, 47 symbols |
 | Back-adjusted prices | yes | `prices/<SYM>_backadj.parquet`, 47 symbols |
+| **Ratio-adjusted (`propadj`) prices** | **yes, and this table originally omitted them** | not a stored file: derived on read by `cotdata.prices._ratio_adjust` from `unadj` + `backadj`. **This is the series rung 4 needs**, and leaving it off this table is part of how the error below survived |
 | Roll calendar | **no** | not in the specs table, and there is no per-expiry source |
 | First notice date | **no** | same |
 | Daily price limits | **no** | spec §3 says "manually maintained", and nothing maintains it |
@@ -154,20 +179,61 @@ corrupts the entire history a backtest is evaluated over.
 > position genuinely had negative notional. What identifies the artifact is that it reports
 > a negative price on days the market was positive.
 
-Meanwhile volatility must come from the **back-adjusted** series, because that is the one
-with correct returns; unadjusted returns carry fake roll gaps.
+Meanwhile volatility must come from the **ratio-adjusted (`propadj`)** series, because that is
+the one with correct percentage returns; unadjusted returns carry fake roll gaps.
 
-> **Nothing in the stack currently ships this error** (verified 2026-07-30). Every one of
-> cotmetrics' three price reads is `backadj`, but none of them multiplies a historical
-> price by a quantity: two consume returns or bar shape, where back-adjusted is correct,
-> and the third reads only the latest close, where the two series are equal by
-> construction. Step 2 is the first thing in the stack that needs a *level* in currency,
-> so this is a trap to avoid rather than a bug to go and fix. See "What cotmetrics does and
-> does not give us" below.
+> **Corrected 2026-08-02.** This paragraph said **back-adjusted**, in every place it appears
+> in this document, and that is wrong. The half of the reasoning that is right is why it
+> survived: unadjusted returns really do carry fake roll gaps, so `unadj` is genuinely
+> unusable here, and `backadj` looks like the only remaining option. It is not, and `propadj`
+> is.
+>
+> **Additive back-adjustment preserves absolute price CHANGES, not percentage returns.**
+> Shifting a whole series by a constant leaves differences intact and makes every ratio
+> meaningless, so `pct_change()` on `backadj` divides a real change by a fabricated level.
+> Ratio adjustment scales each segment by a positive factor instead, which is exactly what
+> leaves percent returns correct.
+>
+> Measured, comparing annualised volatility from `backadj` against `propadj`:
+>
+> | market | `backadj` vol / `propadj` vol |
+> |---|---|
+> | soybeans | **201x** too high |
+> | 10-year notes | **182x** too high |
+> | milk (Class III) | 1.1e13x too high |
+> | **gold** | **0.47x**, too LOW by half |
+>
+> Gold is why `crowdmon.futures.riskunits` raises rather than warns. The huge ratios are
+> self-evidently broken and would be caught by any sanity check; 0.47x never goes negative,
+> never spikes, and passes every implausibility screen while being wrong by half.
+>
+> Module spec §5.1 had this right all along, "ratio-adjusted, not difference-adjusted, so
+> returns are correct". The error originated in this document and in crowdmon's README, not
+> in the spec. Reproducer: `crowdmon/docs/analysis/reproduce.py` section 8.
+
+> **Nothing in the stack currently ships this error** (verified 2026-07-30, **and the
+> verification survives the correction above**, though its wording did not). Every one of
+> cotmetrics' three price reads is `backadj`, but none of them multiplies a historical price
+> by a quantity **and none of them takes a percentage return**: two consume **bar shape**,
+> where back-adjustment is correct because a constant offset leaves within-bar ranges and
+> wick ratios exactly intact, and the third reads only the latest close, where all three
+> series are equal by construction. Step 2 is the first thing in the stack that needs a
+> *level* in currency, and rung 4 is the first that needs a *percentage return*. See "What
+> cotmetrics does and does not give us" below.
+>
+> The original wording said two reads "consume returns or bar shape, where back-adjusted is
+> correct". Under the correction that phrase would assert something false. The conclusion is
+> unaffected because the table below shows neither read is a return.
 
 So `net_notional × σ_daily` draws its two factors from two different price series. That is
 not an implementation detail to discover in review, it is the central correctness fact of
 step 2, and it should be pinned by a test that fails if either leg is swapped.
+
+> **Built as specified, and the test caught the error in this document.** `notional` requires
+> `unadj` and `riskunits` requires `propadj`, and both **raise** rather than warn. The live
+> tests that pin them are what surfaced the `backadj` mistake corrected above, which is the
+> strongest argument this section makes for itself: the recommendation was right even though
+> one of the two series it named was wrong.
 
 ### 3. The COT side now has point-in-time discipline; the price side does not
 
@@ -259,7 +325,8 @@ crowdmon_futures/
     riskunits.py              x sigma_daily from BACK-ADJUSTED returns
   tests/
     test_boundaries.py        crowdmon imports cotdata/marketdata; neither imports crowdmon
-    test_price_series_split.py   fails if notional uses backadj or sigma uses unadj
+    test_price_series_split.py   fails if notional uses anything but unadj,
+                                 or sigma anything but propadj  [corrected 2026-08-02]
 ```
 
 ### The normalisation ladder, rung by rung
@@ -269,7 +336,7 @@ crowdmon_futures/
 | 1. net contracts | COT only | available. Spec says do not report it, and it is right |
 | 2. net / open interest | COT only | available, but the denominator is missing spreading (see below) |
 | 3. net notional USD | Point Value + unadjusted price | available for all 42 `deploy` markets |
-| 4. vol-scaled notional | σ from back-adjusted returns | available for all 42 `deploy` markets. The default for every cross-market comparison |
+| 4. vol-scaled notional | σ from **ratio-adjusted (`propadj`)** returns *[corrected 2026-08-02, this said back-adjusted]* | available for all 42 `deploy` markets. The default for every cross-market comparison |
 
 Rung 2 carries a defect found while building §6.4: `NonComm_Positions_Spread_All` is not
 captured by `providers/cftc.py`, so open interest includes spreading contracts the numerator
@@ -333,8 +400,18 @@ code resolver because it never holds a market code, passing internal symbols to 
 and `get_prices` and letting cotdata resolve privately. Step 2 writes both fresh, and
 becomes the first consumer of `cotdata.registry`.
 
-The one real trap remains. Notional must come from the unadjusted series and volatility
-from the back-adjusted one, and getting that backwards is wrong by nearly 300% in 2002
-while being exactly right today. Nothing currently ships that error, so it is a thing to
-avoid rather than a thing to repair, and it should be pinned by a test rather than a
+The one real trap remains. Notional must come from the **unadjusted** series and volatility
+from the **ratio-adjusted (`propadj`)** one, and getting notional backwards is wrong by nearly
+300% in 2002 while being exactly right today. Nothing currently ships that error, so it is a
+thing to avoid rather than a thing to repair, and it should be pinned by a test rather than a
 comment.
+
+> **Corrected 2026-08-02, and this sentence is the reason the correction was worth doing.**
+> It named `backadj` for volatility, it called itself "the one real trap", and it is the last
+> line of the document, so a reader who took one thing away took the wrong one. Both legs are
+> now pinned by a raising test in `crowdmon.futures`.
+>
+> There turned out to be **two** traps rather than one, and they fail differently. The
+> notional error is loud in the far past and exactly zero today, so it hides from a spot
+> check. The volatility error is silent in both directions: 201x for soybeans is obvious once
+> looked at, and **0.47x for gold is not**. A test is the only thing that catches the second.
