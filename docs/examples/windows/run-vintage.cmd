@@ -1,11 +1,23 @@
 @echo off
 REM cotdata VINTAGE capture wrapper for Windows Task Scheduler.
-REM Copy this file into your scheduler folder and overwrite the two markers below.
-REM Do NOT put angle brackets in a .cmd file: cmd reads them as redirection and
-REM the file fails with "The syntax of the command is incorrect" even on comment
-REM lines, which is why these are plain-text markers you replace.
-REM   REPLACE_WITH_STORE_PATH = your data store   e.g. C:\Users\you\cotdata_store
-REM   REPLACE_WITH_VENV_PATH  = your cotdata venv  e.g. C:\Users\you\code\cotdata\.venv
+REM
+REM ============================================================================
+REM  EDIT EXACTLY TWO LINES, just below `setlocal`. Nothing else in this file.
+REM ============================================================================
+REM
+REM An earlier version of this wrapper repeated the two paths inline, NINETEEN times
+REM between them. On 2026-07-31 that cost a whole week of capture: the task reported
+REM success at 17:00, wrote nothing anywhere, and the cause was a single unreplaced marker
+REM in the preflight block while the other seventeen were correct. Both executables existed
+REM at exactly the path the operator expected, which is what made it so hard to see.
+REM
+REM So the paths are now set ONCE into %VENV% and %COTDATA_STORE%, and a guard below
+REM refuses to run if either was left as its marker. A find-and-replace that misses one
+REM occurrence is not an operator mistake worth diagnosing; it is a file worth fixing.
+REM
+REM Do NOT put angle brackets in a .cmd file: cmd reads them as redirection and the file
+REM fails with "The syntax of the command is incorrect" even on comment lines, which is why
+REM these are plain-text markers you replace rather than bracketed placeholders.
 REM
 REM WHY THIS RUNS ON THE PRODUCER, not on a replica: vintage capture fetches from
 REM CFTC, so it is a producer action and belongs beside the COT half. It also has to
@@ -23,17 +35,19 @@ REM   - observed_at tightens from a 7-day bound to a 1-day bound, which directly
 REM     improves release-date quality (observed is the top of the precedence order)
 REM ~17:00 ET puts capture within about ninety minutes of the 15:30 ET publication.
 REM
+REM Give the trigger a REPEAT-UNTIL-SUCCESS, the same as the COT release task. A daily
+REM trigger with no repeat means one failure costs a day; with a repeat it costs minutes.
+REM
 REM ORDERING: run this AFTER run-cot.cmd, then chain the sync scripts after it, so a
 REM single sync carries both the current-state update and the new vintage snapshot.
+REM
 REM NOTIFICATION: Task Scheduler discards stdout, so everything below is ALSO appended to
 REM a log file, and `ingest` exits NON-ZERO whenever it records a revision or spots a
 REM closed-year restatement. That is a notification, not a failure -- the data is already
-REM committed.
-REM
-REM Task Scheduler's own "Send an e-mail" / "Display a message" actions are DEPRECATED and
-REM non-functional on Windows 8 / Server 2012 and later, so a non-zero exit on its own only
-REM shows up passively as Last Run Result 0x1 in the Task Scheduler UI. This script therefore
-REM does its own notifying: on any run that records a revision it writes a MARKER FILE,
+REM committed. Task Scheduler's own "Send an e-mail" / "Display a message" actions are
+REM DEPRECATED and non-functional on Windows 8 / Server 2012 and later, so a non-zero exit
+REM shows up only passively as Last Run Result. This script therefore does its own
+REM notifying: on any run that records a revision it writes a MARKER FILE,
 REM
 REM     <store>\vintage\REVISIONS_<yyyy-MM-dd>.txt
 REM
@@ -43,11 +57,21 @@ REM
 REM IF THE TASK REPORTS SUCCESS BUT NOTHING APPEARS, read these two, in this order:
 REM   1. vintage-preflight.log, beside this script. Written when a path check fails, which
 REM      is the one failure that produces no other trace anywhere.
-REM   2. Last Run Result on the task itself: 0x3 = store path wrong, 0x2331 (9009) = the
-REM      venv has no cotdata-vintage.exe. Both mean this script exited before doing
-REM      anything, and Task Scheduler still calls that a successful run.
+REM   2. Last Run Result on the task itself:
+REM        0x2  a path marker was never replaced
+REM        0x3  the store path does not exist
+REM        0x2331 (9009)  the venv has no cotdata-vintage.exe / cotdata-schedule.exe
+REM      All three mean this script exited before doing anything, and Task Scheduler still
+REM      calls that a successful run.
 setlocal
+
+REM ==== THE TWO LINES TO EDIT =================================================
 set COTDATA_STORE=REPLACE_WITH_STORE_PATH
+set VENV=REPLACE_WITH_VENV_PATH
+REM   COTDATA_STORE = your data store   e.g. C:\Users\you\cotdata_store
+REM   VENV          = your cotdata venv  e.g. C:\Users\you\code\cotdata\.venv
+REM   No trailing backslash on either. `where cotdata-vintage` prints VENV\Scripts\...
+REM ============================================================================
 
 REM PREFLIGHT LOG, deliberately beside THIS SCRIPT rather than inside the store.
 REM
@@ -63,40 +87,63 @@ REM wrong store path, and a log written under a wrong path is equally lost. %~dp
 REM folder this .cmd sits in: it exists by definition, and it is where you already are.
 set PREFLIGHT_LOG=%~dp0vintage-preflight.log
 
-set VINTAGE_LOG=REPLACE_WITH_STORE_PATH\vintage\run.log
-set VINTAGE_RUNOUT=REPLACE_WITH_STORE_PATH\vintage\.last_ingest.tmp
+set VINTAGE_LOG=%COTDATA_STORE%\vintage\run.log
+set VINTAGE_RUNOUT=%COTDATA_STORE%\vintage\.last_ingest.tmp
 
 REM Locale-independent date. %DATE% is formatted per the machine's regional settings, so it
 REM is not safe in a filename; PowerShell gives a stable yyyy-MM-dd on any box.
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set TODAY=%%i
-set VINTAGE_MARKER=REPLACE_WITH_STORE_PATH\vintage\REVISIONS_%TODAY%.txt
+set VINTAGE_MARKER=%COTDATA_STORE%\vintage\REVISIONS_%TODAY%.txt
 
 REM ---- Preflight -------------------------------------------------------------------
-REM Runs BEFORE the mkdir below. A half-edited copy of this file would otherwise create a
-REM stray folder literally named "REPLACE_WITH_STORE_PATH\vintage" in the task's working
-REM directory, write a whole capture into it, and sync nothing, which is indistinguishable
-REM from a task that ran and did nothing.
-REM
-REM cotdata-vintage and cotdata-schedule are also NEWER than the rest of the CLI, so a venv
-REM installed before they existed will not have them and every step below would fail with
-REM an unhelpful "cannot find path". Check once, up front, and say exactly what to do.
-if not exist "REPLACE_WITH_STORE_PATH" (
+REM Runs BEFORE the mkdir below. A half-edited copy would otherwise create a stray folder
+REM literally named "REPLACE_WITH_STORE_PATH\vintage" in the task's working directory,
+REM write a whole capture into it, and sync nothing, which is indistinguishable from a task
+REM that ran and did nothing.
+REM Matched on the PREFIX "REPLACE_WITH" rather than on either full marker, and that is
+REM load-bearing rather than stylistic. The obvious way to write this guard is
+REM `if "%COTDATA_STORE%"=="REPLACE_WITH_STORE_PATH"`, but then a global find-and-replace
+REM of the marker (the single most likely way anyone edits this file) rewrites the guard's
+REM own comparison string too, the test becomes "does the path equal itself", and it fires
+REM on every run. A guard destroyed by the exact operation it exists to protect is worse
+REM than no guard. The prefix is not itself a marker, so nothing rewrites it.
+echo %COTDATA_STORE%| findstr /b /c:"REPLACE_WITH" >nul
+if not errorlevel 1 (
   echo [%DATE% %TIME%] PREFLIGHT FAILED>> "%PREFLIGHT_LOG%"
-  echo   store path does not exist: REPLACE_WITH_STORE_PATH>> "%PREFLIGHT_LOG%"
-  echo   Did you replace EVERY REPLACE_WITH_STORE_PATH in this file? There are several.>> "%PREFLIGHT_LOG%"
+  echo   COTDATA_STORE was never edited: it is still a placeholder.>> "%PREFLIGHT_LOG%"
+  echo   Edit the two marked lines near the top of "%~f0".>> "%PREFLIGHT_LOG%"
+  echo PREFLIGHT FAILED: COTDATA_STORE not set. See "%PREFLIGHT_LOG%"
+  exit /b 2
+)
+echo %VENV%| findstr /b /c:"REPLACE_WITH" >nul
+if not errorlevel 1 (
+  echo [%DATE% %TIME%] PREFLIGHT FAILED>> "%PREFLIGHT_LOG%"
+  echo   VENV was never edited: it is still a placeholder.>> "%PREFLIGHT_LOG%"
+  echo   Run `where cotdata-vintage` in your activated venv; VENV is that path>> "%PREFLIGHT_LOG%"
+  echo   minus the trailing \Scripts\cotdata-vintage.exe.>> "%PREFLIGHT_LOG%"
+  echo PREFLIGHT FAILED: VENV not set. See "%PREFLIGHT_LOG%"
+  exit /b 2
+)
+if not exist "%COTDATA_STORE%" (
+  echo [%DATE% %TIME%] PREFLIGHT FAILED>> "%PREFLIGHT_LOG%"
+  echo   store path does not exist: %COTDATA_STORE%>> "%PREFLIGHT_LOG%"
   echo PREFLIGHT FAILED: store path does not exist. See "%PREFLIGHT_LOG%"
   exit /b 3
 )
-if not exist "REPLACE_WITH_VENV_PATH\Scripts\cotdata-vintage.exe" (
+REM cotdata-vintage and cotdata-schedule are NEWER than the rest of the CLI, so a venv
+REM installed before they existed has cotdata-update but not these two, and every step
+REM below would fail with an unhelpful "cannot find path". Both are checked: they are
+REM separate console entry points, so one can exist without the other.
+if not exist "%VENV%\Scripts\cotdata-vintage.exe" (
   echo [%DATE% %TIME%] PREFLIGHT FAILED>> "%PREFLIGHT_LOG%"
-  echo   cotdata-vintage.exe not found in REPLACE_WITH_VENV_PATH\Scripts\>> "%PREFLIGHT_LOG%"
+  echo   cotdata-vintage.exe not found in %VENV%\Scripts\>> "%PREFLIGHT_LOG%"
   echo   fix: cd to your cotdata checkout, then: git pull ^&^& .venv\Scripts\pip install -e .>> "%PREFLIGHT_LOG%"
   echo PREFLIGHT FAILED: cotdata-vintage.exe not found. See "%PREFLIGHT_LOG%"
   exit /b 9009
 )
-if not exist "REPLACE_WITH_VENV_PATH\Scripts\cotdata-schedule.exe" (
+if not exist "%VENV%\Scripts\cotdata-schedule.exe" (
   echo [%DATE% %TIME%] PREFLIGHT FAILED>> "%PREFLIGHT_LOG%"
-  echo   cotdata-schedule.exe not found in REPLACE_WITH_VENV_PATH\Scripts\>> "%PREFLIGHT_LOG%"
+  echo   cotdata-schedule.exe not found in %VENV%\Scripts\>> "%PREFLIGHT_LOG%"
   echo   fix: cd to your cotdata checkout, then: git pull ^&^& .venv\Scripts\pip install -e .>> "%PREFLIGHT_LOG%"
   echo PREFLIGHT FAILED: cotdata-schedule.exe not found. See "%PREFLIGHT_LOG%"
   exit /b 9009
@@ -106,7 +153,7 @@ REM Preflight passed, so the store path is real and this dir can be created safe
 REM opens a >> target BEFORE running its command, so without this the first redirect below
 REM fails with "cannot find the path specified", the program never runs, and the task exits
 REM having created nothing.
-if not exist "REPLACE_WITH_STORE_PATH\vintage" mkdir "REPLACE_WITH_STORE_PATH\vintage"
+if not exist "%COTDATA_STORE%\vintage" mkdir "%COTDATA_STORE%\vintage"
 REM ----------------------------------------------------------------------------------
 REM Optional: identify yourself to CFTC. Defaults to the repo URL if unset.
 REM set COTDATA_USER_AGENT=cotdata-vintage/0.1 (+contact you@example.com)
@@ -121,9 +168,13 @@ REM "unchanged bytes (deduped)". Anything else is the retroactive-restatement si
 REM raises an alert that `ingest` below turns into a non-zero exit and a marker file.
 REM Costs about 7 MB of transfer per week (the other six days 304) and nothing on disk.
 REM Pass --no-prior-year to turn it off.
+REM
+REM The FIRST run after upgrading takes minutes rather than seconds and reports roughly
+REM 140,000 observations, because the prior year has never been captured. That is a one-off.
+REM
 REM The weekly static is fetched for its HTTP Last-Modified, which is a true
 REM publication timestamp rather than a polling-interval approximation.
-"REPLACE_WITH_VENV_PATH\Scripts\cotdata-vintage.exe" fetch >> "%VINTAGE_LOG%" 2>&1
+"%VENV%\Scripts\cotdata-vintage.exe" fetch >> "%VINTAGE_LOG%" 2>&1
 if %ERRORLEVEL% NEQ 0 (
   echo vintage fetch FAILED with code %ERRORLEVEL%
   exit /b %ERRORLEVEL%
@@ -133,7 +184,7 @@ REM Parse whatever was just retained into change-only observations + revisions.
 REM Safe to re-run: re-ingesting identical bytes writes zero rows.
 REM Captured to its OWN file first, so the marker can hold just THIS run's output rather
 REM than the whole appended history, then folded into the running log.
-"REPLACE_WITH_VENV_PATH\Scripts\cotdata-vintage.exe" ingest --pending > "%VINTAGE_RUNOUT%" 2>&1
+"%VENV%\Scripts\cotdata-vintage.exe" ingest --pending > "%VINTAGE_RUNOUT%" 2>&1
 REM NON-ZERO HERE MEANS "revisions were recorded", not "the run broke". The data is
 REM already written. Remember it, keep going, and re-raise at the end so the scheduler
 REM shows the task as attention-needed.
@@ -156,13 +207,13 @@ REM Resolve release dates. `published` reads the true publication timestamp out 
 REM weekly static just captured (its HTTP Last-Modified), which beats a poll-derived
 REM `observed` bound; backfill then applies the precedence across all observations.
 REM Both are idempotent, so re-running is a cheap no-op.
-"REPLACE_WITH_VENV_PATH\Scripts\cotdata-schedule.exe" published >> "%VINTAGE_LOG%" 2>&1
+"%VENV%\Scripts\cotdata-schedule.exe" published >> "%VINTAGE_LOG%" 2>&1
 if %ERRORLEVEL% NEQ 0 (
   echo schedule published FAILED with code %ERRORLEVEL%
   exit /b %ERRORLEVEL%
 )
 
-"REPLACE_WITH_VENV_PATH\Scripts\cotdata-schedule.exe" backfill >> "%VINTAGE_LOG%" 2>&1
+"%VENV%\Scripts\cotdata-schedule.exe" backfill >> "%VINTAGE_LOG%" 2>&1
 if %ERRORLEVEL% NEQ 0 (
   echo schedule backfill FAILED with code %ERRORLEVEL%
   exit /b %ERRORLEVEL%
