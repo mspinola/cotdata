@@ -133,8 +133,26 @@ has a property that makes it dangerous:
 **The error is exactly zero at the present date and grows monotonically backwards**, because
 back-adjustment anchors on the most recent contract. So a notional computed from the
 back-adjusted series passes every spot check anyone would actually run, and silently
-corrupts the entire history a backtest is evaluated over. Crude's back-adjusted series even
-reaches **-27.52**, which is not a price.
+corrupts the entire history a backtest is evaluated over.
+
+> **Corrected 2026-08-01**, by a test failing against real data. An earlier version of this
+> paragraph said crude's back-adjusted series "reaches -27.52, which is not a price",
+> attributing it to additive back-adjustment accumulating roll gaps below zero over
+> decades. The number is right, the explanation was wrong, and the real one is a better
+> argument.
+>
+> Both series bottom in **April 2020**. What happens is that the single enormous roll gap
+> out of the May 2020 contract, which settled at **-37.63**, is propagated backwards
+> through every earlier bar. The sharpest row in the store is **2020-04-21**: crude traded
+> at **+11.57**, a perfectly ordinary positive price, while the back-adjusted bar for the
+> same day reads **-27.52**. Crude was genuinely below zero on **exactly one day**; the
+> back-adjusted series is below zero on **64**.
+>
+> A second claim in the same vein was also wrong: the unadjusted series *can* be negative,
+> because 2020-04-20 really happened. So a negative price is not by itself evidence of the
+> wrong series, and normalisation code must not clip or reject one. On that day a LONG
+> position genuinely had negative notional. What identifies the artifact is that it reports
+> a negative price on days the market was positive.
 
 Meanwhile volatility must come from the **back-adjusted** series, because that is the one
 with correct returns; unadjusted returns carry fake roll gaps.
