@@ -408,3 +408,46 @@ def test_a_run_where_every_snapshot_failed_does_not_report_success(store_env):
          "retrieved_at": "2026-07-31T00:00:00Z"} for i in range(3)]})
     with _pytest.raises(SystemExit, match="3 snapshot"):
         vintage_cli.main(["ingest", "--pending"])
+
+
+def test_retry_also_recovers_skipped_snapshots(store_env):
+    """`skipped` means no canonicaliser existed for that report type at ingest time, and
+    it was as terminal as `failed`: --pending selects neither and nothing else wrote the
+    field back. The design notes promise that adding a canonicaliser later just means
+    re-marking these pending and re-running, and there was no way to do the re-marking.
+
+    The live case is the weekly static: every retained copy of it is `skipped`, so all of
+    them would have been stranded the day it gets a canonicaliser."""
+    import pytest as _pytest
+
+    from cotdata import vintage, vintage_cli
+    vintage._write_manifest({"schema_version": 1, "snapshots": [
+        {"snapshot_id": "w1", "report_type": "legacy", "source_kind": "weekly_static",
+         "local_path": "y", "parse_status": "pending",
+         "retrieved_at": "2026-07-31T00:00:00Z"},
+        {"snapshot_id": "d1", "report_type": "legacy", "source_kind": "annual_zip",
+         "local_path": "gone.zip", "parse_status": "pending",
+         "retrieved_at": "2026-07-31T00:00:00Z"},
+    ]})
+    with _pytest.raises(SystemExit):          # w1 skips, d1 fails
+        vintage_cli.main(["ingest", "--pending"])
+    after = {s["snapshot_id"]: s["parse_status"] for s in vintage.read_snapshots()}
+    assert after == {"w1": "skipped", "d1": "failed"}
+
+    assert vintage_cli.main(["ingest", "--pending"]) == 0      # both terminal
+
+    with _pytest.raises(SystemExit):                           # --retry reaches both
+        vintage_cli.main(["ingest", "--retry"])
+    again = {s["snapshot_id"]: s["parse_status"] for s in vintage.read_snapshots()}
+    assert again == {"w1": "skipped", "d1": "failed"}          # re-skipping is quiet+safe
+
+
+def test_retry_failed_still_works_as_an_alias(store_env):
+    """It shipped earlier the same day under the narrower name; the widened behaviour is a
+    superset, so nothing already written breaks."""
+    from cotdata import vintage, vintage_cli
+    vintage._write_manifest({"schema_version": 1, "snapshots": [
+        {"snapshot_id": "w1", "report_type": "legacy", "source_kind": "weekly_static",
+         "local_path": "y", "parse_status": "skipped",
+         "retrieved_at": "2026-07-31T00:00:00Z"}]})
+    assert vintage_cli.main(["ingest", "--retry-failed"]) == 0
