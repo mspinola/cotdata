@@ -10,6 +10,7 @@ Subcommands (handoff §7, adapted to the repo's hyphenated entry-point style):
     cotdata-schedule backfill
 """
 import argparse
+from collections import Counter
 
 from . import config
 
@@ -88,18 +89,32 @@ def _cmd_ingest(args) -> int:
     snaps = vintage.read_snapshots()
     if args.snapshot:
         snaps = [s for s in snaps if s.get("snapshot_id") == args.snapshot]
-    elif args.retry_failed:
-        # The ONLY route back from parse_status="failed", which is otherwise terminal:
-        # --pending does not select it and nothing else ever writes the field back. Two
-        # separate defects have reached that state en masse (a stale lock, and a path that
-        # would not resolve), and in both cases the entire backlog was stranded with no
-        # command able to recover it. Raw bytes are retained, so a retry is always safe.
-        for s_ in [x for x in snaps if x.get("parse_status") == "failed"]:
+    elif args.retry:
+        # The ONLY route back from the two terminal states, since --pending selects
+        # neither and nothing else ever writes the field back:
+        #
+        #   failed   the parse raised. Retry after fixing the cause. Two separate defects
+        #            have driven whole backlogs here (a stale lock, and a path that would
+        #            not resolve), each time with no command able to recover them.
+        #   skipped  no canonicaliser existed for that report type at ingest time. This is
+        #            the one that matters going forward: the design notes promise that
+        #            adding a canonicaliser later just means re-marking these pending and
+        #            re-running, and until now there was no way to do the re-marking. The
+        #            weekly static is the live case, because every retained copy of it is
+        #            skipped and would be stranded the day it gets a canonicaliser.
+        #
+        # Raw bytes are retained in both states, so a retry is always safe. Re-skipping is
+        # harmless and quiet: a source that still has no canonicaliser simply drains again.
+        stuck = [x for x in snaps if x.get("parse_status") in ("failed", "skipped")]
+        by_state = Counter(x.get("parse_status") for x in stuck)
+        for s_ in stuck:
             vintage.update_snapshot(s_["snapshot_id"], parse_status="pending",
                                     parse_error=None)
-        snaps = vintage.read_snapshots()
-        snaps = [x for x in snaps if x.get("parse_status") == "pending"]
-        print(f"vintage ingest: reset {len(snaps)} failed snapshot(s) to pending.")
+        snaps = [x for x in vintage.read_snapshots()
+                 if x.get("parse_status") == "pending"]
+        detail = ", ".join(f"{n} {state}" for state, n in sorted(by_state.items()))
+        print(f"vintage ingest: reset {len(stuck)} snapshot(s) to pending"
+              + (f" ({detail})." if detail else "."))
     elif not args.all_snapshots:
         # Default to pending even with no flag. A bare `ingest` used to select EVERY
         # snapshot ever recorded and re-ingest each one, which is not a no-op: replaying
@@ -184,7 +199,7 @@ def _cmd_ingest(args) -> int:
     if n_failed:
         parts.append(f"{n_failed} snapshot(s) FAILED to parse (raw bytes retained, so "
                      f"nothing is lost: fix the cause and re-run with "
-                     f"'cotdata-vintage ingest --retry-failed', which is the only way back "
+                     f"'cotdata-vintage ingest --retry', which is the only way back "
                      f"since 'failed' is not 'pending')")
     raise SystemExit(
         "cotdata-vintage: " + "; ".join(parts)
@@ -313,9 +328,13 @@ def main(argv=None) -> int:
     g.add_argument("--snapshot", default=None, help="Ingest one snapshot id.")
     g.add_argument("--pending", action="store_true",
                    help="Ingest all parse_status=pending. This is also the default.")
-    g.add_argument("--retry-failed", action="store_true", dest="retry_failed",
-                   help="Reset parse_status=failed snapshots to pending and re-ingest "
-                        "them. The only way back from a failed parse.")
+    # --retry-failed kept as an alias: it shipped earlier the same day under that name,
+    # and the widened behaviour is a superset, so nothing anyone already wrote breaks.
+    g.add_argument("--retry", "--retry-failed", action="store_true", dest="retry",
+                   help="Reset snapshots stuck in parse_status=failed OR =skipped back to "
+                        "pending and re-ingest them. The only way back from either: "
+                        "--pending selects neither. Use after fixing a parse failure, or "
+                        "after adding a canonicaliser for a report type that was skipped.")
     g.add_argument("--all-snapshots", action="store_true", dest="all_snapshots",
                    help="Replay EVERY recorded snapshot, including already-ingested ones. "
                         "Only for rebuilding a store from retained raw bytes.")

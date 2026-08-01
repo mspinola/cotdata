@@ -581,7 +581,7 @@ Four further findings, all fixed:
   Scheduler while the store gained nothing, with `failed` being terminal. Now non-zero, in
   a single combined message: an earlier draft raised on the failure first and silently
   swallowed a restatement suspect in the same run, which is the more serious of the two.
-  **`ingest --retry-failed`** is the way back, and it is the only one: nothing else ever
+  **`ingest --retry`** is the way back, and it is the only one: nothing else ever
   wrote `parse_status` back to `pending`, and two separate defects had stranded whole
   backlogs there.
 - **Disaggregated and TFF were fetched from 2006**, but cftc.gov serves 404 for
