@@ -21,7 +21,22 @@ def _ratio_adjust(symbol: str) -> pd.DataFrame:
     accumulation of roll gaps drives ~47% of back-adjusted closes ≤ 0 (down to
     −9.83). A close-based stop, an R-multiple, or a % return is meaningless on a
     non-positive series, so CMR cannot use DC's ``backadj`` at all. A ratio-adjusted
-    series preserves percentage returns and stays strictly positive.
+    series preserves percentage returns.
+
+    **It does NOT "stay strictly positive", which this docstring used to claim.**
+    Ratio adjustment scales each segment by a POSITIVE factor, so it preserves the
+    sign of the unadjusted series rather than imposing one: where the underlying
+    market traded below zero, so does the output. WTI settled at −37.63 on
+    2020-04-20 and CL's ``propadj`` close that day is −24.11.
+
+    That is one bar in the whole store. Measured across all 47 symbols, ``propadj``
+    has exactly ONE non-positive close anywhere (0.009% of crude's 10,882 bars),
+    against ``backadj``'s 52.3% for ZS and 41.2% for DC. So what this function
+    actually delivers is **three orders of magnitude fewer non-positive closes**,
+    not none, and a consumer computing returns has to handle the sign change on that
+    one day rather than assume it away. Found by a downstream volatility module that
+    raised on any non-positive close and so refused to produce a number for crude at
+    all, across its entire 43-year history, over one real trading day.
 
     This is a consumer-side derivation (no network, no Windows/norgatedata), in the
     same spirit as the reconstructed-volume view: the transform lives in the data
@@ -102,10 +117,14 @@ def get_prices(symbol: str, adjustment: str = "backadj",
       'unadj'   : raw front-month prices (absolute price / point-value sizing).
       'propadj' : proportional (ratio) back-adjustment, DERIVED on read from
                   unadj + backadj (see `_ratio_adjust`). Preserves daily *percent*
-                  returns and stays strictly positive — use it for low-priced,
+                  returns. The series to use for VOLATILITY, and for low-priced,
                   long-history contracts (e.g. DC / Class III Milk) where additive
                   back-adjustment accumulates roll gaps below zero and breaks
-                  price-based stops and R-multiples.
+                  price-based stops and R-multiples. Note it is not *strictly*
+                  positive (this line used to say it was): ratio adjustment scales
+                  by a positive factor, so it preserves the underlying sign, and
+                  CL 2020-04-20 is −24.11 because WTI really settled at −37.63.
+                  One bar in the whole store; see `_ratio_adjust`.
 
     volume: which series the `Volume` column carries —
       'front'         : continuous front-month volume as Norgate reports it
