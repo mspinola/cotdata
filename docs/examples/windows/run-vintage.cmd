@@ -39,8 +39,30 @@ REM     <store>\vintage\REVISIONS_<yyyy-MM-dd>.txt
 REM
 REM holding that run's output. It lives inside vintage\, so the existing robocopy /MIR push
 REM carries it to the Mac and the alert shows up on the machine you actually work on.
+REM
+REM IF THE TASK REPORTS SUCCESS BUT NOTHING APPEARS, read these two, in this order:
+REM   1. vintage-preflight.log, beside this script. Written when a path check fails, which
+REM      is the one failure that produces no other trace anywhere.
+REM   2. Last Run Result on the task itself: 0x3 = store path wrong, 0x2331 (9009) = the
+REM      venv has no cotdata-vintage.exe. Both mean this script exited before doing
+REM      anything, and Task Scheduler still calls that a successful run.
 setlocal
 set COTDATA_STORE=REPLACE_WITH_STORE_PATH
+
+REM PREFLIGHT LOG, deliberately beside THIS SCRIPT rather than inside the store.
+REM
+REM Learned the hard way 2026-07-31: a preflight failure echoed only to stdout is INVISIBLE.
+REM Task Scheduler discards stdout, so the run does nothing, writes nothing, and still
+REM reports success. History shows a clean Task Started / Action completed / Task completed,
+REM and the only trace is the Last Run Result code, which nobody reads because the task
+REM looks fine. The check fired correctly and its explanation went to the one place that
+REM cannot be read.
+REM
+REM It must NOT live inside the store, because the likeliest thing preflight catches IS a
+REM wrong store path, and a log written under a wrong path is equally lost. %~dp0 is the
+REM folder this .cmd sits in: it exists by definition, and it is where you already are.
+set PREFLIGHT_LOG=%~dp0vintage-preflight.log
+
 set VINTAGE_LOG=REPLACE_WITH_STORE_PATH\vintage\run.log
 set VINTAGE_RUNOUT=REPLACE_WITH_STORE_PATH\vintage\.last_ingest.tmp
 
@@ -49,33 +71,42 @@ REM is not safe in a filename; PowerShell gives a stable yyyy-MM-dd on any box.
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set TODAY=%%i
 set VINTAGE_MARKER=REPLACE_WITH_STORE_PATH\vintage\REVISIONS_%TODAY%.txt
 
-REM The vintage dir must exist BEFORE the first redirect below. cmd opens a >> target
-REM before running the command, so without this the very first line fails with "The system
-REM cannot find the path specified", the program never runs, and the task exits having
-REM created nothing -- which looks identical to "the task never fired".
-if not exist "REPLACE_WITH_STORE_PATH\vintage" mkdir "REPLACE_WITH_STORE_PATH\vintage"
-
 REM ---- Preflight -------------------------------------------------------------------
-REM cotdata-vintage and cotdata-schedule are NEWER than the rest of the CLI, so a venv
+REM Runs BEFORE the mkdir below. A half-edited copy of this file would otherwise create a
+REM stray folder literally named "REPLACE_WITH_STORE_PATH\vintage" in the task's working
+REM directory, write a whole capture into it, and sync nothing, which is indistinguishable
+REM from a task that ran and did nothing.
+REM
+REM cotdata-vintage and cotdata-schedule are also NEWER than the rest of the CLI, so a venv
 REM installed before they existed will not have them and every step below would fail with
 REM an unhelpful "cannot find path". Check once, up front, and say exactly what to do.
+if not exist "REPLACE_WITH_STORE_PATH" (
+  echo [%DATE% %TIME%] PREFLIGHT FAILED>> "%PREFLIGHT_LOG%"
+  echo   store path does not exist: REPLACE_WITH_STORE_PATH>> "%PREFLIGHT_LOG%"
+  echo   Did you replace EVERY REPLACE_WITH_STORE_PATH in this file? There are several.>> "%PREFLIGHT_LOG%"
+  echo PREFLIGHT FAILED: store path does not exist. See "%PREFLIGHT_LOG%"
+  exit /b 3
+)
 if not exist "REPLACE_WITH_VENV_PATH\Scripts\cotdata-vintage.exe" (
-  echo PREFLIGHT FAILED: cotdata-vintage.exe not found.
-  echo   looked in: REPLACE_WITH_VENV_PATH\Scripts\
-  echo   fix:       cd to your cotdata checkout, then:  git pull ^&^& .venv\Scripts\pip install -e .
+  echo [%DATE% %TIME%] PREFLIGHT FAILED>> "%PREFLIGHT_LOG%"
+  echo   cotdata-vintage.exe not found in REPLACE_WITH_VENV_PATH\Scripts\>> "%PREFLIGHT_LOG%"
+  echo   fix: cd to your cotdata checkout, then: git pull ^&^& .venv\Scripts\pip install -e .>> "%PREFLIGHT_LOG%"
+  echo PREFLIGHT FAILED: cotdata-vintage.exe not found. See "%PREFLIGHT_LOG%"
   exit /b 9009
 )
 if not exist "REPLACE_WITH_VENV_PATH\Scripts\cotdata-schedule.exe" (
-  echo PREFLIGHT FAILED: cotdata-schedule.exe not found.
-  echo   looked in: REPLACE_WITH_VENV_PATH\Scripts\
-  echo   fix:       cd to your cotdata checkout, then:  git pull ^&^& .venv\Scripts\pip install -e .
+  echo [%DATE% %TIME%] PREFLIGHT FAILED>> "%PREFLIGHT_LOG%"
+  echo   cotdata-schedule.exe not found in REPLACE_WITH_VENV_PATH\Scripts\>> "%PREFLIGHT_LOG%"
+  echo   fix: cd to your cotdata checkout, then: git pull ^&^& .venv\Scripts\pip install -e .>> "%PREFLIGHT_LOG%"
+  echo PREFLIGHT FAILED: cotdata-schedule.exe not found. See "%PREFLIGHT_LOG%"
   exit /b 9009
 )
-if not exist "REPLACE_WITH_STORE_PATH" (
-  echo PREFLIGHT FAILED: store path does not exist: REPLACE_WITH_STORE_PATH
-  echo   Did you replace REPLACE_WITH_STORE_PATH in this file with your real store path?
-  exit /b 3
-)
+
+REM Preflight passed, so the store path is real and this dir can be created safely. cmd
+REM opens a >> target BEFORE running its command, so without this the first redirect below
+REM fails with "cannot find the path specified", the program never runs, and the task exits
+REM having created nothing.
+if not exist "REPLACE_WITH_STORE_PATH\vintage" mkdir "REPLACE_WITH_STORE_PATH\vintage"
 REM ----------------------------------------------------------------------------------
 REM Optional: identify yourself to CFTC. Defaults to the repo URL if unset.
 REM set COTDATA_USER_AGENT=cotdata-vintage/0.1 (+contact you@example.com)
