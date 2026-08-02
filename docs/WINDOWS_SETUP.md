@@ -96,7 +96,12 @@ Same result: your command prompt shows `(.venv)` once activated.
 
 With your virtual environment activated, install cotdata.
 
-> **Install from your clone, not PyPI.** The published PyPI release is currently **well behind this repo** — it still carries the version number `0.1.0` while lacking the producer CLI the rest of these docs use (`--metadata`, `--require-final`, the databento flags). `pip install cotdata` therefore hands you a build that *looks* installed but errors with "unrecognized arguments" on the documented commands. Until a fresh release is published, install **editable from the repo you cloned in [Step 2](#step-2-create--activate-a-virtual-environment)** — the `-e` means a later `git pull` updates cotdata with no reinstall.
+> **Producers: install editable from your clone, not from PyPI.** PyPI is current as of **0.3.0** and carries the full producer CLI, so this is no longer about a stale release. It is about how a producer receives fixes. Two reasons, both still true now that PyPI is current:
+>
+> - **Deployment on this machine is `git pull`.** The `-e` means a fix merged upstream reaches the scheduled tasks with one pull and no reinstall. Installing from PyPI pins you to release cadence, which is the wrong trade for a box running unattended daily captures: what a broken run fails to capture is not re-fetchable.
+> - **The Task Scheduler wrappers live in the repo**, under `docs/examples/windows/`, so a producer needs the clone anyway.
+>
+> Read-only consumers have neither constraint and should just `pip install cotdata`. See [For Consumer](#for-consumer-read-only) below.
 
 > **Which command — `pip` or `uv pip`?** If you created the venv with **`uv venv`**, use **`uv pip install ...`** (a uv venv has no standalone `pip`). If you used **`python -m venv`**, use plain **`pip install ...`**. The examples below show the `pip` form; prefix with `uv` if you're on a uv venv.
 
@@ -112,13 +117,13 @@ pip install -e ".[norgate]"
 
 ### For Consumer (Read-Only)
 
-If you only read data (no Norgate producer):
+If you only read data (no Norgate producer), you do not need the clone at all:
 ```cmd
-pip install -e .
-:: uv venv:  uv pip install -e .
+pip install cotdata
+:: uv venv:  uv pip install cotdata
 ```
 
-(Once a current release is on PyPI, a read-only consumer can instead just `pip install cotdata` without cloning. For now the clone is the source of truth.)
+From PyPI, current as of 0.3.0. If you already cloned and would rather track `main`, `pip install -e .` from inside the clone does the same job and updates on `git pull`.
 
 Installation may take 1–2 minutes (many dependencies). Watch for any errors — if it says a package failed to download, your internet may have glitched; try again.
 
@@ -348,9 +353,9 @@ disk, this is almost always why.
 **Problem:** `import cotdata` fails
 
 **Likely causes:**
-1. **Installed with plain `pip` into a `uv` venv** (most common with uv) → a uv venv has no `pip`, so `pip install` used your *global* pip and installed cotdata outside the venv. Reinstall with `uv pip install "cotdata[norgate]"`. Confirm with `where pip` (points at global) vs `where python` (points at `...\.venv\Scripts\`).
+1. **Installed with plain `pip` into a `uv` venv** (most common with uv) → a uv venv has no `pip`, so `pip install` used your *global* pip and installed cotdata outside the venv. Reinstall from inside the clone with `uv pip install -e ".[norgate]"`. Confirm with `where pip` (points at global) vs `where python` (points at `...\.venv\Scripts\`).
 2. Virtual environment not activated (no `(.venv)`/`(cotdata)` in prompt) → run `.venv\Scripts\activate.bat`
-3. Installation failed → try `pip install --upgrade pip` then `pip install cotdata` again
+3. Installation failed → try `pip install --upgrade pip`, then re-run the [Step 3](#step-3-install-cotdata) install for your role
 4. Wrong Python being used → run `python -m pip list` and check cotdata is there
 
 ### `COTDATA_STORE` Not Found
@@ -371,7 +376,7 @@ disk, this is almost always why.
 **Problem:** `cotdata-update --prices` fails with "Norgate not found"
 
 **Fix:**
-1. You installed with `pip install cotdata[norgate]`? Check: `pip list | findstr norgatedata`
+1. You installed with the `[norgate]` extra (`pip install -e ".[norgate]"`)? Check: `pip list | findstr norgatedata`
 2. Norgate Data Updater installed and running? Look for "Norgate Data Updater" in the Start menu and open it
 3. If Norgate says "authentication required," sign in with your Norgate account
 4. Test with: `python -c "from norgatedata import Norgate; print(Norgate)"`
