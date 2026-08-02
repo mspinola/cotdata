@@ -4,7 +4,7 @@ from .prices import get_prices, roll_dates
 from .registry import REGISTRY, Symbol, all_symbols, symbol
 from .store import load_manifest, require_schema, schema_version
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "get_prices", "roll_dates", "get_cot",
     "symbol", "all_symbols", "REGISTRY", "Symbol",

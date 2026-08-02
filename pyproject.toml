@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cotdata"
-version = "0.1.0"
+version = "0.2.0"
 description = "Canonical data layer for COT/futures strategies — a producer/consumer split over a file-based store."
 readme = "README.md"
 authors = [

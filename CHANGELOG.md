@@ -6,6 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-02
+
+The vintage release. `cotdata` gains an as-published provenance layer beside the
+current-state store: what CFTC served, when, and what it previously said. Decision
+recorded in crucible-stack ADR-0008; design in `docs/design/cot_vintage.md`.
+
+Current-state output is byte-identical, guarded by `tests/test_current_baseline.py`, and
+the subsystem is opt-in behind its own entry points, so a store that never runs capture is
+indistinguishable from 0.1.0. Consumers pin `cotdata>=0.1.0` and need no change.
+
+**0.1.0 on PyPI predates the producer CLI** (`--metadata`, `--require-final`, the
+databento flags) and the whole vintage subsystem, which is why `docs/WINDOWS_SETUP.md`
+tells operators to install editable from a clone instead. That guidance stands until this
+version is actually published; tagging it is not publishing it.
+
 ### Added
 - **COT vintage capture** (`cotdata-vintage fetch`) — an immutable, hashed landing
   zone for as-published CFTC files under `$COTDATA_STORE/vintage/raw/`, with
