@@ -222,25 +222,13 @@ def _write_manifest(m: dict) -> None:
     os.replace(tmp, p)
 
 
-def _latest_for_url(snapshots: list[dict], url: str) -> dict | None:
-    """Most recent snapshot for a URL, by an EXPLICIT max over retrieved_at rather than
-    'last element'. The list is append-only and chronological today, but an implicit
-    ordering assumption is exactly what breaks when a merge or dedupe pass is added
-    later. Ties fall back to list position, which preserves today's behaviour."""
-    prev = [(s.get("retrieved_at") or "", i, s)
-            for i, s in enumerate(snapshots) if s.get("source_url") == url]
-    if not prev:
-        return None
-    return max(prev, key=lambda t: (t[0], t[1]))[2]
-
-
 def _latest_with_content(snapshots: list[dict], url: str) -> dict | None:
     """Most recent snapshot for a URL that actually carries content.
 
-    Distinct from ``_latest_for_url`` on purpose, and the distinction is load-bearing.
-    A FAILURE record has ``content_sha256``, ``http_etag`` and ``http_last_modified`` all
-    None, so comparing against it means the next fetch sends no If-Modified-Since, cannot
-    match the dedupe test, and is classified as changed content.
+    Deliberately not "most recent snapshot", and the distinction is load-bearing. A FAILURE
+    record has ``content_sha256``, ``http_etag`` and ``http_last_modified`` all None, so
+    comparing against it means the next fetch sends no If-Modified-Since, cannot match the
+    dedupe test, and is classified as changed content.
 
     On a frozen year that produces a FALSE RESTATEMENT ALERT from a single network blip:
     the one alarm this subsystem exists to raise, fired by an event that says nothing
@@ -248,12 +236,41 @@ def _latest_with_content(snapshots: list[dict], url: str) -> dict | None:
     carrying the identical sha. Both were reproduced before this was split out.
 
     Content questions ("is this the same file?") must therefore look past failures to the
-    last snapshot that actually saw bytes. Outcome questions ("what happened last time?")
-    must not, which is why the edge-trigger still uses ``_latest_for_url``.
+    last snapshot that knows the file's identity.
+
+    Note what this is NOT: "when did bytes last arrive?". A 304 record copies the sha,
+    etag and Last-Modified forward from the snapshot it matched, precisely so the next
+    conditional GET can be issued from it, so a 304 satisfies this filter. That is correct
+    for identity and wrong for timing, which is what ``_latest_delivery`` is for.
+
+    The max over ``retrieved_at`` is EXPLICIT rather than "last element". The list is
+    append-only and chronological today, but an implicit ordering assumption is exactly
+    what breaks when a merge or dedupe pass is added later. Ties fall back to list
+    position, which preserves today's behaviour.
     """
+    return _latest_matching(snapshots, url, lambda s: s.get("content_sha256"))
+
+
+def _latest_delivery(snapshots: list[dict], url: str) -> dict | None:
+    """Most recent snapshot for a URL where bytes actually came down the wire.
+
+    ``byte_size`` is the discriminator, and it is the only field that means this: a 200
+    sets it whether the bytes were retained or deduped, and a 304 or a failure leaves it
+    None. Sha, etag and Last-Modified are all carried forward across a 304 and so cannot
+    answer the question.
+
+    Used by the blind-detector to measure how long a frozen year has been silent. Reading
+    that off ``_latest_with_content`` instead reports "one day" forever, because every
+    daily 304 refreshes the record it would measure from, which silently disables the
+    alarm. Caught by the tests that pin the alert firing at all.
+    """
+    return _latest_matching(snapshots, url, lambda s: s.get("byte_size") is not None)
+
+
+def _latest_matching(snapshots: list[dict], url: str, pred) -> dict | None:
     prev = [(s.get("retrieved_at") or "", i, s)
             for i, s in enumerate(snapshots)
-            if s.get("source_url") == url and s.get("content_sha256")]
+            if s.get("source_url") == url and pred(s)]
     if not prev:
         return None
     return max(prev, key=lambda t: (t[0], t[1]))[2]
@@ -334,12 +351,60 @@ OUTCOME_DEDUPED = "deduped"          # 200, bytes byte-identical to the last ret
 OUTCOME_NOT_MODIFIED = "not_modified"  # 304, server declined to re-send
 OUTCOME_FAILED = "failed"
 
-# Outcomes where bytes actually arrived and could therefore be hashed. "Did we see content
-# last time?" is the question the blind-detector transition turns on.
-_SAW_BYTES = (OUTCOME_FIRST, OUTCOME_CHANGED, OUTCOME_DEDUPED)
+# How long a frozen-in-window year may go without being re-served before the content check
+# is genuinely blind.
+#
+# CFTC regenerates WEEKLY; the capture task runs DAILY. Six of every seven runs on the
+# prior year therefore return 304 as the normal, documented cadence (§6: "the other six
+# days return 304, because CFTC re-touches Last-Modified weekly"). An earlier version of
+# this detector asked "did the LAST RUN see bytes?", which on a daily schedule is not a
+# blindness test but a day-of-week test: it fired every Saturday, the morning after
+# Friday's regeneration, on all three prior-year sources. Measured in the first week of
+# production capture, 2026-08-01, where the 2025 baseline landed at 13:54Z and the alert
+# fired at 21:00Z the same day, seven hours later.
+#
+# Blindness is a question about ELAPSED TIME since bytes last arrived, so that is what this
+# measures. Nine days is one full weekly cycle plus two days of slack: a single skipped
+# regeneration or a day of run outages does not trip it, two consecutive misses do.
+BLIND_AFTER_DAYS = 9
+
+# The phrase every blind alert carries, so a later run can tell whether this quiet period
+# has already been reported. Load-bearing, not cosmetic: it is the edge in the edge-trigger.
+_BLIND_MARKER = "gone blind"
 
 
-def _tripwire_alert(expectation: str, outcome: str, prev_outcome: str | None) -> str | None:
+def _quiet_days(delivery: dict | None, now: dt.datetime) -> float | None:
+    """Days since bytes last arrived for this URL, or None if they never have."""
+    prior = _parse_iso((delivery or {}).get("retrieved_at"))
+    if prior is None:
+        return None
+    return (now - prior).total_seconds() / 86400.0
+
+
+def _blind_already_reported(snapshots: list[dict], url: str, delivery: dict | None) -> bool:
+    """Has the blind alert already fired for the CURRENT quiet period?
+
+    The quiet period is identified by the delivery that began it, so the question is "is
+    there a later record for this url that already carried the alert?".
+
+    Keying the edge on the PREVIOUS RECORD's outcome instead is what made the alert recur:
+    it correctly refused to fire on every day of a quiet period, but it re-armed the moment
+    any content arrived, so a weekly re-serve produced a weekly alert forever. Keying it on
+    the quiet period itself means one alert per period however long the period runs and
+    however many runs fall inside it. It is also robust to a fetch failure landing mid
+    period, which under an outcome-keyed edge could suppress the alert entirely.
+    """
+    if delivery is None:
+        return False
+    since = delivery.get("retrieved_at") or ""
+    return any(s.get("source_url") == url
+               and (s.get("retrieved_at") or "") > since
+               and _BLIND_MARKER in (s.get("tripwire_alert") or "")
+               for s in snapshots)
+
+
+def _tripwire_alert(expectation: str, outcome: str, *, quiet_days: float | None,
+                    already_reported: bool) -> str | None:
     """The alert reason for one capture, or None.
 
     Two kinds of violation, deliberately triggered differently:
@@ -348,19 +413,25 @@ def _tripwire_alert(expectation: str, outcome: str, prev_outcome: str | None) ->
     bytes sitting next to the old ones, so it is diffable, and two restatements in
     consecutive weeks are two things worth knowing about, not one.
 
-    **The detector went blind** (a frozen-in-window year that starts returning 304) alerts
-    only on the TRANSITION into that state. It is a standing condition: if CFTC stopped
-    re-touching the prior year's Last-Modified, a level-triggered alert would fire every
-    single day forever, and an alert that never clears is one that gets ignored. Same
-    reasoning that scopes the ingest revision alert to this run's snapshots.
+    **The detector went blind** (a frozen-in-window year that stops being re-served) alerts
+    once per quiet period, when that period passes ``BLIND_AFTER_DAYS``. It is a standing
+    condition: if CFTC stopped re-touching the prior year's Last-Modified, a level-triggered
+    alert would fire every single day forever, and an alert that never clears is one that
+    gets ignored. Same reasoning that scopes the ingest revision alert to this run's
+    snapshots.
 
-    The transition is "last time we received bytes, this time we did not", which is why it
-    keys on ``_SAW_BYTES`` rather than on ``deduped`` alone. Requiring ``deduped``
-    specifically left a hole at the YEAR ROLLOVER, found in review: a year that churned all
-    through 2025 has ``prev_outcome == changed`` on the January morning it becomes
-    frozen-in-window, so if CFTC stopped re-serving it at exactly that boundary the
-    detector went blind and never said so. The rollover is the single most likely moment
-    for CFTC's regeneration window to shift, which made it the worst possible blind spot.
+    What it must NOT do is mistake the ordinary weekly gap for that condition. A daily task
+    against a weekly regeneration sees six 304s between every two content-bearing fetches,
+    so "last run saw bytes, this one did not" is satisfied once a week by healthy
+    behaviour. See ``BLIND_AFTER_DAYS`` for the production run that demonstrated it.
+
+    Elapsed time also covers the YEAR ROLLOVER hole that an outcome-keyed edge was widened
+    to catch: a year that churned all through 2025 is still content-bearing in December, so
+    if CFTC drops it at the January boundary the silence simply runs past nine days and
+    alerts, whatever token the last run happened to record. The rollover is the single most
+    likely moment for CFTC's regeneration window to shift, which makes it the worst
+    possible blind spot, and it is now covered by the same rule as every other week rather
+    than by a special case.
 
     A FETCH FAILURE is deliberately NOT a tripwire condition. Connectivity is not
     provenance: a dropped connection says nothing about whether CFTC restated anything, and
@@ -377,10 +448,11 @@ def _tripwire_alert(expectation: str, outcome: str, prev_outcome: str | None) ->
             return ("content changed on the frozen prior year: CFTC re-serves this file "
                     "weekly and it has been byte-identical, so a new sha here is the "
                     "retroactive-restatement signature")
-        if outcome == OUTCOME_NOT_MODIFIED and prev_outcome in _SAW_BYTES:
-            return ("the frozen prior year stopped being re-served (304) after previously "
-                    "returning content. The weekly content check has gone blind, so a "
-                    "restatement would no longer be detected here")
+        if (outcome == OUTCOME_NOT_MODIFIED and not already_reported
+                and quiet_days is not None and quiet_days > BLIND_AFTER_DAYS):
+            return (f"the frozen prior year has not been re-served for {quiet_days:.0f} "
+                    f"days, and CFTC re-touches it weekly. The weekly content check has "
+                    f"gone blind, so a restatement would no longer be detected here")
         return None
     if expectation == EXPECT_FROZEN_OUT_OF_WINDOW and outcome == OUTCOME_CHANGED:
         return ("content changed on a closed year outside CFTC's regeneration window, "
@@ -388,17 +460,20 @@ def _tripwire_alert(expectation: str, outcome: str, prev_outcome: str | None) ->
     return None
 
 
-def _annotate(rec: dict, *, prev: dict | None, content: dict | None,
+def _annotate(rec: dict, *, history: list[dict], content: dict | None,
               now: dt.datetime) -> dict:
     """Attach expectation / outcome / tripwire_alert to a capture record.
 
-    ``prev`` is the previous snapshot of any kind and answers "what happened last time?".
-    ``content`` is the previous snapshot that actually carried bytes and answers "have we
-    ever seen this file?". Classifying FIRST off ``prev`` was the half of the earlier
-    dedupe fix that got missed: when the first record for a URL is a fetch failure, the
-    recovering fetch found ``prev`` non-None, fell through to CHANGED, and fired the same
-    false restatement alert the fix existed to remove. It also left ``outcome`` and
-    ``restatement_suspect`` disagreeing, since only the latter had been re-pointed.
+    ``content`` is the previous snapshot that actually carried bytes. It answers both
+    "have we ever seen this file?" and "how long has it been quiet?". Classifying FIRST off
+    the previous snapshot of ANY kind was the half of the earlier dedupe fix that got
+    missed: when the first record for a URL is a fetch failure, the recovering fetch found
+    a non-None predecessor, fell through to CHANGED, and fired the same false restatement
+    alert the fix existed to remove. It also left ``outcome`` and ``restatement_suspect``
+    disagreeing, since only the latter had been re-pointed.
+
+    ``history`` is every snapshot recorded so far, and exists only so the blind alert can
+    tell whether it has already fired for the current quiet period.
     """
     expectation = capture_expectation(rec.get("report_year"), now.year)
     note = rec.get("note") or ""
@@ -412,7 +487,12 @@ def _annotate(rec: dict, *, prev: dict | None, content: dict | None,
         outcome = OUTCOME_DEDUPED
     else:
         outcome = OUTCOME_CHANGED
-    alert = _tripwire_alert(expectation, outcome, (prev or {}).get("outcome"))
+    url = rec.get("source_url")
+    delivery = _latest_delivery(history, url)
+    alert = _tripwire_alert(
+        expectation, outcome,
+        quiet_days=_quiet_days(delivery, now),
+        already_reported=_blind_already_reported(history, url, delivery))
     # Year-end finalisation is the one benign way a frozen year legitimately changes, and
     # it happens on a known schedule. Say so in the message rather than teaching the reader
     # to discount every January alert, which would train them to discount all of them.
@@ -436,6 +516,22 @@ def _iso(ts: dt.datetime) -> str:
     return ts.isoformat().replace("+00:00", "Z")
 
 
+def _parse_iso(s: str | None) -> dt.datetime | None:
+    """Inverse of ``_iso``, tolerant of a missing or malformed stamp.
+
+    ``fromisoformat`` only learned to read a trailing ``Z`` in 3.11, and this package
+    supports 3.10, so the substitution is required rather than tidy. A stamp that will not
+    parse returns None, which reads downstream as "we cannot date this", not as "zero days
+    ago": the alert it feeds stays silent rather than firing on a parse bug.
+    """
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.datetime) -> dict:
     """Fetch one source, retain its bytes if new, and return a provenance record.
 
@@ -445,12 +541,11 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
     changed sha does not imply changed data, and an unchanged sha means nothing new to
     retain). Raw bytes, once written, are never rewritten.
     """
-    # Two different "previous" snapshots, and conflating them fires false restatement
-    # alerts. `content` is the last snapshot that actually saw bytes and answers "is this
-    # the same file?"; `prev` is the last snapshot of any kind and answers "what happened
-    # last time?", which is what the tripwire edge-triggers on. See _latest_with_content.
+    # The last snapshot that actually SAW BYTES, which is a different question from the last
+    # snapshot of any kind, and conflating them fires false restatement alerts. It answers
+    # "is this the same file?", "how long has this been quiet?" and "have we ever seen this
+    # file at all?" — every question the tripwire asks. See _latest_with_content.
     content = _latest_with_content(snapshots, source.url)
-    prev = _latest_for_url(snapshots, source.url)
     res = http_get(source.url,
                    etag=(content or {}).get("http_etag"),
                    last_modified=(content or {}).get("http_last_modified"))
@@ -477,7 +572,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             "byte_size": None,
             "local_path": (content or {}).get("local_path"),
             "note": "304 not-modified",
-        }, prev=prev, content=content, now=now)
+        }, history=snapshots, content=content, now=now)
 
     floor = _MIN_BYTES.get(source.source_kind, _MIN_BYTES_DEFAULT)
     if len(res.content) < floor:
@@ -499,7 +594,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
             "byte_size": len(res.content),
             "local_path": content.get("local_path"),
             "note": "unchanged bytes (deduped)",
-        }, prev=prev, content=content, now=now)
+        }, history=snapshots, content=content, now=now)
 
     # New bytes: retain immutably, via a .part file + atomic replace. A crash during a
     # plain write_bytes would leave a TRUNCATED file already carrying the full sha in its
@@ -544,7 +639,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
         "byte_size": len(res.content),
         "local_path": rel,
         "note": None,
-    }, prev=prev, content=content, now=now)
+    }, history=snapshots, content=content, now=now)
 
 
 def fetch(year: int | None = None, *, all_years: bool = False,
@@ -600,13 +695,12 @@ def fetch(year: int | None = None, *, all_years: bool = False,
             # and dies at the first naming variant or missing disagg year otherwise. The
             # failure is RECORDED (so it is visible and retryable), then the run goes on —
             # matching what the ingest path already does.
-            rec = _failure_record(src, now, e,
-                                  prev=_latest_for_url(snapshots, src.url),
+            rec = _failure_record(src, now, e, snapshots=snapshots,
                                   content=_latest_with_content(snapshots, src.url))
             failed += 1
             print(f"  {src.report_type}/{src.source_kind} {src.report_year or ''}: "
                   f"fetch failed — {e}")
-        snapshots.append(rec)   # visible to the next source's _latest_for_url
+        snapshots.append(rec)   # visible to the next source's _latest_with_content
         records.append(rec)
         if rec.get("note") is None and rec.get("byte_size") is not None:
             new_files += 1
@@ -633,7 +727,8 @@ def fetch(year: int | None = None, *, all_years: bool = False,
 
 
 def _failure_record(source: Source, now: dt.datetime, error: Exception,
-                    *, prev: dict | None = None, content: dict | None = None) -> dict:
+                    *, snapshots: list[dict] | None = None,
+                    content: dict | None = None) -> dict:
     retrieved_at = _iso(now)
     return _annotate({
         "source_url": source.url,
@@ -651,4 +746,4 @@ def _failure_record(source: Source, now: dt.datetime, error: Exception,
         "parse_status": "pending",
         "parse_error": None,
         "note": f"fetch failed: {error}",
-    }, prev=prev, content=content, now=now)
+    }, history=snapshots or [], content=content, now=now)

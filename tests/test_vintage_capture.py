@@ -30,11 +30,18 @@ class _FakeHttp:
         return HttpResult(status, content, etag=et, last_modified=lm)
 
 
-def _clock(start="2026-07-30T16:00:00+00:00"):
+def _clock(start="2026-07-30T16:00:00+00:00", step=dt.timedelta(seconds=1)):
+    """A now_fn advancing one ``step`` per call, i.e. once per source per fetch.
+
+    The default second-sized step keeps a multi-fetch test inside one notional run. Pass
+    ``step=dt.timedelta(days=1)`` to model the DAILY scheduled task, which is the cadence
+    the frozen-year tripwire has to be correct against: CFTC regenerates weekly, so six of
+    every seven daily runs legitimately see no new bytes.
+    """
     t = [dt.datetime.fromisoformat(start)]
 
     def now():
-        t[0] += dt.timedelta(seconds=1)
+        t[0] += step
         return t[0]
     return now
 
@@ -349,24 +356,77 @@ def test_prior_year_content_change_alerts(store_env):
     assert len(r2["tripwire_alerts"]) == 1
 
 
-def test_prior_year_going_quiet_alerts_once_not_forever(store_env):
-    """If CFTC stops re-serving the prior year we get a 304 and the content check has gone
-    BLIND. Worth knowing, but it is a standing condition. A level-triggered alert would
-    fire every day forever, which is how an alert gets ignored, so it is edge-triggered."""
+def test_the_ordinary_weekly_304_gap_is_not_blindness(store_env):
+    """REGRESSION, found in production on 2026-08-01. CFTC regenerates the prior year
+    WEEKLY; the capture task runs DAILY. So the healthy pattern is one 200 followed by six
+    304s, and an edge-trigger keyed on 'did the last run see bytes?' fires on the first
+    304 after every re-serve. It did: three alerts every Saturday, on all three prior-year
+    sources, saying the detector had gone blind while it was working perfectly.
+
+    Three full weeks of the healthy pattern must be completely silent."""
     from cotdata import vintage
     body = _body(b"2025-final")
-    http = _FakeHttp({LEGACY_2025: [(200, body, None, "lm1"), (200, body, None, "lm2"),
-                                    (304, None, None, None), (304, None, None, None)]})
-    now = _clock()
+    queue = []
+    for day in range(21):
+        queue.append((200, body, None, f"lm{day // 7}") if day % 7 == 0
+                     else (304, None, None, None))
+    http = _FakeHttp({LEGACY_2025: queue})
+    now = _clock(step=dt.timedelta(days=1))
     src = _one(LEGACY_2025, 2025)
-    vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)   # first
-    vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)   # deduped
-    r3 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)  # goes quiet
-    r4 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)  # still quiet
 
-    assert r3["records"][0]["outcome"] == vintage.OUTCOME_NOT_MODIFIED
-    assert "blind" in r3["records"][0]["tripwire_alert"]
-    assert r4["records"][0]["tripwire_alert"] is None  # edge, not level
+    alerts = []
+    for _ in range(21):
+        res = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+        alerts += res["tripwire_alerts"]
+
+    assert alerts == []
+
+
+def test_prior_year_going_quiet_alerts_once_not_forever(store_env):
+    """If CFTC stops re-serving the prior year the content check really has gone BLIND.
+    Worth knowing, but it is a standing condition: a level-triggered alert would fire every
+    day forever, which is how an alert gets ignored.
+
+    So it fires once per quiet period, when that period outlasts a full weekly cycle plus
+    slack. Fifteen daily runs after the last delivery is one alert, not fourteen and not
+    two — and the one it fires is the day the silence passes BLIND_AFTER_DAYS."""
+    from cotdata import vintage
+    body = _body(b"2025-final")
+    http = _FakeHttp({LEGACY_2025: [(200, body, None, "lm1")]
+                                   + [(304, None, None, None)] * 15})
+    now = _clock(step=dt.timedelta(days=1))
+    src = _one(LEGACY_2025, 2025)
+
+    fired = []
+    for day in range(16):
+        res = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+        if res["records"][0]["tripwire_alert"]:
+            fired.append((day, res["records"][0]))
+
+    assert len(fired) == 1                                   # edge, not level
+    day, rec = fired[0]
+    assert day == vintage.BLIND_AFTER_DAYS + 1               # first run past the threshold
+    assert rec["outcome"] == vintage.OUTCOME_NOT_MODIFIED
+    assert "gone blind" in rec["tripwire_alert"]
+
+
+def test_the_blind_alert_re_arms_for_a_second_quiet_period(store_env):
+    """One alert per quiet period, so a year that goes quiet, comes back, then goes quiet
+    again is two events. The edge is the period, not the previous record's outcome."""
+    from cotdata import vintage
+    body = _body(b"2025-final")
+    quiet = [(304, None, None, None)] * 12
+    http = _FakeHttp({LEGACY_2025: [(200, body, None, "lm1")] + quiet
+                                   + [(200, body, None, "lm2")] + quiet})
+    now = _clock(step=dt.timedelta(days=1))
+    src = _one(LEGACY_2025, 2025)
+
+    alerts = []
+    for _ in range(26):
+        res = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=now)
+        alerts += res["tripwire_alerts"]
+
+    assert len(alerts) == 2
 
 
 def test_older_frozen_year_304_is_expected_and_silent(store_env):
@@ -522,10 +582,14 @@ def test_a_failure_as_the_FIRST_record_does_not_fire_a_false_tripwire(store_env)
 
 
 def test_the_blind_alert_fires_at_the_year_rollover(store_env):
-    """Second review pass. The blind trigger required prev_outcome == deduped, but a year
-    that churned all through 2025 has prev_outcome == changed on the January morning it
-    becomes frozen-in-window. The rollover is the single most likely moment for CFTC's
-    regeneration window to shift, so it was the worst possible blind spot."""
+    """Second review pass. The rollover is the single most likely moment for CFTC's
+    regeneration window to shift, so a year that churns all through 2025 and is then
+    dropped on the January morning it becomes frozen-in-window is the worst possible blind
+    spot. It must still be caught, and it is: the silence simply runs past the threshold.
+
+    Elapsed time covers this without the special case an outcome-keyed edge needed. What it
+    also does, correctly, is stay quiet one week in: at that point a January silence is
+    indistinguishable from the ordinary gap between two weekly re-serves."""
     import datetime as dt
 
     from cotdata import vintage
@@ -539,15 +603,21 @@ def test_the_blind_alert_fires_at_the_year_rollover(store_env):
         return HttpResult(304, None)
 
     src = _one(LEGACY_2025, 2025)
-    dec = lambda: dt.datetime(2025, 12, 26, 17, tzinfo=dt.timezone.utc)   # noqa: E731
-    jan = lambda: dt.datetime(2026, 1, 2, 17, tzinfo=dt.timezone.utc)     # noqa: E731
-    r1 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=dec)
+    at = lambda d: (lambda: dt.datetime(2026 if d > 26 else 2025,       # noqa: E731
+                                        1 if d > 26 else 12,
+                                        d if d <= 26 else d - 26, 17,
+                                        tzinfo=dt.timezone.utc))
+    r1 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=at(26))  # Dec 26
     assert r1["records"][0]["expectation"] == vintage.EXPECT_CHURN   # 2025 in 2025
-    r2 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=jan)
 
-    rec = r2["records"][0]
-    assert rec["expectation"] == vintage.EXPECT_FROZEN_IN_WINDOW    # 2025 in 2026
-    assert rec["outcome"] == vintage.OUTCOME_NOT_MODIFIED
+    r2 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=at(28))  # Jan 2
+    assert r2["records"][0]["expectation"] == vintage.EXPECT_FROZEN_IN_WINDOW  # 2025 in 2026
+    assert r2["records"][0]["outcome"] == vintage.OUTCOME_NOT_MODIFIED
+    assert r2["records"][0]["tripwire_alert"] is None     # 7 days: still an ordinary gap
+
+    r3 = vintage.fetch(sources=src, http_get=http, rate_limit_s=0, now_fn=at(32))  # Jan 6
+    rec = r3["records"][0]
+    assert rec["expectation"] == vintage.EXPECT_FROZEN_IN_WINDOW
     assert rec["tripwire_alert"] and "gone blind" in rec["tripwire_alert"]
 
 

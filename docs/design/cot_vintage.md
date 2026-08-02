@@ -274,7 +274,7 @@ Three regeneration regimes, each with a different expected outcome:
 | Regime | Files | Expected weekly outcome | What violates it |
 |---|---|---|---|
 | `churn` | current year | new bytes | nothing, that is the data arriving |
-| `frozen_in_window` | **prior year** | `unchanged bytes (deduped)` | a new sha (restatement), or a 304 / failure (the check went blind) |
+| `frozen_in_window` | **prior year** | `unchanged bytes (deduped)`, once a week | a new sha (restatement), or silence past `BLIND_AFTER_DAYS` (the check went blind) |
 | `frozen_out_of_window` | 2 or more years back | `304 not-modified` | a 200 carrying new bytes |
 | `weekly` | the weekly static | new content each Friday | n/a |
 
@@ -295,11 +295,14 @@ Two alert shapes, deliberately triggered differently:
   bytes sitting beside the old ones, so it is diffable, and two restatements in
   consecutive weeks are two things worth knowing rather than one. In January the message
   says so explicitly, since year-end finalisation is the one benign way this fires.
-- **The detector went blind (frozen-in-window 304 or fetch failure): alerts on the
-  TRANSITION only.** This is a standing condition. If CFTC stopped re-touching the prior
-  year, a level-triggered alert would fire every day forever, and an alert that never
-  clears is one that gets ignored. Same reasoning that scopes the ingest revision alert to
-  the current run's snapshots.
+- **The detector went blind (a frozen-in-window year that stops being re-served): alerts
+  ONCE PER QUIET PERIOD**, when the silence passes `BLIND_AFTER_DAYS` (9). This is a
+  standing condition. If CFTC stopped re-touching the prior year, a level-triggered alert
+  would fire every day forever, and an alert that never clears is one that gets ignored.
+  Same reasoning that scopes the ingest revision alert to the current run's snapshots. A
+  fetch failure is deliberately **not** a blind condition: connectivity is not provenance.
+  Note that the expected outcomes in the table above are per WEEK while the task runs
+  DAILY, which is the trap §6b fell into.
 
 `fetch` deliberately still exits zero. The Windows wrapper aborts the whole run on a
 non-zero fetch, so alerting there would skip the `ingest` that turns a restatement into
@@ -307,6 +310,52 @@ readable revision rows, which is exactly what you want when it fires. The alert 
 persisted on the snapshot (`expectation`, `outcome`, `tripwire_alert`) and re-raised by
 `ingest`, which is the step that can exit non-zero safely because everything downstream of
 it has already run. That path already writes the `REVISIONS_<date>.txt` marker file.
+
+## 6b. The blind detector cried wolf every Saturday (production, 2026-08-02)
+
+First finding from real scheduled operation, and it is a straight contradiction between
+§6's own two halves. The table says the prior year's expected outcome is
+`unchanged bytes (deduped)`; the paragraph under it says the file transfers **once a week**
+and "the other six days return 304". Both are true. The trigger read only the first: it
+alerted whenever the previous run had seen bytes and this one did not, which on a daily
+schedule is not a blindness test but a day-of-week test.
+
+Measured. The Windows task runs daily at 17:00 ET. CFTC regenerated on Friday 2026-07-31 at
+19:27 GMT, touching the whole rolling two-year window in one pass (2025 and 2026 share the
+timestamp to the second). The 2025 baseline landed at 13:54Z on Saturday; the scheduled
+21:00Z run the same day, seven hours later, got its 304 and fired on all three prior-year
+sources:
+
+```
+*** FROZEN-YEAR TRIPWIRE ***
+    legacy 2025 [frozen_in_window -> not_modified] at 2026-08-01T21:00:09Z
+    disaggregated 2025 [...] / tff 2025 [...]
+```
+
+Nothing was wrong. A live `HEAD` on 2026-08-02 returned the unchanged
+`Last-Modified: Fri, 31 Jul 2026 19:27:43 GMT` and a `content-length` matching the retained
+zip byte for byte on all three files. The detector was working; only the alarm was broken.
+Left alone it would have fired three times every Saturday forever, which is the same
+"alert that never clears" failure the edge-trigger was introduced to prevent, wearing a
+weekly costume.
+
+**Fix: blindness is elapsed time since bytes last arrived, not the previous record's
+outcome.** `BLIND_AFTER_DAYS = 9` is one weekly cycle plus two days of slack, so one
+skipped regeneration or a day of run outages is silent and two consecutive misses are not.
+The edge is now the quiet period itself (one alert per period, however many runs fall
+inside it), which also makes it robust to a fetch failure landing mid-period. Replaying all
+18 production snapshots through the new trigger gives 3 alerts before, 0 after.
+
+Two smaller things fell out:
+
+- **`_latest_with_content` does not mean "when did bytes last arrive".** A 304 record
+  copies the sha, etag and `Last-Modified` forward from the snapshot it matched, precisely
+  so the next conditional GET can be issued from it, so a 304 passes a
+  `content_sha256`-based filter. Measuring silence from it reports "one day" forever and
+  silently disables the alarm. `byte_size` is the only field that means bytes arrived, and
+  `_latest_delivery` is the lookup that uses it.
+- **The §6 bullet listed a fetch failure as a blind condition**, which the same review pass
+  that wrote the bullet had already removed from the code. Corrected above.
 
 ## 7. Flow decomposition, and what it found in the canonical schema
 

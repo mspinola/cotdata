@@ -59,6 +59,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/design/finals_ready_data_driven.md`.
 
 ### Fixed
+- **The frozen-year "detector went blind" alert no longer fires on the ordinary
+  weekly gap.** CFTC regenerates the prior year **weekly**; the capture task runs
+  **daily**, so six of every seven runs legitimately return 304. The trigger asked
+  "did the last run see bytes?", which on that schedule is a day-of-week test, not
+  a blindness test: it fired on all three prior-year sources every Saturday, the
+  morning after Friday's regeneration, reporting that the restatement detector had
+  gone blind while it was working correctly. Found in the first week of production
+  capture (2026-08-01); a live `HEAD` the next day confirmed the files unchanged
+  and byte-identical to the retained copies. Blindness is now measured as elapsed
+  time since bytes last arrived, alerting once per quiet period past
+  `BLIND_AFTER_DAYS` (9, one weekly cycle plus slack). Replaying all 18 production
+  snapshots gives 3 alerts before and 0 after. Also fixes the measurement it rests
+  on: a 304 record carries the previous sha forward, so `_latest_with_content`
+  matched it and reported "one day quiet" forever; `_latest_delivery` keys on
+  `byte_size`, the only field that means bytes actually arrived. Design note in
+  `docs/design/cot_vintage.md` §6b.
 - **`databento.fetch_daily_ohlc`'s `start_date` parameter now actually does
   something** (dormant provider). It was previously silently ignored on every
   code path — a cold cache always backfilled from 2000-01-01 and a warm cache
