@@ -577,6 +577,10 @@ temp plus `os.replace`, and `_WriteLock` uses `O_CREAT|O_EXCL` and fails loudly.
 
 ### NOT fixed, recorded as a real gap: the `announced` tier is unreachable
 
+> **CLOSED 2026-08-02, see §10.** Criterion 5 is met. The argument below is left exactly
+> as it was written, because its reasoning was right and only its premise was wrong: the
+> backlog release dates are not free-text prose, they are a published table.
+
 **Acceptance criterion 5 is unmet.** `sync()` scrapes the Special Announcements page into
 `announcements.parquet`, but nothing ever writes a `source="announced"` row into
 `release_schedule.parquet`, and `backfill` reads only the schedule table plus
@@ -656,6 +660,70 @@ on each call, about 2.3 seconds against a 31k-row store. Fine for the daily path
 snapshots), but a cold-start `fetch --all` plus `ingest` is roughly 120 snapshots against a
 store growing into the millions of rows, so a full historical rebuild is hours rather than
 minutes. Not on the daily path, so not fixed here.
+
+## 10. The `announced` tier, built (2026-08-02)
+
+Criterion 5 is met, and the §9 gap note is closed. The reasoning there was sound: a release
+date extracted by inference from prose is worse than an honest `derived` one, because it
+carries a provenance flag claiming it was announced. What went unchecked was whether the
+target was prose at all.
+
+**It is not.** When a disruption moves publication, CFTC publishes a table:
+
+| COT Report Date | Original Publish Date | New Publish Date |
+|---|---|---|
+| 09/30/2025 | 10/03/2025 | 11/19/2025+ |
+| 10/07/2025 | 10/10/2025 | 11/21/2025 |
+
+So `parse_announced_release_dates` reads **tables** and refuses **prose**, which keeps the
+original objection intact rather than overriding it. Of roughly 100 announcements on the
+page back to 2008, the large majority are prose (holiday shifts, reporting-firm
+corrections, a National Day of Mourning closure). None of those yield an exact pair without
+inference, so none are read, and their weeks stay on `scheduled` or `derived`.
+
+Measured against the live store on 2026-08-02: **36,296 observation rows move from
+`derived` to `announced`**, and the `scheduled` count is unchanged, so nothing correct is
+displaced. That is the whole Oct-Dec 2025 backlog, §6's "single largest PIT hole". The
+worst individual week is report date 2025-09-30, which `derived` places at 2025-10-03 and
+which actually published on 2025-11-19: wrong by 47 days, and wrong in the direction that
+claims data existed before the appropriations lapse that stopped it existing.
+
+### Two traps, both found by measuring rather than by reading
+
+**A table is a PLAN, not a set of per-week corrections.** The page carried two overlapping
+tables: 2025-11-18, a slow catch-up running to 2026-01-23, and 2025-12-09 ("CFTC to
+Accelerate Publication of Backlogged COT Data"), a faster one finishing 2025-12-29. Each
+ends with a row marked "COT publication returns to normal schedule", which is a claim about
+every week after it too. Merging row-wise, the obvious implementation, keeps the four weeks
+past the newer plan's end alive from the superseded one, and three of those four disagree
+with CFTC's own published 2026 calendar by a week: 2025-12-30 would be recorded as released
+2026-01-13 where the calendar says 2026-01-05. Since `announced` outranks `scheduled`,
+those rows would have overwritten correct dates. Caught by diffing the parse against
+`release_schedule.parquet` before wiring it up. Only the newest table is taken; weeks it
+does not cover fall back to `scheduled`, which loses precision rather than asserting a
+false fact.
+
+**Header matching is load-bearing, not defensive.** The page carries five tables and only
+two are release dates. The others are a contract-rename table (Contract / Exchange / Old
+Name / New Name) and two market lists. "Parse the tables" would file a contract rename as a
+publication date.
+
+Parsing is also row-wise rather than a flat cell list grouped into threes, because the
+2025-11-18 table puts its `+` footnote in a cell of its own, which desynchronises the
+grouping and silently transposes every later row's dates.
+
+### The corpus was never a corpus
+
+Found while looking for the prose the extractor was supposed to read. `_parse_announcements`
+scraped every `<li>` in the whole document, so all 95 stored rows were site navigation:
+menu entries, footer links and market-name list items ("Contact Us", "Privacy Policy",
+"CBT Corn (CFTC ID 002602)"), with `announcement_date` null on every one. The store
+reported 95 announcements and held none.
+
+It is now scoped to the content region and keyed on the `Month D, YYYY:` headings, which is
+both what the announcements actually are and what carries the date. The 95 legacy rows stay
+in the store, since the append-and-dedupe write never drops a row and losing data is the
+worse failure here. They remain distinguishable by their null `announcement_date`.
 
 ## Bottom line
 

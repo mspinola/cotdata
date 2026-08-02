@@ -380,6 +380,12 @@ def _cmd_sched_sync(args) -> int:
           f"calendar ({cal['holiday_delayed']} holiday-delayed).")
     res = vintage_schedule.sync()
     print(f"schedule sync: {res['announcements']} announcement row(s) scraped.")
+    # Separate from the scrape above on purpose. That one is a best-effort corpus for a
+    # human to read; this one produces dates the store will treat as published fact, so it
+    # is allowed to fail the command rather than degrade quietly.
+    ann = vintage_schedule.sync_announced()
+    print(f"schedule sync: {ann['announced']} republished release date(s) from special "
+          f"announcements ({ann['earliest']} to {ann['latest']}).")
     print("run 'cotdata-schedule backfill' to apply them to stored observations.")
     return 0
 

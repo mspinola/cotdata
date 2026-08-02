@@ -287,6 +287,164 @@ def sync_release_schedule(*, fetch_html=None) -> dict:
     return {"scheduled": len(parsed), "holiday_delayed": delayed}
 
 
+# ── `announced`: release dates CFTC republished after a disruption ──────────
+# When a disruption moves publication, CFTC does not describe the new dates in prose. It
+# publishes a TABLE on the Special Announcements page:
+#
+#     COT Report Date | Original Publish Date | New Publish Date
+#     09/30/2025      | 10/03/2025            | 11/19/2025+
+#
+# That is the whole reason this tier is buildable. An earlier pass recorded the `announced`
+# tier as unreachable, on the grounds that extracting a (report_date, release_date) pair
+# from free-text announcement prose would be guessing, and that a guessed date is worse
+# than an honest `derived` one because it carries a provenance flag claiming it was
+# announced. The reasoning was right; the premise was not checked. Measured 2026-08-02: the
+# Oct–Dec 2025 appropriations-lapse backlog, the named target and §6's single largest PIT
+# hole, is published as an exact two-column mapping.
+#
+# So this parses TABLES and refuses PROSE, which keeps the original objection intact. Of
+# the ~100 announcements on the page (2008 onward), the great majority are prose: holiday
+# shifts, reporting-firm corrections, a National Day of Mourning closure. None of those
+# yield an exact pair without inference, so none are read here and their weeks stay on
+# `scheduled` or `derived` where they belong.
+#
+# Header matching is load-bearing rather than defensive. The page carries five tables and
+# only two are release dates; the others are a contract-rename table (Contract / Exchange /
+# Old Name / New Name) and two market lists. A parser that took "the tables on the page"
+# would file contract renames as publication dates.
+_ANNOUNCED_REQUIRED_HEADERS = ("cot report date", "new publish date")
+_MDY = re.compile(r"\b(\d{1,2}/\d{1,2}/20\d{2})\b")
+_ANNOUNCEMENT_HEADING = re.compile(r"([A-Z][a-z]+ \d{1,2},\s*\d{4})\s*:")
+
+
+def _table_rows(table_html: str) -> list[list[str]]:
+    """Cell text per ``<tr>``. Row-wise, not a flat cell list, because a flat list plus
+    "group into threes" desynchronises on the footnote markers: the 2025-11-18 table puts
+    its ``+`` in a cell of its own, so every subsequent triple would shift by one and the
+    dates would be silently transposed."""
+    rows = []
+    for rm in re.finditer(r"<tr[^>]*>(.*?)</tr>", table_html, re.S | re.I):
+        cells = [_strip_tags(c).replace("\xa0", " ").strip()
+                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", rm.group(1), re.S | re.I)]
+        rows.append(cells)
+    return rows
+
+
+def _announcement_date_before(html: str, pos: int) -> dt.date | None:
+    """The date of the announcement a table belongs to: the nearest ``Month D, YYYY:``
+    heading before it. Used to order two tables that cover the same weeks, since CFTC
+    republishes a superseding table rather than editing the previous one."""
+    text = _strip_tags(html[:pos])
+    matches = _ANNOUNCEMENT_HEADING.findall(text)
+    if not matches:
+        return None
+    try:
+        return pd.Timestamp(matches[-1]).date()
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_announced_release_dates(html: str) -> pd.DataFrame:
+    """Parse republished release dates out of the Special Announcements page.
+
+    Raises rather than returning an empty frame when no release-date table is found. The
+    page is cumulative history back to 2008, so the 2025 tables cannot legitimately vanish;
+    an empty parse means the layout moved, and a silent empty here is indistinguishable
+    from "CFTC never rescheduled anything", which would leave the backlog weeks on
+    `derived` while reporting success. Same reasoning as ``parse_release_schedule``.
+    """
+    rows, tables_seen = [], 0
+    for m in re.finditer(r"<table.*?</table>", html, re.S | re.I):
+        trs = _table_rows(m.group(0))
+        if not trs:
+            continue
+        header = " | ".join(trs[0]).lower()
+        if not all(h in header for h in _ANNOUNCED_REQUIRED_HEADERS):
+            continue
+        tables_seen += 1
+        announced_on = _announcement_date_before(html, m.start())
+        for cells in trs[1:]:
+            dates = [d for c in cells for d in _MDY.findall(c)]
+            # Exactly three: report date, original publish date, new publish date. A row
+            # with any other count is a footnote or a spanned cell, and guessing which
+            # column is which from a short row is the failure this whole tier avoids.
+            if len(dates) != 3:
+                continue
+            report = pd.Timestamp(dates[0]).date()
+            release = pd.Timestamp(dates[2]).date()
+            # A republication moves a date later, never earlier. If this fails the columns
+            # are not what the header said, so drop the row rather than record a release
+            # that precedes its own report date.
+            if release < report:
+                continue
+            rows.append({
+                "report_date": pd.Timestamp(report),
+                "release_date": pd.Timestamp(release),
+                "source": "announced",
+                "note": ("CFTC special announcement"
+                         + (f" {announced_on:%Y-%m-%d}" if announced_on else "")),
+                "announced_on": pd.Timestamp(announced_on) if announced_on else pd.NaT,
+                "ingested_at": pd.Timestamp.now("UTC"),
+            })
+    if not tables_seen:
+        raise ValueError(
+            "special announcements: no table with the "
+            f"{' / '.join(_ANNOUNCED_REQUIRED_HEADERS)} headers was found. The page is "
+            "cumulative, so this means the layout changed rather than that nothing was "
+            "ever rescheduled.")
+    if not rows:
+        raise ValueError("special announcements: release-date table found but no rows "
+                         "parsed out of it.")
+    out = pd.DataFrame(rows)
+    # ONLY the newest table, not the newest row per week. A table is a whole replacement
+    # PLAN, not a set of independent per-week corrections: each one ends with a row marked
+    # "COT publication returns to normal schedule", so its final row is a claim about
+    # everything after it too.
+    #
+    # Merging row-wise looks more thorough and is wrong. Measured on the live page
+    # 2026-08-02: the 2025-11-18 table was a slow catch-up running to 2026-01-23, and the
+    # 2025-12-09 table ("CFTC to Accelerate Publication of Backlogged COT Data") replaced
+    # it with a faster one finishing 2025-12-29. Row-wise, the four weeks past the newer
+    # table's end (report dates 2025-12-30 through 2026-01-20) survive from the superseded
+    # plan, and three of the four disagree with CFTC's own published 2026 calendar by a
+    # week: 2025-12-30 would be recorded as released 2026-01-13 when the calendar says
+    # 2026-01-05. Because `announced` outranks `scheduled`, those stale rows would have
+    # OVERWRITTEN correct dates with a provenance flag claiming they were announced, which
+    # is worse than not having built this tier at all.
+    #
+    # Weeks the newest plan does not cover fall back to `scheduled`, then `derived`. That
+    # is the safe direction: it loses precision rather than asserting a false fact.
+    newest = out["announced_on"].max()
+    if pd.notna(newest):
+        out = out[out["announced_on"] == newest]
+    out = (out.drop_duplicates(subset=["report_date"], keep="last")
+              .drop(columns=["announced_on"])
+              .sort_values("report_date")
+              .reset_index(drop=True))
+    return out
+
+
+def sync_announced(*, fetch_html=None) -> dict:
+    """Fetch the announcements page and merge its republished release dates. Idempotent.
+
+    Writes into the same ``release_schedule.parquet`` as the `scheduled` tier, keyed by
+    ``(report_date, source)`` so the two coexist per week and ``_schedule_map`` picks the
+    higher-ranked one. No new plumbing: ``write_release_schedule`` already accepted a
+    ``source`` column and ``_SOURCE_RANK`` already put `announced` above `scheduled`. The
+    only thing that was ever missing here was a producer.
+    """
+    fetch_html = fetch_html or _fetch_html
+    parsed = parse_announced_release_dates(fetch_html(ANNOUNCEMENTS_URL))
+    existing = read_release_schedule()
+    merged = (pd.concat([existing, parsed], ignore_index=True)
+              if not existing.empty else parsed)
+    merged = merged.drop_duplicates(subset=["report_date", "source"], keep="last")
+    write_release_schedule(merged)
+    return {"announced": len(parsed),
+            "earliest": parsed["report_date"].min().date().isoformat(),
+            "latest": parsed["report_date"].max().date().isoformat()}
+
+
 # ── Backfill ────────────────────────────────────────────────────────────────
 _SOURCE_RANK = {"published": 3, "announced": 2, "scheduled": 1}
 
@@ -417,26 +575,53 @@ def sync(*, fetch_html=_fetch_html, now=None) -> dict:
     return {"announcements": len(rows)}
 
 
+def _main_region(html: str) -> str:
+    """The page's content region, or the whole document if its markers are absent.
+
+    Scoping matters more than it looks. Scraping the document scraped the site's NAV: of
+    the 95 rows this had stored by 2026-08-02, every single one was a menu entry, a footer
+    link or a market-name list item ("Contact Us", "Privacy Policy", "CBT Corn (CFTC ID
+    002602)"), and ``announcement_date`` was null on all 95. The store held no
+    announcement at all while reporting 95 of them.
+    """
+    start = html.find('id="main-content"')
+    if start < 0:
+        return html
+    end = html.find("<footer", start)
+    return html[start:end if end > 0 else len(html)]
+
+
 def _parse_announcements(html: str, *, url: str, scraped_at) -> list[dict]:
-    """Best-effort: pull list items / paragraphs mentioning a date. Never raises on
-    unrecognised markup — a layout change must degrade to fewer rows, not a crash."""
-    import re
+    """Best-effort: one row per announcement, keyed on its ``Month D, YYYY:`` heading.
+
+    Never raises on unrecognised markup — a layout change must degrade to fewer rows, not
+    a crash. That is why this stays heading-driven and text-based while
+    ``parse_announced_release_dates`` raises: this is a corpus for a human to read, that
+    one produces dates the store will treat as fact.
+
+    Keyed on the heading rather than on ``<li>`` because the announcements are not list
+    items. They are a date heading followed by prose, and sometimes a table. The heading
+    is also what carries the date, which is the field the schema exists for.
+    """
     rows = []
-    for m in re.finditer(r"<li[^>]*>(.*?)</li>", html, flags=re.S | re.I):
-        text = re.sub(r"<[^>]+>", " ", m.group(1))
-        text = re.sub(r"\s+", " ", text).strip()
-        if not text:
-            continue
-        date = None
-        dm = re.search(r"([A-Z][a-z]+ \d{1,2}, \d{4})", text)
-        if dm:
-            try:
-                date = pd.Timestamp(dm.group(1)).date()
-            except (ValueError, TypeError):
-                date = None
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", _main_region(html)))
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+    hits = list(_ANNOUNCEMENT_HEADING.finditer(text))
+    for i, m in enumerate(hits):
+        body = text[m.end():hits[i + 1].start() if i + 1 < len(hits) else len(text)]
+        try:
+            date = pd.Timestamp(m.group(1)).date()
+        except (ValueError, TypeError):
+            date = None
         rows.append({
             "announcement_date": pd.Timestamp(date) if date else pd.NaT,
-            "raw_text": text, "affected_report_types": None,
+            # Heading INCLUDED, so a row still reads as the entry a human would see on
+            # the page, and so the date survives in the text for any later extraction of
+            # the affected_* columns. Bounded because the appropriations-lapse entries
+            # inline a whole table, and the point of this column is attribution rather
+            # than a second copy of the page.
+            "raw_text": f"{m.group(0)} {body.strip()}".strip()[:2000],
+            "affected_report_types": None,
             "affected_markets": None, "affected_date_from": pd.NaT,
             "affected_date_to": pd.NaT, "url": url,
             "scraped_at": pd.Timestamp(scraped_at),
