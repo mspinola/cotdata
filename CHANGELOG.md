@@ -22,9 +22,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from the latest for its natural key, so storage grows with revisions not with time),
   emits field-level `revisions/` with `age_days` revision depth, and answers
   point-in-time `asof(t)` reads (greatest `observed_at <= t` per key). Release dates are
-  resolved with explicit provenance (`observed > announced > scheduled > derived`),
-  including a backfill that flags the Oct–Dec 2025 appropriations-lapse backlog weeks as
-  `announced` rather than silently `derived`. All pandas/pyarrow, no database.
+  resolved with explicit provenance (`observed > announced > scheduled > derived`), with
+  the `announced` tier itself landing separately — see the next entry; this change built
+  the precedence machinery and left that tier without a producer. All pandas/pyarrow, no
+  database.
+- **`announced` release dates** (`cotdata-schedule sync`) — parses the republished
+  `COT Report Date / Original Publish Date / New Publish Date` tables off the CFTC Special
+  Announcements page and merges them into `release_schedule.parquet` as
+  `source="announced"`, which outranks `scheduled`. Closes acceptance criterion 5, recorded
+  until now as an unreachable tier on the grounds that extracting a release date from
+  free-text prose would be guessing, and that a guessed date is worse than an honest
+  `derived` one because it carries a flag claiming it was announced. The reasoning held;
+  the premise did not. CFTC publishes these as an exact table, so the extractor reads
+  **tables** and still refuses **prose**: of ~100 announcements back to 2008, the prose
+  ones (holiday shifts, reporting-firm corrections) yield no exact pair, and their weeks
+  stay on `scheduled` or `derived`. Measured on the live store: **36,296 observation rows
+  move from `derived` to `announced`**, with the `scheduled` count unchanged so nothing
+  correct is displaced, covering the whole Oct–Dec 2025 appropriations-lapse backlog. The
+  worst week, report date 2025-09-30, sat at a `derived` 2025-10-03 and actually published
+  2025-11-19: wrong by 47 days, in the direction that claims data existed before the lapse
+  that stopped it existing. Only the newest table is taken, because a table is a whole
+  replacement plan rather than a set of per-week corrections; merging row-wise would have
+  let a superseded plan overwrite three dates that CFTC's own published calendar had right.
+  Design note in `docs/design/cot_vintage.md` §10.
 - **`propadj` price adjustment** — a proportional (ratio) back-adjusted view
   derived on read from the stored `unadj` + `backadj` series via
   `get_prices(symbol, adjustment="propadj")`. It preserves daily percentage
@@ -59,6 +79,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/design/finals_ready_data_driven.md`.
 
 ### Fixed
+- **The announcements corpus was site navigation, not announcements.** `sync()` scraped
+  every `<li>` in the whole document, so all 95 rows it had stored by 2026-08-02 were menu
+  entries, footer links and market-name list items ("Contact Us", "Privacy Policy", "CBT
+  Corn (CFTC ID 002602)"), with `announcement_date` null on every one — the store reported
+  95 announcements and held none. Now scoped to the page's content region and keyed on the
+  `Month D, YYYY:` headings, which is both what the announcements are and what carries the
+  date. The 95 legacy rows remain in existing stores, since the append-and-dedupe write
+  never drops a row, and stay distinguishable by their null `announcement_date`.
 - **The frozen-year "detector went blind" alert no longer fires on the ordinary
   weekly gap.** CFTC regenerates the prior year **weekly**; the capture task runs
   **daily**, so six of every seven runs legitimately return 304. The trigger asked

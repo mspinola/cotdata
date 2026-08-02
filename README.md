@@ -373,7 +373,11 @@ How it works:
   embeds a lookahead (three days normally, weeks during a backlog). `published` is the
   weekly static's HTTP `Last-Modified`, a true publication timestamp; it is forward-only
   (that file holds one week and is overwritten), so weeks predating capture fall back
-  down the chain.
+  down the chain. `announced` comes from the republication tables CFTC posts on the
+  Special Announcements page after a disruption, and is what puts the Oct–Dec 2025
+  appropriations-lapse backlog on its real dates: 36,296 stored rows that `derived`
+  otherwise places up to 47 days early, before the lapse that stopped them being
+  published at all.
 
 - **Flow decomposition.** `cotdata-vintage flow` labels each week's ΔLong versus ΔShort as
   `new_longs` / `short_covering` / `new_shorts` / `long_liquidation`, by dominant leg, with

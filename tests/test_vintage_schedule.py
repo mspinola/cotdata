@@ -308,3 +308,144 @@ def test_announcement_parse_is_best_effort():
     assert len(rows) == 1  # empty <li> skipped
     assert rows[0]["raw_text"].startswith("January 5, 2026")
     assert pd.Timestamp(rows[0]["announcement_date"]).date() == dt.date(2026, 1, 5)
+
+
+# ── `announced`: republished release dates from the Special Announcements page ──
+# Fixture is REAL cftc.gov markup (fetched 2026-08-02), trimmed for size but not
+# reshaped: the tables keep their inline styles, their footnote markers and the
+# contract-rename table that has to be rejected. A hand-written fixture would only
+# prove the parser handles markup the author already had in mind.
+ANNOUNCEMENTS_HTML = (Path(__file__).parent / "fixtures"
+                      / "cftc_special_announcements.html").read_text()
+
+
+def test_announced_extracts_the_appropriations_lapse_backlog():
+    """§6's single largest PIT hole. CFTC published the new dates as an exact
+    COT Report Date / Original / New table, which is why this tier is buildable at all."""
+    from cotdata.vintage_schedule import parse_announced_release_dates
+    df = parse_announced_release_dates(ANNOUNCEMENTS_HTML)
+
+    assert (df["source"] == "announced").all()
+    assert df["report_date"].is_unique                      # one row per week
+    got = dict(zip(df["report_date"].dt.date, df["release_date"].dt.date))
+    # The first backlogged week: reported 2025-09-30, originally due 2025-10-03,
+    # actually published 2025-11-19 — seven weeks late.
+    assert got[dt.date(2025, 9, 30)] == dt.date(2025, 11, 19)
+    assert got[dt.date(2025, 10, 21)] == dt.date(2025, 12, 2)
+    assert got[dt.date(2025, 12, 23)] == dt.date(2025, 12, 29)
+    assert min(got) == dt.date(2025, 9, 30)
+
+
+def test_announced_beats_derived_by_weeks_on_those_rows():
+    """The whole point: `derived` (report_date + 3d) is not merely imprecise on these
+    weeks, it is wrong by up to seven weeks. A week left on `derived` claims to have been
+    published before the government shutdown that stopped it being published."""
+    from cotdata.vintage_schedule import derive_release_date, parse_announced_release_dates
+    df = parse_announced_release_dates(ANNOUNCEMENTS_HTML)
+    row = df[df["report_date"] == pd.Timestamp("2025-09-30")].iloc[0]
+    guessed = derive_release_date(row["report_date"])
+    assert (row["release_date"].date() - guessed).days == 47
+
+
+def test_announced_rejects_the_contract_rename_table():
+    """The page carries five tables and only two are release dates. The others are a
+    contract-rename table and two market lists, so 'parse the tables' would file a
+    contract rename as a publication date. Header matching is what prevents it."""
+    from cotdata.vintage_schedule import parse_announced_release_dates
+    assert "Old Name" in ANNOUNCEMENTS_HTML                 # the decoy is really there
+    df = parse_announced_release_dates(ANNOUNCEMENTS_HTML)
+    # every parsed release date sits in the disruption window, not in the rename table's
+    # contract-id column, which is what a mis-parse would drag in
+    assert df["release_date"].min() >= pd.Timestamp("2025-11-01")
+    assert df["release_date"].max() <= pd.Timestamp("2026-01-31")
+
+
+def test_a_superseding_announcement_replaces_the_whole_plan():
+    """CFTC republishes a whole new table rather than editing the old one, so the same
+    report_date appears twice on the page. The later announcement is the live one.
+
+    REGRESSION, and the reason this is table-wise rather than row-wise. The 2025-11-18
+    table is a slow catch-up running to 2026-01-23; the 2025-12-09 one ("CFTC to
+    Accelerate Publication of Backlogged COT Data") replaced it with a faster plan
+    finishing 2025-12-29. Merging row-wise keeps the four weeks past the newer plan's end
+    alive from the SUPERSEDED one, and three of those four contradict CFTC's own
+    published 2026 calendar by a week. Since `announced` outranks `scheduled`, they would
+    overwrite correct dates while flying a flag that says CFTC announced them."""
+    from cotdata.vintage_schedule import parse_announced_release_dates
+    assert ANNOUNCEMENTS_HTML.count("COT Report Date") == 2   # two overlapping tables
+    df = parse_announced_release_dates(ANNOUNCEMENTS_HTML)
+    assert df["report_date"].is_unique
+
+    got = dict(zip(df["report_date"].dt.date, df["release_date"].dt.date))
+    # the newer plan's date, not the older plan's, on a week both cover
+    assert got[dt.date(2025, 12, 9)] == dt.date(2025, 12, 19)   # not 2025-12-30
+    # and nothing past the newer plan's final week, which is where the stale rows lived
+    assert max(got) == dt.date(2025, 12, 23)
+    assert dt.date(2025, 12, 30) not in got
+    assert max(df["release_date"]).date() == dt.date(2025, 12, 29)
+
+
+def test_announced_raises_rather_than_returning_empty():
+    """A silent empty parse is indistinguishable from 'CFTC never rescheduled anything',
+    which would leave the backlog weeks on `derived` while reporting success."""
+    from cotdata.vintage_schedule import parse_announced_release_dates
+    with pytest.raises(ValueError, match="layout changed"):
+        parse_announced_release_dates("<html><body><p>no tables here</p></body></html>")
+
+
+def test_footnote_markers_do_not_transpose_the_columns():
+    """The 2025-11-18 table puts its '+' footnote in a cell of its own. Flattening cells
+    and grouping into threes desynchronises there and silently transposes every later
+    row's dates, so parsing is row-wise."""
+    from cotdata.vintage_schedule import parse_announced_release_dates
+    df = parse_announced_release_dates(ANNOUNCEMENTS_HTML)
+    # a transposition would put release before report on some row
+    assert (df["release_date"] >= df["report_date"]).all()
+
+
+def test_sync_announced_merges_without_disturbing_scheduled(store_env):
+    """Both tiers live in release_schedule.parquet keyed by (report_date, source), so a
+    week can carry both and _schedule_map picks the higher rank."""
+    from cotdata import vintage_schedule as vs
+    vs.write_release_schedule(pd.DataFrame([{
+        "report_date": pd.Timestamp("2025-09-30"),
+        "release_date": pd.Timestamp("2025-10-03"),      # the date that never happened
+        "source": "scheduled", "note": "published CFTC release schedule",
+        "ingested_at": pd.Timestamp.now("UTC")}]))
+
+    res = vs.sync_announced(fetch_html=lambda url: ANNOUNCEMENTS_HTML)
+    assert res["announced"] >= 13
+
+    sched = vs.read_release_schedule()
+    week = sched[sched["report_date"] == pd.Timestamp("2025-09-30")]
+    assert set(week["source"]) == {"scheduled", "announced"}     # both retained
+    smap = vs._schedule_map(sched)
+    date, source = smap[pd.Timestamp("2025-09-30")]
+    assert source == "announced" and date == dt.date(2025, 11, 19)
+
+
+def test_sync_announced_is_idempotent(store_env):
+    from cotdata import vintage_schedule as vs
+    vs.sync_announced(fetch_html=lambda url: ANNOUNCEMENTS_HTML)
+    first = vs.read_release_schedule()
+    vs.sync_announced(fetch_html=lambda url: ANNOUNCEMENTS_HTML)
+    second = vs.read_release_schedule()
+    assert len(first) == len(second)
+
+
+def test_announcement_corpus_is_announcements_not_site_navigation(store_env):
+    """REGRESSION. The scrape took every <li> in the document, so by 2026-08-02 the store
+    held 95 rows that were all menu entries, footer links and market-name list items
+    ('Contact Us', 'Privacy Policy', 'CBT Corn (CFTC ID 002602)') with announcement_date
+    null on every one. It reported 95 announcements while holding none."""
+    from cotdata import vintage_schedule as vs
+    res = vs.sync(fetch_html=lambda url: ANNOUNCEMENTS_HTML)
+    assert res["announcements"] > 0
+
+    got = vs.read_announcements()
+    assert got["announcement_date"].notna().all()        # the field the schema exists for
+    joined = " ".join(got["raw_text"])
+    for chrome in ("Privacy Policy", "Contact Us", "Submit a Tip or Complaint"):
+        assert chrome not in joined
+    # and it caught the real ones
+    assert pd.Timestamp("2025-12-09") in set(got["announcement_date"])
