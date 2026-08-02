@@ -404,7 +404,8 @@ def validate(canonical: pd.DataFrame) -> list[str]:
             raise ValidationError(f"categories {bad} outside vocabulary for {rt!r}")
 
     # Duplicate natural keys within ONE frame. The read side already refuses these
-    # (vintage_flow._require_panel); the write side must too, and for a worse reason.
+    # (crowdmon.futures.io.require_one_row_per_key, which is where the check went when
+    # vintage_flow.decompose was removed); the write side must too, and for a worse reason.
     # Ingesting both writes two rows sharing an identical (observed_at, snapshot_id), which
     # exhausts _latest_by_key's tie-break and leaves the winner decided by append order.
     # Both also diff against the same prior row, so revisions/ gains two contradictory

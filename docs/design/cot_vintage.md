@@ -359,7 +359,27 @@ Two smaller things fell out:
 
 ## 7. Flow decomposition, and what it found in the canonical schema
 
-Module spec §6.4 built as `vintage_flow.py`. Weekly ΔLong versus ΔShort per
+> **The decomposition has been REMOVED from this package (2026-08-02). What it found has
+> not.** `crowdmon.futures.flow.decompose` was built independently on 2026-08-01, and the
+> two were carried side by side as defensible alternatives until somebody measured them:
+> this one was that one **at `tolerance=1.0` with the gap rule off**, agreeing on
+> **100.000000% of 135,835 transitions with zero mismatches** and identical `d_long`,
+> `d_short` and `d_net` on every row. One function, with the copy here hard-wired to the
+> corner where nothing is ever `mixed` and no interval is ever refused. The measurement is
+> in `crowdmon/docs/design/amendments-2026-08-02.md` §B29 and is asserted by
+> `crowdmon/tests/test_flow_equivalence.py`.
+>
+> **This section is kept rather than deleted** because what it records is a result about
+> *the canonical schema*, obtained by running a decomposition over it. The zero-sum sweep,
+> the spreading finding and the `validate()` finding below all stand and none of them
+> depend on where the classifier lives. `zero_sum_check` stays here; it is a statement
+> about cotdata's own parse.
+>
+> The design points immediately below are preserved as the record of how the classifier
+> was arrived at. **They describe `crowdmon.futures.flow` now**, with one exception noted
+> inline.
+
+Module spec §6.4 was built as `vintage_flow.py`. Weekly ΔLong versus ΔShort per
 market/category, labelled `new_longs` / `short_covering` / `new_shorts` /
 `long_liquidation`. No prices, no contract master, no multiplier: every input is a column
 the canonical schema already stores, which is what makes it a clean smoke test of that
@@ -374,6 +394,18 @@ Two design points that are not in the spec because they only appear against real
   to overfit. An optional `min_frac_oi` dead zone adds a `quiet` state; it defaults to 0.0
   because any other value is a judgement in the same class as the fragility weights and
   belongs in a caller's config where it can be swept.
+
+  > **This is the one point that did not carry over, and the argument turned out to be
+  > half right.** Parameter-free was a real virtue and it cost the ability to say a week
+  > was genuinely two-sided: dominant-leg always commits, so a category that added 30,000
+  > longs and 28,000 shorts is called `new_longs`. The surviving implementation takes a
+  > dominance `tolerance` instead and reports a `mixed` state, which is the modal outcome
+  > at **60% of weeks** on the liquid panel, so the four-state table describes a minority
+  > of the data. The objection that a parameter is something to overfit was answered by
+  > sweeping it rather than by avoiding it: the tolerance moves 28.74% of labels across
+  > 0.15 to 0.40, and **not one of those changes moves a week from one pure state to a
+  > different pure state**. It gates whether the classifier commits, never which direction
+  > it commits to. `min_frac_oi` itself was never set by anything and is simply gone.
 - **`oi_corroborates`.** Futures are closed and zero-sum, so contracts exist only because
   somebody opened them: fresh positioning should coincide with rising open interest and
   exits with falling. Where it does not, the label is describing a transfer of an existing

@@ -270,41 +270,51 @@ def _cmd_asof(args) -> int:
     return 0
 
 
-def _cmd_flow(args) -> int:
+def _cmd_zero_sum(args) -> int:
+    """The schema check that was the first half of `flow`.
+
+    `flow` also printed a decomposition, which has moved to `crowdmon.futures.flow` (it was
+    the same function there, hard-wired to one corner of its parameters). What is left is
+    cotdata's own claim about its own parse, so the subcommand is named for that instead of
+    keeping a name that would now be a lie.
+    """
     from . import vintage_flow
 
     if args.source == "current":
         canonical = vintage_flow.from_current_store(args.market)
-        print(f"vintage flow: {args.market} from the CURRENT-STATE store. NOT "
-              f"point-in-time. Revisions are already applied, so this is for looking at "
-              f"history and validating the schema, never for evaluating a rule.")
+        print(f"zero-sum: {args.market} from the CURRENT-STATE store. NOT point-in-time. "
+              f"Revisions are already applied, so this is for looking at history and "
+              f"validating the schema, never for evaluating a rule.")
     else:
         canonical = vintage_flow.from_vintage(as_of=args.as_of, market_code=args.market)
         if canonical.empty:
-            print("vintage flow: no vintage observations yet. The vintage series begins "
-                  "at first capture; use --source current for history.")
+            print("zero-sum: no vintage observations yet. The vintage series begins at "
+                  "first capture; use --source current for history.")
             return 0
 
     z = vintage_flow.zero_sum_check(canonical)
     unbalanced = int((~z["balanced"]).sum())
-    print(f"  zero-sum: {len(z) - unbalanced}/{len(z)} weeks balanced"
+    outside = int((~z["within_tolerance"]).sum())
+    print(f"  {len(z) - unbalanced}/{len(z)} weeks balanced exactly"
           + (f"  *** {unbalanced} UNBALANCED ***" if unbalanced else ""))
+    print(f"  {len(z) - outside}/{len(z)} within CFTC's own rounding tolerance"
+          + (f"  *** {outside} OUTSIDE ***" if outside else ""))
 
-    fl = vintage_flow.decompose(canonical, min_frac_oi=args.min_frac_oi)
-    if args.category:
-        fl = fl[fl["category"] == args.category]
-    if fl.empty:
-        print("  no weeks to decompose.")
-        return 0
-    off = fl[fl["days_elapsed"] != 7]
+    # Not a weekly interval is a real finding about the series, so it is reported here
+    # rather than lost with the decomposition: COT was FORTNIGHTLY before 1992-10-13, and
+    # holidays shift the rest. A consumer differencing these rows must handle it.
+    dates = z["report_date"].sort_values().drop_duplicates()
+    gaps = dates.diff().dt.days.dropna()
+    off = gaps[gaps != 7]
     if len(off):
-        print(f"  {len(off)} of {len(fl)} intervals are not 7 days (COT was FORTNIGHTLY "
-              f"before 1992-10-13, and holidays shift the rest). Those rows are not a "
-              f"weekly change and are not comparable to one.")
-    print(f"\n{fl['state'].value_counts().to_string()}\n")
-    cols = ["report_date", "category", "d_long", "d_short", "d_net", "d_oi",
-            "days_elapsed", "state", "oi_corroborates"]
-    print(fl.tail(args.last)[cols].to_string(index=False))
+        print(f"  {len(off)} of {len(gaps)} intervals are not 7 days "
+              f"(min {int(off.min())}, max {int(off.max())}). Those are not weekly "
+              f"changes and are not comparable to one.")
+
+    cols = ["report_date", "long_total", "short_total", "spread_total",
+            "open_interest", "imbalance", "oi_gap", "balanced"]
+    print()
+    print(z.tail(args.last)[cols].to_string(index=False))
     return 0
 
 
@@ -352,20 +362,17 @@ def main(argv=None) -> int:
     a.add_argument("--market", default=None)
     a.set_defaults(func=_cmd_asof)
 
-    fw = sub.add_parser("flow", help="Weekly flow decomposition per market/category.")
-    fw.add_argument("--market", required=True, help="CFTC market code, e.g. 088691.")
-    fw.add_argument("--source", choices=("vintage", "current"), default="vintage",
+    zs = sub.add_parser("zero-sum",
+                        help="Check the long/short/open-interest identity per market-week.")
+    zs.add_argument("--market", required=True, help="CFTC market code, e.g. 088691.")
+    zs.add_argument("--source", choices=("vintage", "current"), default="vintage",
                     help="'vintage' is point-in-time and starts at first capture; "
                          "'current' reads the existing store back to 1986 but has "
                          "revisions already applied, so it is NOT point-in-time.")
-    fw.add_argument("--as-of", default=None, dest="as_of",
+    zs.add_argument("--as-of", default=None, dest="as_of",
                     help="Point-in-time timestamp (vintage source only).")
-    fw.add_argument("--category", default=None, help="e.g. noncommercial.")
-    fw.add_argument("--min-frac-oi", type=float, default=0.0, dest="min_frac_oi",
-                    help="Dead zone as a fraction of prior open interest; weeks under it "
-                         "on both legs are 'quiet'. Default 0.0 (no dead zone).")
-    fw.add_argument("--last", type=int, default=20, help="Rows to print (default 20).")
-    fw.set_defaults(func=_cmd_flow)
+    zs.add_argument("--last", type=int, default=20, help="Rows to print (default 20).")
+    zs.set_defaults(func=_cmd_zero_sum)
 
     args = p.parse_args(argv)
     config.store_root()  # fail fast if COTDATA_STORE unset
