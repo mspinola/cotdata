@@ -6,6 +6,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-02
+
+**The first release actually published to PyPI since 0.1.0.** 0.2.0 was tagged earlier
+today and never uploaded: the repo had no release workflow at the time, and the only
+alternative was a hand-rolled `twine` upload with a stored token. That tag stands as a git
+tag and nothing more. Everything in it ships here, described in the 0.2.0 section below.
+
+A PyPI consumer moving from 0.1.0 therefore gets the whole vintage subsystem plus this
+release's removal in one step, and `docs/WINDOWS_SETUP.md`'s "PyPI is well behind this
+repo, install editable from a clone" note stops being true once this lands.
+
 ### Removed
 - **`vintage_flow.decompose` and the `cotdata-vintage flow` subcommand.** Flow
   decomposition was duplicated in `crowdmon.futures.flow`, and measurement showed the two
