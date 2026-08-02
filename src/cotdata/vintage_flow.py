@@ -1,27 +1,38 @@
-"""Flow decomposition over canonical COT rows, for crowdmon-futures module spec §6.4.
+"""The zero-sum identity over canonical COT rows, and the two ways to source them.
 
-Weekly ΔLong versus ΔShort per market/category, labelled into the four states that look
-identical on a price chart and are entirely different setups:
+`zero_sum_check` is the strongest check the canonical schema admits and it needs no
+external data: in a futures market every long is somebody's short, so a single misrouted,
+dropped or duplicated category column breaks the identity on the first week. That is a
+statement about cotdata's own parse, which is why it lives here.
 
-    ΔLong +, ΔShort ~0   new longs           fresh conviction buying
-    ΔLong ~0, ΔShort −   short covering      a rally with a FINITE fuel supply
-    ΔLong ~0, ΔShort +   new shorts          fresh bearish conviction
-    ΔLong −, ΔShort ~0   long liquidation    position exit, not fresh selling
+**Flow decomposition was here and has been removed.** It was built 2026-07-30 alongside
+this check, and `crowdmon.futures.flow` was built independently on 2026-08-01. The two
+were carried side by side as "defensible alternatives answering slightly different
+questions" until somebody measured them, which is the whole argument for measuring:
 
-Runs on ingested COT alone: no prices, no contract master, no multiplier. That is what
-makes it the right first consumer of the canonical schema: every input is a column the
-vintage layer already stores, so a failure here is a schema failure and nothing else.
+    cotdata.vintage_flow.decompose == crowdmon.futures.flow.decompose
+                                      at tolerance=1.0, gap rule off
 
-**Why this lives in cotdata.** It is a READ-side function over cotdata's own canonical
-rows: it writes no store domain, adds no manifest entry, and changes no producer/consumer
-contract. ADR-0007 narrows cotdata along the axis of instrument domain (COT versus bars),
-not derived-versus-raw, and ADR-0008 settles that provenance for COT data stays inside
-that boundary. This is the same shape of thing: COT in, COT out, nothing else consulted.
-The positioning ENGINE of the module spec (extremity, fragility, cross-market PCA) is a
-different matter, because it needs prices, a contract master and configured weights, and
-belongs in the crowdmon package where the spec puts it.
+On 27 markets and 135,835 transitions from 2006 to 2026 that held at **100.000000% label
+agreement with zero mismatches**, and `d_long`, `d_short` and `d_net` were identical on
+every row. Not a similar approach. The same function, with this copy hard-wired to the
+corner of the parameter space where nothing is ever `mixed` and no interval is ever
+refused. Both take the dominant leg as `argmax(|ΔLong|, |ΔShort|)`, both break exact ties
+to the long leg, and both treat a doubly-unmoved week as `quiet` unconditionally.
 
-See docs/design/crowdmon_futures_cot_module.md §6.4.
+So this was never a second opinion, it was a less capable copy: it could not decline to
+call a genuinely two-sided week, and it differenced across a 294-day absence as though it
+were a week. The general implementation stays, in the package the module spec puts the
+positioning engine in, and is reached with `from crowdmon.futures import decompose`.
+
+**The dedup could not go the other way.** `crowdmon/tests/test_boundaries.py` forbids
+cotdata from importing crowdmon, because a producer that depends on its consumer inverts
+the whole dependency direction. The equivalence is therefore asserted from that side, in
+`crowdmon/tests/test_flow_equivalence.py`, and the measurement is written up in
+`crowdmon/docs/design/amendments-2026-08-02.md` §B29.
+
+What remains here is COT in, COT out, consulting nothing else, which is what ADR-0007 and
+ADR-0008 leave inside cotdata's boundary.
 """
 from __future__ import annotations
 
@@ -29,147 +40,9 @@ import pandas as pd
 
 from . import config, vintage_ingest
 
-# The grouping key: one series per market/category, walked in report_date order.
-SERIES_KEY = ["market_code", "report_type", "combined", "category"]
-
-NEW_LONGS = "new_longs"
-SHORT_COVERING = "short_covering"
-NEW_SHORTS = "new_shorts"
-LONG_LIQUIDATION = "long_liquidation"
-QUIET = "quiet"
-FLOW_STATES = (NEW_LONGS, SHORT_COVERING, NEW_SHORTS, LONG_LIQUIDATION, QUIET)
-
-OUT_COLUMNS = SERIES_KEY + [
-    "report_date", "days_elapsed",
-    "long_contracts", "short_contracts", "open_interest",
-    "d_long", "d_short", "d_net", "d_oi",
-    "state", "oi_corroborates",
-]
-
 
 class FlowError(ValueError):
     """The input is not a clean one-row-per-key-per-date panel."""
-
-
-def _require_panel(canonical: pd.DataFrame) -> None:
-    missing = [c for c in SERIES_KEY + ["report_date", "long_contracts", "short_contracts"]
-               if c not in canonical.columns]
-    if missing:
-        raise FlowError(f"missing columns for flow decomposition: {missing}")
-    dup = canonical.duplicated(subset=SERIES_KEY + ["report_date"])
-    if dup.any():
-        sample = canonical.loc[dup, SERIES_KEY + ["report_date"]].head(3).to_dict("records")
-        raise FlowError(
-            f"{int(dup.sum())} duplicate (key, report_date) rows, e.g. {sample}. "
-            f"A diff over a key with two rows for one week silently compares two VINTAGES "
-            f"of the same week and calls the revision a flow. Pass a point-in-time slice "
-            f"(vintage_ingest.asof) rather than raw observations.")
-
-
-def decompose(canonical: pd.DataFrame, *, min_frac_oi: float = 0.0) -> pd.DataFrame:
-    """Label each week's positioning change per market/category.
-
-    ``canonical`` is the long-form schema (``vintage_ingest.ALL_COLUMNS``), one row per
-    natural key per report date. Raises rather than guessing if a key has two rows for one
-    date, because that means two vintages and a diff across them is a revision, not a flow.
-
-    **Classification is by dominant leg**, which is how the spec's "~0" resolves against
-    real data where both legs always move a little: whichever of |ΔLong|, |ΔShort| is
-    larger names the state, and its sign picks the direction. Exact ties go to the long
-    leg, so the result is deterministic. This is parameter-free by default and therefore
-    reproducible with nothing to tune.
-
-    ``min_frac_oi`` optionally adds a dead zone: a week where BOTH legs move less than
-    that fraction of the prior week's open interest is labelled ``quiet`` instead of being
-    forced into a direction by noise. It defaults to 0.0 (no dead zone) deliberately: any
-    non-zero value is a judgement, in the same class as the module spec's fragility
-    weights, and belongs in a config the caller owns and can run sensitivity over, not
-    baked in here as a fake default.
-
-    The first observation of each series has no predecessor and is dropped: there is no
-    such thing as its weekly change.
-    """
-    _require_panel(canonical)
-    df = canonical.copy()
-    df["report_date"] = pd.to_datetime(df["report_date"])
-    df = df.sort_values(SERIES_KEY + ["report_date"], kind="mergesort")
-
-    g = df.groupby(SERIES_KEY, dropna=False, sort=False)
-    for src, dst in (("long_contracts", "d_long"), ("short_contracts", "d_short")):
-        df[dst] = g[src].diff()
-    df["d_oi"] = g["open_interest"].diff() if "open_interest" in df.columns else pd.NA
-    df["d_net"] = df["d_long"] - df["d_short"]
-    # Elapsed calendar days, not "one week". COT weeks are NOT uniformly seven days apart:
-    # holiday shifts move them, and a capture gap or an early-history hole makes a single
-    # diff span months. A caller comparing flow magnitudes across weeks must be able to
-    # see that, so it is a column rather than an assumption.
-    df["days_elapsed"] = g["report_date"].diff().dt.days
-    # Prior-week OI is the dead-zone denominator: a threshold has to be knowable BEFORE
-    # the week it judges, or it is fitted to the outcome it is classifying.
-    prior_oi = g["open_interest"].shift(1) if "open_interest" in df.columns else None
-
-    df = df[df["d_long"].notna() & df["d_short"].notna()].copy()
-    df["state"] = _classify(df, prior_oi=None if prior_oi is None else prior_oi.loc[df.index],
-                            min_frac_oi=min_frac_oi)
-    df["oi_corroborates"] = _corroborate(df)
-    return df.reindex(columns=OUT_COLUMNS).reset_index(drop=True)
-
-
-def _classify(df: pd.DataFrame, *, prior_oi, min_frac_oi: float) -> pd.Series:
-    d_long = df["d_long"].astype("float64")
-    d_short = df["d_short"].astype("float64")
-    mag_l, mag_s = d_long.abs(), d_short.abs()
-
-    long_dominates = mag_l >= mag_s  # ties -> long leg, so the label is deterministic
-    state = pd.Series(pd.NA, index=df.index, dtype="object")
-    state = state.mask(long_dominates & (d_long > 0), NEW_LONGS)
-    state = state.mask(long_dominates & (d_long <= 0), LONG_LIQUIDATION)
-    state = state.mask(~long_dominates & (d_short > 0), NEW_SHORTS)
-    state = state.mask(~long_dominates & (d_short <= 0), SHORT_COVERING)
-
-    # A week where NEITHER leg moved is `quiet` unconditionally, with no threshold
-    # involved. Without this it falls through `long_dominates & (d_long <= 0)` and is
-    # labelled long_liquidation, which is not a judgement call gone wrong but a plain
-    # misstatement: nothing was liquidated. Measured over the real 2026 Legacy file it is
-    # 3,308 of 29,787 transitions (11.1%), and it made long_liquidation the modal state
-    # with 36% of that bucket being weeks where nothing happened. The CLI prints exactly
-    # that value_counts() as its headline.
-    #
-    # Deliberately NOT folded into min_frac_oi. Zero is not a small number, it is the
-    # absence of a change, so recognising it needs no parameter and must not be switched
-    # off by leaving the dead zone at its default.
-    state = state.mask((d_long == 0) & (d_short == 0), QUIET)
-
-    if min_frac_oi and prior_oi is not None:
-        dead = prior_oi.astype("float64") * float(min_frac_oi)
-        state = state.mask((mag_l <= dead) & (mag_s <= dead), QUIET)
-    return state
-
-
-def _corroborate(df: pd.DataFrame) -> pd.Series:
-    """Does market open interest agree with the label?
-
-    Futures are a closed zero-sum system, so contracts only exist because someone opened
-    them. Fresh positioning (new longs, new shorts) should therefore coincide with RISING
-    open interest, and exits (short covering, long liquidation) with falling open interest.
-    When it does not, the label is describing a transfer of an existing position between
-    categories rather than new or closed risk, which is a materially different event.
-
-    Note the asymmetry this cannot escape: ``open_interest`` in the canonical schema is
-    the MARKET total, repeated on every category row, because that is what the CFTC file
-    reports. So this corroborates a per-category label against a market-level quantity. It
-    is a real check and not a proof, which is why it is a separate column rather than
-    something folded into the state.
-    """
-    if "d_oi" not in df.columns:
-        return pd.Series(pd.NA, index=df.index, dtype="object")
-    d_oi = pd.to_numeric(df["d_oi"], errors="coerce")
-    opening = df["state"].isin([NEW_LONGS, NEW_SHORTS])
-    closing = df["state"].isin([SHORT_COVERING, LONG_LIQUIDATION])
-    out = pd.Series(pd.NA, index=df.index, dtype="object")
-    out = out.mask(opening & d_oi.notna(), d_oi > 0)
-    out = out.mask(closing & d_oi.notna(), d_oi < 0)
-    return out
 
 
 # ── Schema smoke test ───────────────────────────────────────────────────────
@@ -238,9 +111,14 @@ def zero_sum_check(canonical: pd.DataFrame) -> pd.DataFrame:
 def from_vintage(*, as_of=None, market_code=None, report_type="legacy") -> pd.DataFrame:
     """Canonical rows out of the vintage store, as a point-in-time slice.
 
-    This is the correct source: ``asof`` returns exactly one row per natural key, so the
-    diff below can never straddle two vintages of one week. With no ``as_of`` it means
-    "everything known now", which is still a consistent single vintage per key.
+    This is the correct source: ``asof`` returns exactly one row per natural key, so a
+    consumer differencing these rows can never straddle two vintages of one week and call
+    a revision a flow. With no ``as_of`` it means "everything known now", which is still a
+    consistent single vintage per key.
+
+    That guarantee used to be enforced here, by a `_require_panel` check in `decompose`.
+    It moved out with `decompose`; `crowdmon.futures.io.require_one_row_per_key` is the
+    same refusal on the consuming side, and this function is what makes it satisfiable.
     """
     t = pd.Timestamp.max if as_of is None else as_of
     return vintage_ingest.asof(t, market_code=market_code, report_type=report_type)

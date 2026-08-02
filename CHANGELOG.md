@@ -6,6 +6,36 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+- **`vintage_flow.decompose` and the `cotdata-vintage flow` subcommand.** Flow
+  decomposition was duplicated in `crowdmon.futures.flow`, and measurement showed the two
+  were not alternatives but **one function**: this copy was that one at `tolerance=1.0`
+  with the gap rule off, agreeing on **100.000000% of 135,835 transitions (2006-2026, 27
+  markets) with zero mismatches**, and `d_long`/`d_short`/`d_net` identical on every row.
+  The copy here was strictly the less capable one: it could not decline to label a
+  genuinely two-sided week (no `mixed` state) and it differenced across a 294-day absence
+  as though it were a week. The general implementation stays in `crowdmon`, which is where
+  the module spec puts the positioning engine. The dedup could not go the other way,
+  because `crowdmon/tests/test_boundaries.py` forbids cotdata from importing its own
+  consumer. Measurement in `crowdmon/docs/design/amendments-2026-08-02.md` §B29, asserted
+  by `crowdmon/tests/test_flow_equivalence.py`.
+
+  **No deprecation path, and the reason is checkable rather than asserted.**
+  `decompose` was never in `cotdata.__all__`, has never appeared in this changelog under
+  any version, and is in no **published** release: PyPI carries 0.1.0, which predates the
+  entire vintage subsystem, and the 0.2.0 note below states in terms that tagging is not
+  publishing. Its only caller in the workspace was the CLI subcommand removed with it.
+
+  **Not removed:** `zero_sum_check`, `from_vintage` and `from_current_store` stay. The
+  zero-sum identity is a statement about cotdata's own parse and is consumed by
+  `crowdmon.futures.cot_adapter` on every load. `min_frac_oi`, the optional dead zone, has
+  no equivalent in the surviving implementation and is gone; it defaulted to off and
+  nothing set it.
+- **`cotdata-vintage flow` is replaced by `cotdata-vintage zero-sum`**, which keeps the
+  half of that command that was cotdata's own: source selection plus the identity check,
+  now also reporting the rounding-tolerance column and any non-weekly intervals. A command
+  named `flow` that no longer decomposes flow would be a worse outcome than a renamed one.
+
 ## [0.2.0] - 2026-08-02
 
 The vintage release. `cotdata` gains an as-published provenance layer beside the
