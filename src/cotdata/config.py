@@ -40,6 +40,10 @@ def cot_tff_dir() -> Path:
     return store_root() / "cot_tff"
 
 
+def cot_supplemental_dir() -> Path:
+    return store_root() / "cot_supplemental"
+
+
 def manifest_path() -> Path:
     """The legacy aggregate manifest, written by BOTH halves.
 

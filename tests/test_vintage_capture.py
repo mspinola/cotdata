@@ -649,8 +649,15 @@ def test_a_fetch_failure_is_not_a_tripwire_condition(store_env):
 def test_disagg_and_tff_start_in_2010_not_2006():
     """cftc.gov serves 404 for fut_disagg_txt_2006..2009 and fut_fin_txt_2006..2009
     (verified live), so 2006 made every `fetch --all` record eight permanent failure
-    snapshots that could never succeed."""
+    snapshots that could never succeed.
+
+    Supplemental is the counter-example, and the reason each report gets its own floor
+    rather than one shared constant: dea_cit_txt_2006..2009 all return 200 (verified live
+    2026-08-03), so the same year that is a permanent failure for disagg/TFF is real data
+    for the Supplemental."""
     from cotdata import vintage
-    assert [s.report_type for s in vintage.annual_sources(2009)] == ["legacy"]
+    assert {s.report_type for s in vintage.annual_sources(2009)} == {
+        "legacy", "supplemental"}
+    assert {s.report_type for s in vintage.annual_sources(2005)} == {"legacy"}
     assert {s.report_type for s in vintage.annual_sources(2010)} == {
-        "legacy", "disaggregated", "tff"}
+        "legacy", "disaggregated", "tff", "supplemental"}

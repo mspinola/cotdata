@@ -15,7 +15,7 @@ from . import config
 # become a second COT producer racing the first, which is the failure the split manifests
 # exist to contain. Read-only actions (--check, --reconcile) belong to both.
 _HALF_ACTIONS = {
-    "cot": ("cot_legacy", "cot_disagg", "cot_tff", "cot_all"),
+    "cot": ("cot_legacy", "cot_disagg", "cot_tff", "cot_supplemental", "cot_all"),
     "prices": ("prices", "metadata", "prices_yahoo", "ingest_databento",
                "build_databento"),
 }
@@ -63,7 +63,12 @@ def main(argv=None, half=None) -> None:
     p.add_argument("--cot-legacy", action="store_true", help="Update CFTC COT Legacy (cross-platform).")
     p.add_argument("--cot-disagg", action="store_true", help="Update CFTC COT Disaggregated Futures-Only (cross-platform).")
     p.add_argument("--cot-tff", action="store_true", help="Update Traders in Financial Futures (TFF) COT (cross-platform).")
-    p.add_argument("--cot-all", action="store_true", help="Update all COT pipelines (Legacy, Disagg, TFF).")
+    p.add_argument("--cot-supplemental", action="store_true",
+                   help="Update the CFTC Supplemental (Commodity Index Trader) COT "
+                        "(cross-platform). 13 agricultural markets, and futures-and-options "
+                        "COMBINED: its open interest is not comparable with the other three.")
+    p.add_argument("--cot-all", action="store_true",
+                   help="Update all COT pipelines (Legacy, Disagg, TFF, Supplemental).")
     p.add_argument("--symbols", nargs="+", default=None, help="Internal symbols; default = all in registry.")
     p.add_argument("--full", action="store_true",
                    help="Full rebuild of reconstructed volume (ignore the incremental "
@@ -157,9 +162,11 @@ def main(argv=None, half=None) -> None:
         return
 
     if not (args.prices or args.metadata or args.prices_yahoo or args.ingest_databento
-            or args.build_databento or args.cot_legacy or args.cot_disagg or args.cot_tff or args.cot_all):
+            or args.build_databento or args.cot_legacy or args.cot_disagg or args.cot_tff
+            or args.cot_supplemental or args.cot_all):
         p.error("nothing to do — pass --check, --prices, --prices-yahoo, --ingest-databento, "
-                "--build-databento, --metadata, --cot-legacy, --cot-disagg, --cot-tff, or --cot-all")
+                "--build-databento, --metadata, --cot-legacy, --cot-disagg, --cot-tff, "
+                "--cot-supplemental, or --cot-all")
 
     if args.prices or args.metadata:
         from .providers import norgate
@@ -230,6 +237,21 @@ def main(argv=None, half=None) -> None:
         kinds.append("cot_tff")
         if not (r or {}).get("ok", True):
             failed_kinds.append("cot_tff")
+
+    if args.cot_supplemental or args.cot_all:
+        from .providers import cftc_cit
+        r = cftc_cit.update()
+        kinds.append("cot_supplemental")
+        if not (r or {}).get("ok", True):
+            failed_kinds.append("cot_supplemental")
+        # Coverage is printed rather than merely written, because a market entering or
+        # leaving is the kind of change that is invisible in a per-market read and
+        # breaks every pooled statistic computed over the universe.
+        cov = (r or {}).get("coverage")
+        if cov is not None and not cov.empty:
+            per_year = cov.groupby("report_year")["market_code"].nunique()
+            print(f"cot_supplemental coverage: {int(per_year.min())}-{int(per_year.max())} "
+                  f"markets per year over {len(per_year)} year(s).")
 
     # Structured heartbeat for downstream tools: rebuild status.json from the now-
     # updated manifest. Pollers detect new data via newest_data[<domain>].

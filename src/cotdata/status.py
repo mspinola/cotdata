@@ -18,7 +18,8 @@ def status_path():
     return config.store_root() / STATUS_FILENAME
 
 # Domains shown by --check, in report order.
-_DOMAINS = ["prices", "metadata", "cot", "cot_legacy", "cot_disagg", "cot_tff"]
+_DOMAINS = ["prices", "metadata", "cot", "cot_legacy", "cot_disagg", "cot_tff",
+            "cot_supplemental"]
 # An entry whose producer last touched it more than this many days behind its
 # domain's newest write probably failed while its peers succeeded (a partial run).
 _LAG_DAYS = 3

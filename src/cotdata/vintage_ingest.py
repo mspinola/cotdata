@@ -50,12 +50,26 @@ ALL_COLUMNS = NATURAL_KEY + ["market_name"] + VALUE_FIELDS + [
     "row_sha256", "is_tombstone"]
 
 # Controlled vocabulary per report type (validation §5). "nonreportable" is common
-# to all three; the rest come from each report's reporting categories.
+# to all four; the rest come from each report's reporting categories.
+#
+# The vocabulary is deliberately checked PER REPORT TYPE and never globally. Supplemental
+# reuses "commercial" and "noncommercial", and those labels do NOT mean what they mean
+# under Legacy: they are net of index traders, and the whole report is futures-and-options
+# combined where Legacy here is futures-only. Nothing can silently merge the two, because
+# both ``report_type`` and ``combined`` are in the natural key, but a consumer summing
+# across report types would still be wrong, so keep the report type attached.
+#
+# Reusing the labels rather than minting "non_commercial"/"non_reportable" spellings is a
+# deliberate choice against the source handoff: an alternative spelling would have made
+# ``category == "nonreportable"`` silently miss every Supplemental row while leaving the
+# genuinely confusable label, "commercial", identical anyway. Consistency loses nothing
+# the natural key was not already carrying.
 CATEGORIES = {
     "legacy": {"commercial", "noncommercial", "nonreportable"},
     "disaggregated": {"producer_merchant", "swap", "managed_money",
                       "other_reportable", "nonreportable"},
     "tff": {"dealer", "asset_manager", "leveraged", "other_reportable", "nonreportable"},
+    "supplemental": {"commercial", "noncommercial", "index_trader", "nonreportable"},
 }
 
 
@@ -230,28 +244,112 @@ _CONCENTRATION = {
     "cr8_net_short": "Conc_Net_LE_8_TDR_Short_All",
 }
 
+# Supplemental (Commodity Index Trader). Same tuple shape as the two above:
+# (long, short, spread, traders_long, traders_short).
+#
+# Two things the other reports do not do. First, every position column except
+# Non-Reportable carries a ``_NoCIT`` suffix, because the index-trader book has been
+# carved OUT of it: this report's "commercial" is commercial-minus-index-traders, not
+# Legacy's commercial. Second, the spelling is CFTC's own and carries two long-standing
+# typos, "Postions" (missing the i) on the spread column and "NComm" rather than
+# "NonComm" on the position columns while the Pct_/Traders_ columns use "NonComm". Both
+# spellings are handled below rather than normalised, so the day CFTC fixes them is not
+# the day this breaks: ``_resolve`` already tries the underscore variants, and the
+# NComm/NonComm pair is listed explicitly.
+#
+# Non-Reportable has no ``_NoCIT`` variant because index traders are reportable by
+# definition, so nothing is carved out of it. Verified: its values match the Legacy
+# COMBINED file exactly on 390/390 2026 market-weeks.
+_SUPPLEMENTAL_CATEGORIES = {
+    "noncommercial": ("NComm_Positions_Long_All_NoCIT", "NComm_Positions_Short_All_NoCIT",
+                      "NComm_Postions_Spread_All_NoCIT",
+                      "Traders_NonComm_Long_All_NoCIT", "Traders_NonComm_Short_All_NoCIT"),
+    "commercial": ("Comm_Positions_Long_All_NoCIT", "Comm_Positions_Short_All_NoCIT",
+                   None, "Traders_Comm_Long_All_NoCIT", "Traders_Comm_Short_All_NoCIT"),
+    "index_trader": ("CIT_Positions_Long_All", "CIT_Positions_Short_All",
+                     None, "Traders_CIT_Long_All", "Traders_CIT_Short_All"),
+    "nonreportable": ("NonRept_Positions_Long_All", "NonRept_Positions_Short_All",
+                      None, None, None),
+}
+
 _REPORT_DATE_COL = "Report_Date_as_MM_DD_YYYY"
 
 
+# CFTC's header spellings that have varied, or are outright typos, across the four
+# reports. Each is a substitution tried on a missing column name before giving up.
+# "Postions" and "Spead" are typos in CFTC's own header row; "NComm" vs "NonComm" is an
+# inconsistency WITHIN the Supplemental file, whose position columns say NComm while its
+# Pct_/Traders_ columns say NonComm.
+_HEADER_VARIANTS = (
+    ("__", "_"), ("_Positions", "__Positions"),
+    ("Positions", "Postions"), ("Postions", "Positions"),
+    ("Spread", "Spead"), ("Spead", "Spread"),
+    ("NonComm", "NComm"), ("NComm", "NonComm"),
+)
+
+# How many substitutions may COMPOSE. One is not enough for the column that needs it
+# most: ``NComm_Postions_Spread_All_NoCIT`` carries two defects at once, so the realistic
+# CFTC cleanup (fix the typo and normalise the prefix in one pass, giving
+# ``NonComm_Positions_Spread_All_NoCIT``) is exactly the case a single-substitution
+# search cannot reach. Raising there would be safe but would still be an outage on a
+# Friday release. Bounded rather than unbounded because the substitutions are not
+# confluent — ``_Positions``/``__Positions`` and ``__``/``_`` invert each other — so an
+# unbounded closure would loop.
+_MAX_HEADER_SUBSTITUTIONS = 3
+
+
+def _header_candidates(name: str) -> list[str]:
+    """Every spelling of ``name`` reachable in at most _MAX_HEADER_SUBSTITUTIONS steps.
+
+    Breadth-first so the fewest-edits spellings are tried first, which matters because
+    two candidates could in principle both exist in one file. Deterministic: the variant
+    tuple's order fixes the enumeration order.
+
+    VERIFIED not to collide: across every column name the four canonicalisers ask for,
+    no candidate of one target is a candidate of another, and no candidate resolves to a
+    real column of a DIFFERENT field in the shipped 2026 Legacy, Disaggregated, TFF and
+    Supplemental headers. Pinned by test_header_variants_cannot_resolve_to_another_field.
+    """
+    seen = {name}
+    frontier = [name]
+    out = []
+    for _ in range(_MAX_HEADER_SUBSTITUTIONS):
+        nxt = []
+        for cur in frontier:
+            for old, new in _HEADER_VARIANTS:
+                alt = cur.replace(old, new)
+                if alt not in seen:
+                    seen.add(alt)
+                    out.append(alt)
+                    nxt.append(alt)
+        frontier = nxt
+    return out
+
+
 def _resolve(wide: pd.DataFrame, name: str | None) -> pd.Series | None:
-    """Look a column up, tolerating CFTC's single/double-underscore inconsistency.
+    """Look a column up, tolerating CFTC's known header spelling variants.
 
     Raises rather than silently producing a null column. A canonicaliser that quietly
     returns nulls for Managed Money because a header was renamed would write those nulls
     as OBSERVATIONS, and the next real value would then be recorded as a revision. A
     renamed column must fail loudly at ingest, not decay into fake revision history.
+
+    A spelling variant is NOT a rename. The variants are a closed, enumerated list of
+    spellings CFTC has actually shipped for the same field; anything outside it still
+    raises, which is what keeps this a tolerance rather than a fuzzy match.
     """
     if name is None:
         return None
     if name in wide.columns:
         return wide[name]
-    for alt in (name.replace("__", "_"), name.replace("_Positions", "__Positions")):
+    for alt in _header_candidates(name):
         if alt in wide.columns:
             return wide[alt]
     raise ValidationError(
-        f"column {name!r} not found (nor an underscore variant). CFTC changed a header: "
-        f"map it explicitly rather than letting this category ingest as nulls, which would "
-        f"be recorded as real observations and then as revisions when it came back.")
+        f"column {name!r} not found (nor a known spelling variant). CFTC changed a "
+        f"header: map it explicitly rather than letting this category ingest as nulls, "
+        f"which would be recorded as real observations and then as revisions when it "
+        f"came back.")
 
 
 def _combined_flag(wide: pd.DataFrame, override: bool | None) -> bool:
@@ -346,6 +444,37 @@ def canonicalize_tff(wide: pd.DataFrame, *, combined: bool | None = None) -> pd.
     """Traders in Financial Futures report to canonical long rows."""
     return _canonicalize(wide, report_type="tff",
                          categories=_TFF_CATEGORIES, combined=combined)
+
+
+def canonicalize_supplemental(wide: pd.DataFrame) -> pd.DataFrame:
+    """Supplemental (Commodity Index Trader) report to canonical long rows.
+
+    ``combined`` is ASSERTED True rather than read, and takes no override. There is no
+    futures-only Supplemental to select between, so an override could only ever be wrong,
+    and every other path into this schema decides ``combined`` from the file. Making the
+    one report that cannot say so in its own bytes look like the others would put a
+    guessed value into the natural key.
+
+    Measured rather than assumed (docs/analysis/2026-08-03-cit-supplemental-measurements.md):
+    this report's ``Open_Interest_All`` matches the Legacy futures-and-options-combined
+    file on 390 of 390 2026 market-weeks and the Legacy futures-only file on 0 of 390.
+    ``NonRept_Positions_Long_All`` matches combined on the same 390.
+
+    The file carries no ``FutOnly_or_Combined`` column today. If CFTC ever adds one, this
+    raises unless it agrees, so the assertion cannot rot into a stale constant.
+    """
+    if "FutOnly_or_Combined" in wide.columns:
+        claimed = {str(v).strip().lower()
+                   for v in wide["FutOnly_or_Combined"].dropna().unique()}
+        if claimed - {"combined"}:
+            raise ValidationError(
+                f"the Supplemental file now carries FutOnly_or_Combined={sorted(claimed)}, "
+                f"but this report has only ever been futures-and-options combined. Either "
+                f"CFTC began publishing a futures-only variant, in which case the fetch "
+                f"list and this assertion both need updating, or the wrong file was "
+                f"passed to canonicalize_supplemental.")
+    return _canonicalize(wide, report_type="supplemental",
+                         categories=_SUPPLEMENTAL_CATEGORIES, combined=True)
 
 
 # ── Validation (§5) ─────────────────────────────────────────────────────────
@@ -480,11 +609,22 @@ def rounding_tolerance(n_categories: int) -> int:
     admits at most ``n`` contracts of error, which is the bound returned here.
 
     Measured against the 2026 files, the worst observed breach is well inside it: Legacy 1
-    contract (bound 3), TFF 2 (bound 5), Disaggregated 0. Every single breach in all three
+    contract (bound 3), TFF 2 (bound 5), Disaggregated 0. Every breach in those three
     reports falls in one of those three Consolidated markets and nowhere else, so the
     tolerance costs no real sensitivity. Without it, 48 off-by-one warnings fire on the
     2026 files alone, which is exactly the cry-wolf rate the previous version of this check
     was corrected for.
+
+    **Supplemental breaks the "only in Consolidated markets" half of that**, and the
+    mechanism above is why the bound still holds. It is futures-and-options COMBINED, so
+    the published figures are delta-weighted option equivalents rounded to whole
+    contracts, and every category is rounded independently — the same n-addends argument,
+    applying to every market rather than to three. Measured over all 13,584 market-weeks
+    from 2006 to 2026, the derived category total misses open interest by at most 2
+    contracts, against a bound of 4, and does so on 45% of rows rather than 0.4%. The
+    control is decisive: on the SAME 2026 weeks the Legacy futures-only file is exact on
+    99.7% of rows while the Legacy combined file shows the identical +/-1 pattern on 10%.
+    Combined reporting is the cause, not the Supplemental's extra category.
     """
     return max(1, int(n_categories))
 
@@ -692,6 +832,163 @@ def asof(t, *, report_date=None, market_code=None, report_type=None) -> pd.DataF
     if report_type is not None:
         obs = obs[obs["report_type"] == report_type]
     return _latest_by_key(obs).reset_index(drop=True)
+
+
+# ── Coverage (which markets a report could be scored on at all) ─────────────
+# A report's covered market set is NOT a constant, and treating it as one is how a
+# consumer silently reports on 12 markets while believing it has 13. The Supplemental is
+# the live case: Soybean Meal (026603) entered in 2013 and the other twelve have run
+# since 2006, which is why both counts circulate in the wild. Derived from the stored
+# observations rather than from a list in source, so it cannot drift from the data.
+COVERAGE_COLUMNS = ["report_type", "report_year", "market_code", "market_name",
+                    "first_report_date", "last_report_date", "weeks"]
+
+
+def _coverage_dir() -> Path:
+    return vintage.vintage_root() / "coverage"
+
+
+def coverage_path(report_type: str) -> Path:
+    return _coverage_dir() / f"{report_type}.parquet"
+
+
+def clean_market_name(v) -> str | None:
+    """One market name, whitespace-stripped, with every flavour of null mapped to None.
+
+    ``astype(str)`` is NOT good enough and the difference is version-dependent: under
+    pandas 2 it turns a missing name into the literal ``"nan"``, and under pandas 3's str
+    dtype it leaves the float NaN in place. The first silently wins any lexicographic
+    comparison (lowercase sorts above every real CFTC name, which are uppercase); the
+    second raises ``TypeError`` comparing str to float. Both were reachable, because
+    ``market_name`` is descriptive and ``validate`` does not require it.
+    """
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    return s or None
+
+
+def latest_market_name(names, dates) -> str | None:
+    """The name carried at the LATEST report date, skipping nulls.
+
+    Deliberately not ``max(names)``. Lexicographic max is not "current" and picks the
+    STALE name on four real markets: Cocoa, Cotton, Sugar and Coffee all renamed from
+    "... - NEW YORK BOARD OF TRADE" to "... - ICE FUTURES U.S.", and ``'I' < 'N'``, so
+    the max is the pre-rename name for every year after the change. Wheat happens to
+    come out right under either rule, which is how it went unnoticed.
+    """
+    pairs = [(d, n) for d, n in zip(dates, map(clean_market_name, names)) if n is not None]
+    if not pairs:
+        return None
+    return max(pairs, key=lambda t: t[0])[1]
+
+
+def _coverage_from(df: pd.DataFrame, report_type: str) -> pd.DataFrame:
+    """Shared aggregation behind both coverage entry points.
+
+    ``df`` carries report_date / market_code / market_name. One implementation because
+    the producer derives coverage from the downloaded FILES and the vintage layer derives
+    it from the stored OBSERVATIONS, and two copies of the name rule drifted apart once
+    already.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=COVERAGE_COLUMNS)
+    df = df.copy()
+    df["report_date"] = pd.to_datetime(df["report_date"])
+    df["report_year"] = df["report_date"].dt.year
+    rows = []
+    for (year, code), g in df.groupby(["report_year", "market_code"], sort=True):
+        rows.append({
+            "report_type": report_type,
+            "report_year": int(year),
+            "market_code": code,
+            "market_name": latest_market_name(g["market_name"], g["report_date"]),
+            "first_report_date": g["report_date"].min(),
+            "last_report_date": g["report_date"].max(),
+            "weeks": int(g["report_date"].nunique()),
+        })
+    return pd.DataFrame(rows, columns=COVERAGE_COLUMNS)
+
+
+def derive_coverage(report_type: str) -> pd.DataFrame:
+    """Which markets appear in the observation store for ``report_type``, per report year.
+
+    Change-only writes do not lose coverage: a market-week's first sighting is always
+    written, so every (report_year, market_code) that was ever ingested has at least one
+    row here, and ``weeks`` counts DISTINCT report dates so later revisions do not
+    inflate it.
+
+    This is the LIVE read. ``read_coverage`` returns whatever the artifact last recorded,
+    which is a snapshot with no freshness guarantee: prefer this one when correctness
+    matters and the artifact when you want what was published.
+    """
+    obs = read_observations()
+    if obs.empty:
+        return pd.DataFrame(columns=COVERAGE_COLUMNS)
+    obs = obs[obs["report_type"] == report_type]
+    return _coverage_from(obs[["report_date", "market_code", "market_name"]], report_type)
+
+
+def write_coverage(report_type: str) -> tuple[Path, pd.DataFrame]:
+    """Emit the coverage artifact for ``report_type``. Rewritten in full each time,
+    because it is a derived view of the observations and never a log.
+
+    Takes the same single-writer lock as ingest. Not for the write, which is atomic, but
+    for the READ underneath it: ``read_observations`` concats one parquet per report year
+    while ``ingest_canonical`` rewrites them one at a time, so an unlocked derive can see
+    a run part-way through and emit a torn coverage set. Failing loudly is the repo's
+    answer everywhere else the two writers could interleave.
+    """
+    with _WriteLock(vintage.vintage_root()):
+        cov = derive_coverage(report_type)
+        path = coverage_path(report_type)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".parquet.tmp")
+        cov.to_parquet(tmp, index=False)
+        tmp.replace(path)
+    return path, cov
+
+
+def read_coverage(report_type: str) -> pd.DataFrame:
+    p = coverage_path(report_type)
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame(columns=COVERAGE_COLUMNS)
+
+
+def coverage_changes(cov: pd.DataFrame) -> list[dict]:
+    """Markets entering or leaving the covered set, year over year.
+
+    The point of the artifact: an entry or exit is a break in every pooled statistic
+    computed across the universe, and it is invisible in a per-market read.
+
+    **Only CONSECUTIVE years are compared**, and a gap emits a ``gap`` record instead.
+    Coverage is derived from what was INGESTED, not from what CFTC published, so a store
+    holding 2006 and 2026 and nothing between would otherwise report Soybean Meal as
+    entering in 2026 — an ingest artifact presented as a fact about the market. Refusing
+    to answer across a gap is the only honest option: the years that would settle it are
+    the ones that are missing.
+    """
+    if cov.empty:
+        return []
+    by_year = {int(y): dict(zip(g["market_code"], g["market_name"]))
+               for y, g in cov.groupby("report_year", sort=True)}
+    years = sorted(by_year)
+    out = []
+    for prev, cur in zip(years, years[1:]):
+        if cur != prev + 1:
+            out.append({"report_year": cur, "change": "gap", "market_code": "",
+                        "market_name": f"no observations for {prev + 1}-{cur - 1}, so "
+                                       f"entries and exits across the gap are unknowable"})
+            continue
+        for code in sorted(set(by_year[cur]) - set(by_year[prev])):
+            out.append({"report_year": cur, "change": "enter", "market_code": code,
+                        "market_name": by_year[cur][code]})
+        for code in sorted(set(by_year[prev]) - set(by_year[cur])):
+            out.append({"report_year": cur, "change": "exit", "market_code": code,
+                        "market_name": by_year[prev][code]})
+    return out
 
 
 def read_revisions(detected_years=None) -> pd.DataFrame:
