@@ -102,6 +102,20 @@ def read_cot_tff(name: str) -> pd.DataFrame:
     return pd.read_parquet(p) if p.exists() else pd.DataFrame()
 
 
+# ── COT Supplemental (Commodity Index Traders) ────────────────────────────
+# The one report with no futures-only variant: every row is futures-and-options
+# combined, so these tables are NOT comparable with cot_legacy/cot_disagg/cot_tff
+# even for the same market and week. See providers/cftc_cit.py.
+def write_cot_supplemental(name: str, df: pd.DataFrame, source: str) -> None:
+    _atomic_write_parquet(df, config.cot_supplemental_dir() / f"{name}.parquet")
+    _touch_manifest("cot_supplemental", name, df, source)
+
+
+def read_cot_supplemental(name: str) -> pd.DataFrame:
+    p = config.cot_supplemental_dir() / f"{name}.parquet"
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
+
+
 
 # ── Manifest ──────────────────────────────────────────────────────────────
 # ── The COT / price seam ──────────────────────────────────────────────────
@@ -117,6 +131,7 @@ _DOMAIN_HALF = {
     "cot_legacy": "cot",
     "cot_disagg": "cot",
     "cot_tff": "cot",
+    "cot_supplemental": "cot",
 }
 
 
@@ -134,7 +149,7 @@ def half_for(kind: str) -> str:
 
 def _empty_manifest() -> dict:
     return {"schema_version": config.SCHEMA_VERSION, "metadata": {}, "prices": {},
-            "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}}
+            "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}, "cot_supplemental": {}}
 
 
 def _read_json(p) -> dict:
@@ -299,6 +314,7 @@ _DOMAIN_DIRS = {
     "cot_legacy": config.cot_legacy_dir,
     "cot_disagg": config.cot_disagg_dir,
     "cot_tff": config.cot_tff_dir,
+    "cot_supplemental": config.cot_supplemental_dir,
 }
 
 

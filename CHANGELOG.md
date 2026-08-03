@@ -6,6 +6,71 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **The CFTC Supplemental (Commodity Index Trader) report, as a fourth `report_type`.**
+  13 select agricultural markets with the index-trader book split out of the commercial and
+  non-commercial buckets. New producer action `cotdata-cot --cot-supplemental` (also in
+  `--cot-all`) writing `cot_supplemental/{symbol}_{code}.parquet`, new
+  `cotdata.get_cot(sym, report="supplemental")`, and `supplemental` added to the vintage
+  capture set from 2006 onward with `canonicalize_supplemental` behind it. Scope recorded
+  in [ADR-0002](docs/adr/ADR-0002-supplemental-report-is-in-scope.md); it is CFTC
+  positioning, so it sits inside ADR-0007's narrowed boundary on the same argument that
+  admitted vintage provenance.
+
+  **Purely additive.** Nothing was added to the natural key, `VALUE_FIELDS` or
+  `ALL_COLUMNS`, so no stored `row_sha256` moves and no existing observation is touched.
+  A store that never runs the new action is unchanged.
+
+  Four things came back different from what the brief and the CFTC prose said, all
+  measured against the real 2006-2026 archives
+  ([docs/analysis/2026-08-03-cit-supplemental-measurements.md](docs/analysis/2026-08-03-cit-supplemental-measurements.md)):
+
+  - **Coverage is 12 markets, then 13 from 2013**, when Soybean Meal entered. Both counts
+    circulate because both are right for part of the history. That is the only entry and
+    there are no exits, and three markets were renamed without changing code (001612 moved
+    exchange from KCBT to CME and kept it), which is why coverage keys on `market_code`.
+  - **The report is futures-and-options combined and the file cannot say so** — it carries
+    no `FutOnly_or_Combined` column, so the existing `_combined_flag` would have defaulted
+    it to `False` and put a guessed value in the natural key. Established by matching open
+    interest against both Legacy series: **390/390** against combined, **0/390** against
+    futures-only. `canonicalize_supplemental` asserts it and takes no override.
+  - **Index traders are carved out of three buckets, not the two CFTC describes**: the
+    third is non-commercial *spreading*, ~0% of the index book in 2006 and ~9% now.
+  - **The fetch pattern differs from the other three reports.** No 2006-2016 history bundle
+    (404), and every year from 2006 returns 200 where disagg/TFF 404 before 2010, so
+    `annual_sources` needed its own floor.
+
+  **The open-interest identity is exact on only ~55% of market-weeks, and that is
+  rounding.** The residual never exceeds 2 contracts against a tolerance of 4, and the rate
+  is flat across 21 years (62.6% to 71.7% by year, sd 2.7pp). Control: on the same weeks,
+  Legacy *futures-only* is exact on 99.7% of rows while Legacy *combined* shows the
+  identical +/-1 pattern on 10%. Combined reports publish delta-weighted option equivalents
+  rounded to whole contracts, independently per category, which is the same n-addends
+  mechanism `rounding_tolerance` was already derived from. `validate()` raises zero
+  warnings across the full history.
+
+  **The category vocabulary check must stay per-`report_type`.** Supplemental reuses
+  `commercial` and `noncommercial`, and they do not mean what they mean under Legacy: they
+  are net of index traders, and this report is combined where Legacy here is futures-only.
+  Reusing the labels rather than minting `non_commercial`-style spellings is deliberate — a
+  new spelling would make `category == "nonreportable"` silently miss every Supplemental
+  row while leaving `commercial`, the genuinely confusable label, identical anyway.
+  `report_type` and `combined` are both in the natural key, so the series cannot merge.
+
+  **Index Traders does NOT nest inside Disaggregated's Swap Dealer.** The taxonomy is
+  Legacy, not Disaggregated, so the two cannot be differenced to isolate levered swap flow.
+  Anything relating them is an inference across differently-partitioned reports.
+- **`cotdata-vintage coverage`** — emits which markets a report actually covered per year,
+  derived from the stored observations rather than from a list in source, and prints every
+  entry and exit. A covered set treated as constant is how a consumer reports on 12 markets
+  believing it has 13.
+
+### Changed
+- `vintage_ingest._resolve` now tolerates CFTC's `Postions`/`Positions` and
+  `NComm`/`NonComm` header variants alongside the single/double-underscore one it already
+  handled. All are real spellings in shipped CFTC files, two of them typos; tolerating both
+  directions means a future correction upstream is not a breakage here.
+
 ## [0.3.0] - 2026-08-02
 
 **The first release actually published to PyPI since 0.1.0.** 0.2.0 was tagged earlier

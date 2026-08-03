@@ -16,14 +16,21 @@ def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
     """Read a symbol's weekly COT history with predecessor code stitching.
 
     name: the internal pipeline symbol, e.g. 'ES' or 'GC'.
-    report: 'legacy' (default), 'disagg' (commodity futures only), or 'tff' (financial futures only).
+    report: 'legacy' (default), 'disagg' (commodity futures only), 'tff' (financial
+    futures only), or 'supplemental' (13 agricultural markets, index traders split out).
 
     Returns:
     DataFrame indexed by date. The columns depend on the `report` requested:
       - legacy: Open_Interest_All, NonComm_Positions_Long_All, Comm_Positions_Long_All, etc.
       - disagg: Open_Interest_All, Prod_Merc_Positions_Long_All, M_Money_Positions_Long_All, etc.
       - tff: Open_Interest_All, Dealer_Positions_Long_All, Lev_Money_Positions_Long_All, etc.
+      - supplemental: Open_Interest_All, CIT_Positions_Long_All,
+        NComm_Positions_Long_All_NoCIT, Comm_Positions_Long_All_NoCIT, etc.
     If no data exists, returns an empty DataFrame.
+
+    'supplemental' is futures-and-options COMBINED and the other three are futures-only,
+    so its Open_Interest_All is a different quantity for the same market and week. Do not
+    difference or ratio across reports without accounting for that.
     """
     sym = REGISTRY.get(name)
     if sym is None:                       # allow lookup by primary CFTC code, not just symbol
@@ -33,9 +40,11 @@ def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
         "legacy": store.read_cot_legacy,
         "disagg": store.read_cot_disagg,
         "tff": store.read_cot_tff,
+        "supplemental": store.read_cot_supplemental,
     }.get(report)
     if not read_fn:
-        raise ValueError(f"Unknown report type: {report}. Expected 'legacy', 'disagg', or 'tff'")
+        raise ValueError(f"Unknown report type: {report}. Expected 'legacy', 'disagg', "
+                         f"'tff', or 'supplemental'")
 
     if sym is None or not sym.cftc_code:
         return read_fn(name)

@@ -187,7 +187,8 @@ def test_every_action_flag_is_assigned_to_a_half():
     from cotdata import update
     assigned = set(update._HALF_ACTIONS["cot"]) | set(update._HALF_ACTIONS["prices"])
     actions = {"prices", "metadata", "prices_yahoo", "ingest_databento",
-               "build_databento", "cot_legacy", "cot_disagg", "cot_tff", "cot_all"}
+               "build_databento", "cot_legacy", "cot_disagg", "cot_tff",
+               "cot_supplemental", "cot_all"}
     assert actions == assigned
 
 

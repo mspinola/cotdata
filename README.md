@@ -66,6 +66,7 @@ The **store is the API boundary** — not Python imports. Producers write Parque
         ┌────────────────────────────────────────────────────────────┐
         │ CANONICAL STORE   ($COTDATA_STORE)                         │
         │   prices/   cot_legacy/   cot_disagg/   cot_tff/           │
+        │   cot_supplemental/                                        │
         │   metadata/   manifest.json   status.json                  │
         └────────────────────────────────────────────────────────────┘
                                       │   read  (offline, any OS)
@@ -82,6 +83,7 @@ The store layout:
 - `cot_legacy/{symbol}_{code}.parquet` — weekly CFTC Legacy positioning.
 - `cot_disagg/{symbol}_{code}.parquet` — weekly CFTC Disaggregated positioning.
 - `cot_tff/{symbol}_{code}.parquet` — weekly CFTC Traders in Financial Futures positioning.
+- `cot_supplemental/{symbol}_{code}.parquet` — weekly CFTC Supplemental (Commodity Index Trader) positioning, 13 agricultural markets. **Futures-and-options combined**, unlike the three above.
 - `metadata/contract_specs.parquet` — Norgate contract specifications (tick size, point value, margin).
 - `manifest.json` — per-table `last_date`, `n_rows`, `source`, `updated_at`, `schema_version`.
 - `status.json` — machine-readable new-data signal for downstream tools (see [Operations](#operations)).
@@ -101,11 +103,17 @@ signals = cotdata.get_prices("ES", adjustment="backadj")  # signals + stops (gap
 sizing  = cotdata.get_prices("ES", adjustment="unadj")    # position sizing (true dollar prices)
 milk    = cotdata.get_prices("DC", adjustment="propadj")  # ratio-adjusted: strictly positive, %-return preserving
 
-# COT — three CFTC report families:
+# COT — four CFTC report families:
 legacy  = cotdata.get_cot("ES", report="legacy")   # Commercial / Non-Commercial
 disagg  = cotdata.get_cot("ES", report="disagg")   # Managed Money, Swap Dealers, ... (commodities)
 tff     = cotdata.get_cot("ES", report="tff")      # Leveraged Funds, Asset Managers, ... (financials)
+cit     = cotdata.get_cot("CC", report="supplemental")  # Index Traders (13 ags, combined basis)
 ```
+
+> [!WARNING]
+> `supplemental` is **futures-and-options combined** and the other three are futures-only, so
+> its `Open_Interest_All` is a different quantity for the same market and week. Do not
+> difference or ratio across reports without accounting for that.
 
 A price frame (`get_prices("ES", adjustment="backadj").tail(3)`):
 
@@ -130,7 +138,8 @@ COTDATA_STORE=/store  cotdata-update --metadata                  # Norgate contr
 COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (any OS)
 COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggregated (any OS)
 COTDATA_STORE=/store  cotdata-update --cot-tff                   # CFTC Traders in Financial Futures (any OS)
-COTDATA_STORE=/store  cotdata-update --cot-all                   # all three CFTC COT reports
+COTDATA_STORE=/store  cotdata-update --cot-supplemental          # CFTC Supplemental / index traders (any OS)
+COTDATA_STORE=/store  cotdata-update --cot-all                   # all four CFTC COT reports
 COTDATA_STORE=/store  cotdata-vintage fetch                      # optional: capture as-published COT (any OS)
 ```
 
@@ -269,7 +278,7 @@ Every producer run writes `$COTDATA_STORE/status.json` (atomically, beside the d
 {
   "generated_at": "2026-07-15T10:15:24Z",
   "schema_version": 2,
-  "newest_data": { "prices": "2026-07-14", "cot_legacy": "2026-07-07", "cot_disagg": "2026-07-07", "cot_tff": "2026-07-07" },
+  "newest_data": { "prices": "2026-07-14", "cot_legacy": "2026-07-07", "cot_disagg": "2026-07-07", "cot_tff": "2026-07-07", "cot_supplemental": "2026-07-07" },
   "domains":     { "prices": { "newest_data": "2026-07-14", "last_write": "2026-07-15T10:15:24Z", "entries": 84, "rows": 829096, "lagging": 0 }, "...": {} },
   "last_run":    { "kinds": ["prices"], "ok": ["ES", "..."], "symbols_failed": [], "rows": 1658000, "seconds": 88, "at": "2026-07-15T10:15:24Z" }
 }
@@ -342,7 +351,8 @@ cotdata-vintage fetch --all                # every year 1986-present (see below)
 cotdata-vintage ingest --pending           # parse retained raw -> observations + revisions
 cotdata-vintage diff --since 2026-01-01    # field-level revisions, with revision depth
 cotdata-vintage asof --as-of 2026-07-24T18:00:00 --report-date 2026-07-21
-cotdata-vintage flow --market 088691       # weekly flow decomposition (see below)
+cotdata-vintage zero-sum --market 088691   # long/short/open-interest identity per week
+cotdata-vintage coverage                   # which markets a report covers, per year
 cotdata-schedule sync                      # CFTC Special Announcements
 cotdata-schedule published                 # true publication dates from retained weekly statics
 cotdata-schedule backfill                  # resolve release_date + its provenance
@@ -353,11 +363,17 @@ How it works:
 - **Immutable landing zone.** Every fetch is recorded (including 304s) and raw bytes are
   retained permanently under `vintage/raw/`, written atomically and never rewritten. A
   byte-identical regeneration is deduped — a changed download is not itself a revision.
-- **All three reports.** Legacy, Disaggregated and TFF canonicalise into one long schema.
-  Disagg and TFF also populate per-category spreading, per-category trader counts and
-  CR4/CR8 concentration, none of which the Legacy file carries, and they are where
-  **Managed Money** and **Leveraged Funds** live. A suppressed trader count (CFTC writes
-  `.`) canonicalises to null rather than to a string.
+- **All four reports.** Legacy, Disaggregated, TFF and Supplemental canonicalise into one
+  long schema. Disagg and TFF also populate per-category spreading, per-category trader
+  counts and CR4/CR8 concentration, none of which the Legacy file carries, and they are
+  where **Managed Money** and **Leveraged Funds** live. A suppressed trader count (CFTC
+  writes `.`) canonicalises to null rather than to a string. Supplemental is where **Index
+  Traders** live, and it is the one report where `combined` is `True`: the category
+  vocabulary is checked per `report_type`, so its `commercial` (which is net of index
+  traders) can never be mistaken for Legacy's.
+- **Coverage is not constant, and `cotdata-vintage coverage` says so.** A report's market
+  set is derived from the stored observations and every entry or exit is printed. The live
+  case is Supplemental, which covered 12 markets until Soybean Meal entered in 2013.
 - **Change-only observations.** A row is written only when its value hash differs from the
   latest for its natural key `(report_date, market_code, report_type, combined, category)`,
   so storage grows with actual revisions rather than with time.
@@ -503,13 +519,26 @@ Entity-specific positioning and trader counts for financial markets (CFTC TFF Fu
 > [!NOTE]
 > **Lossless Image**: Like Disaggregated, TFF parquets are a **lossless image** of the source CFTC `txt` files — the financial entity groups (`Dealer`, `Asset_Mgr`, `Lev_Money`, `Other_Rept`) and their `Traders_*` counts.
 
+### COT Supplemental Data (`cot_supplemental/{symbol}_{code}.parquet`)
+Index-trader positioning for 13 select agricultural markets (CFTC Supplemental / Commodity Index Trader Report). **History starts in January 2006**, and the covered set was **12 markets until Soybean Meal entered in 2013**. Indexed by tz-naive `Report_Date_as_MM_DD_YYYY` (renamed at parse from CFTC's `As_of_Date_In_Form_*`, whose own name changed in 2013).
+
+> [!WARNING]
+> **Combined basis, and the file does not say so.** This is the only report with no futures-only variant, and unlike Disaggregated and TFF it carries no `FutOnly_or_Combined` column. Verified by matching open interest against both Legacy series: 390/390 against futures-and-options combined, 0/390 against futures-only. Its open interest is therefore **not** comparable with the other three for the same market and week.
+
+> [!NOTE]
+> **Positions are net of index traders.** `Comm_Positions_Long_All_NoCIT` is commercial *minus* the index book, not Legacy's commercial. The index book is carved out of commercial, non-commercial **and non-commercial spreading** — three buckets, where CFTC's own prose names two. Non-Reportable is untouched, because index traders are reportable by definition.
+
+> [!NOTE]
+> **Lossless Image**: Like Disaggregated and TFF, these parquets are a lossless image of the source CFTC `txt` files, including CFTC's own header typos (`NComm_Postions_Spread_All_NoCIT`).
+
 ## Reference: COT formats explained
 
-The CFTC publishes positioning data in three formats; `cotdata` manages all three for complete coverage and the deepest history.
+The CFTC publishes positioning data in four formats; `cotdata` manages all four for complete coverage and the deepest history.
 
 1. **Legacy (1986–Present)** — *all markets.* Divides traders into **Commercial** (hedgers) and **Non-Commercial** (large speculators). The only format with pre-2006 data, so it's essential for long-term backtesting.
 2. **Disaggregated / DIS (2006–Present)** — *physical commodities only* (Agriculture, Energy, Metals). Splits traders into **Producer/Merchant**, **Swap Dealers**, **Managed Money**, and **Other Reportables** — a clearer view of "smart money" (Managed Money) in commodities.
 3. **Traders in Financial Futures / TFF (2006–Present)** — *financial markets only* (Equities, Rates, Currencies). Splits traders into **Dealer/Intermediary**, **Asset Manager**, **Leveraged Funds**, and **Other Reportables** — the definitive source for speculative flow (Leveraged Funds) in financials.
+4. **Supplemental / CIT (2006–Present)** — *13 select agricultural markets only.* Takes the Legacy split and carves **Index Traders** out of it, the only public source that separates index flow. Futures-and-options **combined** only. The taxonomy is Legacy, not Disaggregated, so Index Traders does **not** nest inside Disaggregated's Swap Dealer and the two cannot be differenced to isolate levered swap flow.
 
 ## Diagnostics
 

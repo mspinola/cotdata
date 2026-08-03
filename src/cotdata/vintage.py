@@ -99,7 +99,7 @@ def manifest_path() -> Path:
 @dataclass(frozen=True)
 class Source:
     """One fetchable CFTC file. ``report_year`` is None for the current-week static."""
-    report_type: str          # legacy | disaggregated | tff
+    report_type: str          # legacy | disaggregated | tff | supplemental
     source_kind: str          # annual_zip | weekly_static
     ext: str                  # zip | txt
     url: str
@@ -122,6 +122,12 @@ def _legacy_zip_url(year: int) -> str:
 # record eight permanent failure snapshots that could never succeed.
 _DISAGG_TFF_FIRST_YEAR = 2010
 
+# The Supplemental (Commodity Index Trader) report begins in January 2006, and UNLIKE
+# disagg/TFF every year from 2006 onward is served as its own zip — verified live
+# 2026-08-03, all 21 years returned 200. There is no dea_cit_txt_hist_2006_2016.zip
+# (404), so there is no bundle special case to write here.
+_SUPPLEMENTAL_FIRST_YEAR = 2006
+
 
 def annual_sources(year: int) -> list[Source]:
     out = [Source("legacy", "annual_zip", "zip", _legacy_zip_url(year), year)]
@@ -130,6 +136,9 @@ def annual_sources(year: int) -> list[Source]:
                           f"https://www.cftc.gov/files/dea/history/fut_disagg_txt_{year}.zip", year))
         out.append(Source("tff", "annual_zip", "zip",
                           f"https://www.cftc.gov/files/dea/history/fut_fin_txt_{year}.zip", year))
+    if year >= _SUPPLEMENTAL_FIRST_YEAR:
+        out.append(Source("supplemental", "annual_zip", "zip",
+                          f"https://www.cftc.gov/files/dea/history/dea_cit_txt_{year}.zip", year))
     return out
 
 

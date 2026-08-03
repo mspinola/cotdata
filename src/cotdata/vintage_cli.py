@@ -70,7 +70,7 @@ def _snapshot_path(local_path: str):
 # column, and the canonicalisers accept either.
 def _canonicalisers():
     from . import vintage_ingest
-    from .providers import cftc, cftc_disagg, cftc_tff
+    from .providers import cftc, cftc_cit, cftc_disagg, cftc_tff
 
     def legacy(path):
         wide = cftc._parse_zip(path).set_index(cftc.REPORT_DATE)
@@ -80,6 +80,8 @@ def _canonicalisers():
         "legacy": legacy,
         "disaggregated": lambda p: vintage_ingest.canonicalize_disagg(cftc_disagg._parse_zip(p)),
         "tff": lambda p: vintage_ingest.canonicalize_tff(cftc_tff._parse_zip(p)),
+        "supplemental": lambda p: vintage_ingest.canonicalize_supplemental(
+            cftc_cit._parse_zip(p)),
     }
 
 
@@ -270,6 +272,34 @@ def _cmd_asof(args) -> int:
     return 0
 
 
+def _cmd_coverage(args) -> int:
+    from . import vintage_ingest
+
+    path, cov = vintage_ingest.write_coverage(args.report_type)
+    if cov.empty:
+        print(f"coverage: no {args.report_type} observations ingested yet. "
+              f"Run 'cotdata-vintage fetch' then 'cotdata-vintage ingest' first.")
+        return 0
+    print(f"coverage: {args.report_type} -> {path}")
+    per_year = cov.groupby("report_year")["market_code"].nunique()
+    lo, hi = int(per_year.min()), int(per_year.max())
+    print(f"  {len(cov)} (year, market) pairs across {len(per_year)} report year(s); "
+          f"{lo}-{hi} markets per year.")
+    changes = vintage_ingest.coverage_changes(cov)
+    if not changes:
+        print("  covered set is constant across the ingested history.")
+    else:
+        print(f"  {len(changes)} entry/exit event(s) — each one breaks any statistic "
+              f"pooled across the universe:")
+        for c in changes:
+            print(f"    {c['report_year']}  {c['change'].upper():<5} {c['market_code']}  "
+                  f"{c['market_name']}")
+    if args.detail:
+        print()
+        print(cov.to_string(index=False))
+    return 0
+
+
 def _cmd_zero_sum(args) -> int:
     """The schema check that was the first half of `flow`.
 
@@ -361,6 +391,18 @@ def main(argv=None) -> int:
     a.add_argument("--report-date", default=None, dest="report_date")
     a.add_argument("--market", default=None)
     a.set_defaults(func=_cmd_asof)
+
+    cvg = sub.add_parser("coverage",
+                         help="Emit which markets a report actually covers, per year, "
+                              "derived from the ingested observations.")
+    cvg.add_argument("--report-type", default="supplemental", dest="report_type",
+                     choices=("legacy", "disaggregated", "tff", "supplemental"),
+                     help="Default 'supplemental', the one report whose covered set has "
+                          "changed (Soybean Meal entered in 2013, 12 markets -> 13).")
+    cvg.add_argument("--detail", action="store_true",
+                     help="Print the full per-(year, market) table, not just entries "
+                          "and exits.")
+    cvg.set_defaults(func=_cmd_coverage)
 
     zs = sub.add_parser("zero-sum",
                         help="Check the long/short/open-interest identity per market-week.")
