@@ -276,16 +276,54 @@ _REPORT_DATE_COL = "Report_Date_as_MM_DD_YYYY"
 
 
 # CFTC's header spellings that have varied, or are outright typos, across the four
-# reports. Each entry is tried as a substitution on a missing column name before giving
-# up. "Postions" and "Spead" are typos in CFTC's own header row; "NComm" vs "NonComm" is
-# an inconsistency WITHIN the Supplemental file, whose position columns say NComm while
-# its Pct_/Traders_ columns say NonComm. Tolerating both directions means the day any of
-# them is corrected is not the day ingest breaks.
+# reports. Each is a substitution tried on a missing column name before giving up.
+# "Postions" and "Spead" are typos in CFTC's own header row; "NComm" vs "NonComm" is an
+# inconsistency WITHIN the Supplemental file, whose position columns say NComm while its
+# Pct_/Traders_ columns say NonComm.
 _HEADER_VARIANTS = (
     ("__", "_"), ("_Positions", "__Positions"),
     ("Positions", "Postions"), ("Postions", "Positions"),
+    ("Spread", "Spead"), ("Spead", "Spread"),
     ("NonComm", "NComm"), ("NComm", "NonComm"),
 )
+
+# How many substitutions may COMPOSE. One is not enough for the column that needs it
+# most: ``NComm_Postions_Spread_All_NoCIT`` carries two defects at once, so the realistic
+# CFTC cleanup (fix the typo and normalise the prefix in one pass, giving
+# ``NonComm_Positions_Spread_All_NoCIT``) is exactly the case a single-substitution
+# search cannot reach. Raising there would be safe but would still be an outage on a
+# Friday release. Bounded rather than unbounded because the substitutions are not
+# confluent — ``_Positions``/``__Positions`` and ``__``/``_`` invert each other — so an
+# unbounded closure would loop.
+_MAX_HEADER_SUBSTITUTIONS = 3
+
+
+def _header_candidates(name: str) -> list[str]:
+    """Every spelling of ``name`` reachable in at most _MAX_HEADER_SUBSTITUTIONS steps.
+
+    Breadth-first so the fewest-edits spellings are tried first, which matters because
+    two candidates could in principle both exist in one file. Deterministic: the variant
+    tuple's order fixes the enumeration order.
+
+    VERIFIED not to collide: across every column name the four canonicalisers ask for,
+    no candidate of one target is a candidate of another, and no candidate resolves to a
+    real column of a DIFFERENT field in the shipped 2026 Legacy, Disaggregated, TFF and
+    Supplemental headers. Pinned by test_header_variants_cannot_resolve_to_another_field.
+    """
+    seen = {name}
+    frontier = [name]
+    out = []
+    for _ in range(_MAX_HEADER_SUBSTITUTIONS):
+        nxt = []
+        for cur in frontier:
+            for old, new in _HEADER_VARIANTS:
+                alt = cur.replace(old, new)
+                if alt not in seen:
+                    seen.add(alt)
+                    out.append(alt)
+                    nxt.append(alt)
+        frontier = nxt
+    return out
 
 
 def _resolve(wide: pd.DataFrame, name: str | None) -> pd.Series | None:
@@ -295,19 +333,23 @@ def _resolve(wide: pd.DataFrame, name: str | None) -> pd.Series | None:
     returns nulls for Managed Money because a header was renamed would write those nulls
     as OBSERVATIONS, and the next real value would then be recorded as a revision. A
     renamed column must fail loudly at ingest, not decay into fake revision history.
+
+    A spelling variant is NOT a rename. The variants are a closed, enumerated list of
+    spellings CFTC has actually shipped for the same field; anything outside it still
+    raises, which is what keeps this a tolerance rather than a fuzzy match.
     """
     if name is None:
         return None
     if name in wide.columns:
         return wide[name]
-    for old, new in _HEADER_VARIANTS:
-        alt = name.replace(old, new)
-        if alt != name and alt in wide.columns:
+    for alt in _header_candidates(name):
+        if alt in wide.columns:
             return wide[alt]
     raise ValidationError(
-        f"column {name!r} not found (nor an underscore variant). CFTC changed a header: "
-        f"map it explicitly rather than letting this category ingest as nulls, which would "
-        f"be recorded as real observations and then as revisions when it came back.")
+        f"column {name!r} not found (nor a known spelling variant). CFTC changed a "
+        f"header: map it explicitly rather than letting this category ingest as nulls, "
+        f"which would be recorded as real observations and then as revisions when it "
+        f"came back.")
 
 
 def _combined_flag(wide: pd.DataFrame, override: bool | None) -> bool:
@@ -810,6 +852,67 @@ def coverage_path(report_type: str) -> Path:
     return _coverage_dir() / f"{report_type}.parquet"
 
 
+def clean_market_name(v) -> str | None:
+    """One market name, whitespace-stripped, with every flavour of null mapped to None.
+
+    ``astype(str)`` is NOT good enough and the difference is version-dependent: under
+    pandas 2 it turns a missing name into the literal ``"nan"``, and under pandas 3's str
+    dtype it leaves the float NaN in place. The first silently wins any lexicographic
+    comparison (lowercase sorts above every real CFTC name, which are uppercase); the
+    second raises ``TypeError`` comparing str to float. Both were reachable, because
+    ``market_name`` is descriptive and ``validate`` does not require it.
+    """
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    return s or None
+
+
+def latest_market_name(names, dates) -> str | None:
+    """The name carried at the LATEST report date, skipping nulls.
+
+    Deliberately not ``max(names)``. Lexicographic max is not "current" and picks the
+    STALE name on four real markets: Cocoa, Cotton, Sugar and Coffee all renamed from
+    "... - NEW YORK BOARD OF TRADE" to "... - ICE FUTURES U.S.", and ``'I' < 'N'``, so
+    the max is the pre-rename name for every year after the change. Wheat happens to
+    come out right under either rule, which is how it went unnoticed.
+    """
+    pairs = [(d, n) for d, n in zip(dates, map(clean_market_name, names)) if n is not None]
+    if not pairs:
+        return None
+    return max(pairs, key=lambda t: t[0])[1]
+
+
+def _coverage_from(df: pd.DataFrame, report_type: str) -> pd.DataFrame:
+    """Shared aggregation behind both coverage entry points.
+
+    ``df`` carries report_date / market_code / market_name. One implementation because
+    the producer derives coverage from the downloaded FILES and the vintage layer derives
+    it from the stored OBSERVATIONS, and two copies of the name rule drifted apart once
+    already.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=COVERAGE_COLUMNS)
+    df = df.copy()
+    df["report_date"] = pd.to_datetime(df["report_date"])
+    df["report_year"] = df["report_date"].dt.year
+    rows = []
+    for (year, code), g in df.groupby(["report_year", "market_code"], sort=True):
+        rows.append({
+            "report_type": report_type,
+            "report_year": int(year),
+            "market_code": code,
+            "market_name": latest_market_name(g["market_name"], g["report_date"]),
+            "first_report_date": g["report_date"].min(),
+            "last_report_date": g["report_date"].max(),
+            "weeks": int(g["report_date"].nunique()),
+        })
+    return pd.DataFrame(rows, columns=COVERAGE_COLUMNS)
+
+
 def derive_coverage(report_type: str) -> pd.DataFrame:
     """Which markets appear in the observation store for ``report_type``, per report year.
 
@@ -817,35 +920,35 @@ def derive_coverage(report_type: str) -> pd.DataFrame:
     written, so every (report_year, market_code) that was ever ingested has at least one
     row here, and ``weeks`` counts DISTINCT report dates so later revisions do not
     inflate it.
+
+    This is the LIVE read. ``read_coverage`` returns whatever the artifact last recorded,
+    which is a snapshot with no freshness guarantee: prefer this one when correctness
+    matters and the artifact when you want what was published.
     """
     obs = read_observations()
     if obs.empty:
         return pd.DataFrame(columns=COVERAGE_COLUMNS)
     obs = obs[obs["report_type"] == report_type]
-    if obs.empty:
-        return pd.DataFrame(columns=COVERAGE_COLUMNS)
-    df = obs[["report_date", "market_code", "market_name"]].copy()
-    df["report_year"] = pd.to_datetime(df["report_date"]).dt.year
-    df["market_name"] = df["market_name"].astype(str).str.strip()
-    out = (df.groupby(["report_year", "market_code"], sort=True)
-             .agg(market_name=("market_name", lambda s: sorted(s.unique())[-1]),
-                  first_report_date=("report_date", "min"),
-                  last_report_date=("report_date", "max"),
-                  weeks=("report_date", "nunique"))
-             .reset_index())
-    out.insert(0, "report_type", report_type)
-    return out[COVERAGE_COLUMNS]
+    return _coverage_from(obs[["report_date", "market_code", "market_name"]], report_type)
 
 
 def write_coverage(report_type: str) -> tuple[Path, pd.DataFrame]:
     """Emit the coverage artifact for ``report_type``. Rewritten in full each time,
-    because it is a derived view of the observations and never a log."""
-    cov = derive_coverage(report_type)
-    path = coverage_path(report_type)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".parquet.tmp")
-    cov.to_parquet(tmp, index=False)
-    tmp.replace(path)
+    because it is a derived view of the observations and never a log.
+
+    Takes the same single-writer lock as ingest. Not for the write, which is atomic, but
+    for the READ underneath it: ``read_observations`` concats one parquet per report year
+    while ``ingest_canonical`` rewrites them one at a time, so an unlocked derive can see
+    a run part-way through and emit a torn coverage set. Failing loudly is the repo's
+    answer everywhere else the two writers could interleave.
+    """
+    with _WriteLock(vintage.vintage_root()):
+        cov = derive_coverage(report_type)
+        path = coverage_path(report_type)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".parquet.tmp")
+        cov.to_parquet(tmp, index=False)
+        tmp.replace(path)
     return path, cov
 
 
@@ -859,6 +962,13 @@ def coverage_changes(cov: pd.DataFrame) -> list[dict]:
 
     The point of the artifact: an entry or exit is a break in every pooled statistic
     computed across the universe, and it is invisible in a per-market read.
+
+    **Only CONSECUTIVE years are compared**, and a gap emits a ``gap`` record instead.
+    Coverage is derived from what was INGESTED, not from what CFTC published, so a store
+    holding 2006 and 2026 and nothing between would otherwise report Soybean Meal as
+    entering in 2026 — an ingest artifact presented as a fact about the market. Refusing
+    to answer across a gap is the only honest option: the years that would settle it are
+    the ones that are missing.
     """
     if cov.empty:
         return []
@@ -867,6 +977,11 @@ def coverage_changes(cov: pd.DataFrame) -> list[dict]:
     years = sorted(by_year)
     out = []
     for prev, cur in zip(years, years[1:]):
+        if cur != prev + 1:
+            out.append({"report_year": cur, "change": "gap", "market_code": "",
+                        "market_name": f"no observations for {prev + 1}-{cur - 1}, so "
+                                       f"entries and exits across the gap are unknowable"})
+            continue
         for code in sorted(set(by_year[cur]) - set(by_year[prev])):
             out.append({"report_year": cur, "change": "enter", "market_code": code,
                         "market_name": by_year[cur][code]})

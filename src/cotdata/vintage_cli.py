@@ -275,11 +275,16 @@ def _cmd_asof(args) -> int:
 def _cmd_coverage(args) -> int:
     from . import vintage_ingest
 
-    path, cov = vintage_ingest.write_coverage(args.report_type)
+    # Derive BEFORE writing. Writing first meant that pointing COTDATA_STORE at the wrong
+    # root truncated a perfectly good artifact to empty and then printed "nothing ingested
+    # yet" — destroying the thing it was asked to report on.
+    cov = vintage_ingest.derive_coverage(args.report_type)
     if cov.empty:
-        print(f"coverage: no {args.report_type} observations ingested yet. "
-              f"Run 'cotdata-vintage fetch' then 'cotdata-vintage ingest' first.")
+        print(f"coverage: no {args.report_type} observations ingested yet, so nothing to "
+              f"emit (the existing artifact, if any, is left alone). Run "
+              f"'cotdata-vintage fetch' then 'cotdata-vintage ingest' first.")
         return 0
+    path, cov = vintage_ingest.write_coverage(args.report_type)
     print(f"coverage: {args.report_type} -> {path}")
     per_year = cov.groupby("report_year")["market_code"].nunique()
     lo, hi = int(per_year.min()), int(per_year.max())
@@ -289,11 +294,16 @@ def _cmd_coverage(args) -> int:
     if not changes:
         print("  covered set is constant across the ingested history.")
     else:
-        print(f"  {len(changes)} entry/exit event(s) — each one breaks any statistic "
-              f"pooled across the universe:")
-        for c in changes:
-            print(f"    {c['report_year']}  {c['change'].upper():<5} {c['market_code']}  "
-                  f"{c['market_name']}")
+        events = [c for c in changes if c["change"] != "gap"]
+        gaps = [c for c in changes if c["change"] == "gap"]
+        if events:
+            print(f"  {len(events)} entry/exit event(s) — each one breaks any statistic "
+                  f"pooled across the universe:")
+            for c in events:
+                print(f"    {c['report_year']}  {c['change'].upper():<5} "
+                      f"{c['market_code']}  {c['market_name']}")
+        for c in gaps:
+            print(f"    {c['report_year']}  GAP    {c['market_name']}")
     if args.detail:
         print()
         print(cov.to_string(index=False))

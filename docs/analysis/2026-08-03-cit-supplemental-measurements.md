@@ -2,7 +2,10 @@
 
 **Date:** 2026-08-03. Point-in-time. Per the doc lifecycle, `analysis/` is never amended:
 if a later measurement contradicts this, write a new dated file rather than editing this
-one.
+one. Corrected once before merge, on the same day, while it existed only on the branch that
+introduced it (§3's rename count, and §4's exact-vs-breach rates, both caught in
+pre-merge review). Nothing was published under the wrong numbers; from here the file is
+frozen.
 
 Every number here comes from the real CFTC archives, `dea_cit_txt_2006.zip` through
 `dea_cit_txt_2026.zip` (21 files, 13,584 market-weeks, 2006-01-03 to 2026-07-28),
@@ -70,17 +73,28 @@ Both counts circulate because both are right for part of the history.
 entry and there are no exits in 21 years. Nothing else changed: no market code appears or
 disappears, and the twelve originals run unbroken 2006-2026.
 
-Three markets were **renamed** without changing code, which is why market-name matching
-would have produced spurious entries and exits and market_code matching does not:
+**Six** codes were **renamed** without changing code, in two waves, which is why
+market-name matching would have produced spurious entries and exits and market_code
+matching does not:
 
-| code | old name | current name |
-|---|---|---|
-| 001602 | WHEAT - CHICAGO BOARD OF TRADE | WHEAT-SRW - CHICAGO BOARD OF TRADE |
-| 001612 | WHEAT - KANSAS CITY BOARD OF TRADE | WHEAT-HRW - CHICAGO BOARD OF TRADE |
-| 033661, 073732, 080732, 083731 | ... - NEW YORK BOARD OF TRADE | ... - ICE FUTURES U.S. |
+| code | old name | current name | renamed |
+|---|---|---|---|
+| 033661 | COTTON NO. 2 - NEW YORK BOARD OF TRADE | COTTON NO. 2 - ICE FUTURES U.S. | 2007 |
+| 073732 | COCOA - NEW YORK BOARD OF TRADE | COCOA - ICE FUTURES U.S. | 2007 |
+| 080732 | SUGAR NO. 11 - NEW YORK BOARD OF TRADE | SUGAR NO. 11 - ICE FUTURES U.S. | 2007 |
+| 083731 | COFFEE C - NEW YORK BOARD OF TRADE | COFFEE C - ICE FUTURES U.S. | 2007 |
+| 001602 | WHEAT - CHICAGO BOARD OF TRADE | WHEAT-SRW - CHICAGO BOARD OF TRADE | 2013 |
+| 001612 | WHEAT - KANSAS CITY BOARD OF TRADE | WHEAT-HRW - CHICAGO BOARD OF TRADE | 2013 |
 
-001612 is the sharp one: the market moved exchange (KCBT to CME) and kept its CFTC code.
-Market names in the 2006-2012 files also carry a trailing space.
+001612 is the sharp one: the market changed exchange (KCBT to CBOT, after CME Group
+acquired the Kansas City Board of Trade) and kept its CFTC code. Market names in the
+2006-2012 files also carry a trailing space.
+
+**The 2007 wave is also why "the latest name" cannot be the lexicographic max**, which is
+what a first pass of `derive_coverage` used: `'I' < 'N'`, so a max-of-strings rule reports
+the pre-2007 NYBOT name for all four ICE markets in every year after the rename. The wheat
+pair comes out right under either rule, which is exactly how it survived a first reading.
+Caught in pre-merge review; the shipped rule takes the name at the latest report date.
 
 All 13 codes resolve in `registry.yaml`: ZW, KE, ZC, ZM, CT, HE, ZS, LE, GF, CC, ZL, SB, KC.
 
@@ -88,15 +102,18 @@ All 13 codes resolve in `registry.yaml`: ZW, KE, ZC, ZM, CT, HE, ZS, LE, GF, CC,
 
 Summing the four canonical categories per side and adding non-commercial spreading:
 
-| | exact | residual |
-|---|---|---|
-| long side | 55.2% of 13,584 market-weeks | never more than **2 contracts** |
-| short side | 55.4% | never more than 2 contracts |
+| | exact | per-year exact | residual |
+|---|---|---|---|
+| long side | 55.2% of 13,584 market-weeks | 51.6% - 59.5%, sd 2.1pp | never more than **2 contracts** |
+| short side | 55.4% | — | never more than 2 contracts |
 
-Counting a market-week as a breach if **either** side is off, the rate is 67.7%, and it is
-**stable across the whole history**: per-year minimum 62.6% (2012), maximum 71.7% (2023),
-mean 67.7%, standard deviation 2.7 percentage points. No trend, no regime break, nothing
-at the 2013 coverage change and nothing at 2018.
+Counting a market-week as a breach if **either** side is off, the **breach** rate is 67.7%
+(per-year 62.6% in 2012 to 71.7% in 2023, sd 2.7pp). Two different rates, so keep the
+qualifier attached: 55% is how often the identity is *exact on one side*, 68% is how often
+*either side* is off by a contract or two.
+
+Both are **stable across the whole history** — no trend, no regime break, nothing at the
+2013 coverage change and nothing at 2018.
 
 Using CFTC's own published `Tot_Rept_Positions_*` columns instead of summing categories,
 the identity `Tot_Rept + NonRept == OI` is exact on 74.9% of rows and off by **at most 1**

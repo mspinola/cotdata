@@ -42,7 +42,10 @@ def test_parse_is_lossless_and_normalises_the_date_column(store_env):
     df = cftc_cit._parse_zip(CIT_2026)
     assert len(df.columns) == 54
     assert cftc_cit.REPORT_DATE in df.columns
-    assert not [c for c in df.columns if c.startswith("As_of_Date_In_Form_2")]
+    # the source date column is CONSUMED by the rename, not left beside its replacement
+    assert "As_of_Date_In_Form_YYYY-MM-DD" not in df.columns
+    # ...while the YYMMDD twin survives, because the parse is lossless
+    assert "As_of_Date_In_Form_YYMMDD" in df.columns
     assert df[cftc_cit.CONTRACT_CODE].iloc[0] == "001602"   # zero-padded, not 1602
     assert df[cftc_cit.REPORT_DATE].dt.year.eq(2026).all()
     # CFTC's own header typos survive: they are the real column names.
@@ -282,13 +285,96 @@ def test_coverage_artifact_matches_the_set_derived_from_the_data(store_env):
     assert path.exists()
     pd.testing.assert_frame_equal(vi.read_coverage("supplemental"), cov)
 
-    # the artifact must agree with the covered set read straight off the parsed files
+    # The artifact must agree with the covered set read straight off the parsed files.
+    # Compared in FULL, names included: the producer path and the vintage path are two
+    # entry points onto one aggregation, and when they were two implementations they
+    # disagreed on exactly the name column.
     from_files = pd.concat([cftc_cit._parse_zip(CIT_2012), cftc_cit._parse_zip(CIT_2026)],
                            ignore_index=True)
     expected = cftc_cit.coverage(from_files)
-    assert (sorted(map(tuple, cov[["report_year", "market_code"]].to_numpy()))
-            == sorted(map(tuple, expected[["report_year", "market_code"]].to_numpy())))
-    assert cov["weeks"].tolist() == expected["weeks"].tolist()
+    pd.testing.assert_frame_equal(cov, expected)
+    # ...and the names are the real, stripped CFTC ones, not "nan" and not a stale rename
+    assert set(cov[cov["report_year"] == 2012]["market_name"]) == {
+        "WHEAT - CHICAGO BOARD OF TRADE", "CORN - CHICAGO BOARD OF TRADE",
+        "COCOA - ICE FUTURES U.S."}
+
+
+def test_the_coverage_cli_does_not_truncate_a_good_artifact_on_an_empty_store(store_env):
+    """Writing before checking meant that pointing COTDATA_STORE at the wrong root
+    overwrote a real artifact with an empty one and then said 'nothing ingested yet'."""
+    from cotdata import vintage_cli
+    from cotdata import vintage_ingest as vi
+
+    vi.ingest_canonical(_canon(), snapshot_id="cit-1")
+    vintage_cli.main(["coverage", "--report-type", "supplemental"])
+    before = vi.coverage_path("supplemental").read_bytes()
+
+    # a report type with no observations must leave the file it is not about alone...
+    assert vintage_cli.main(["coverage", "--report-type", "tff"]) == 0
+    assert not vi.coverage_path("tff").exists()
+    # ...and re-running against an emptied observation store must not destroy the artifact
+    for p in (vi.vintage.vintage_root() / "observations").glob("*/observations.parquet"):
+        p.unlink()
+    assert vintage_cli.main(["coverage", "--report-type", "supplemental"]) == 0
+    assert vi.coverage_path("supplemental").read_bytes() == before
+
+
+def test_coverage_names_a_market_from_its_latest_report_date(store_env):
+    """Lexicographic max is not 'current'. Cocoa, Cotton, Sugar and Coffee all renamed
+    from '... - NEW YORK BOARD OF TRADE' to '... - ICE FUTURES U.S.', and 'I' < 'N', so
+    a max-of-strings rule reports the pre-rename name forever after."""
+    from cotdata import vintage_ingest as vi
+    dates = pd.to_datetime(["2007-01-02", "2007-06-05", "2007-12-04"])
+    names = ["COCOA - NEW YORK BOARD OF TRADE", "COCOA - NEW YORK BOARD OF TRADE",
+             "COCOA - ICE FUTURES U.S."]
+    assert vi.latest_market_name(names, dates) == "COCOA - ICE FUTURES U.S."
+    assert sorted(set(names))[-1] != "COCOA - ICE FUTURES U.S."   # the rule that was wrong
+
+    cov = vi._coverage_from(
+        pd.DataFrame({"report_date": dates, "market_code": ["073732"] * 3,
+                      "market_name": names}), "supplemental")
+    assert cov["market_name"].tolist() == ["COCOA - ICE FUTURES U.S."]
+
+
+def test_a_missing_market_name_neither_crashes_nor_wins(store_env):
+    """market_name is descriptive, so validate() does not require it and a canonical frame
+    can carry nulls. Under pandas 2 astype(str) turns those into the literal 'nan', which
+    is lowercase and beats every real (uppercase) CFTC name; under pandas 3 it leaves a
+    float in place and the comparison raises TypeError. Neither may happen."""
+    from cotdata import vintage_ingest as vi
+    dates = pd.to_datetime(["2026-01-06", "2026-01-13"])
+    got = vi.latest_market_name(["CORN - CHICAGO BOARD OF TRADE", None], dates)
+    assert got == "CORN - CHICAGO BOARD OF TRADE"
+    assert vi.latest_market_name([None, float("nan")], dates) is None
+    assert vi.clean_market_name("  WHEAT  ") == "WHEAT"
+    assert vi.clean_market_name("   ") is None
+
+    cov = vi._coverage_from(
+        pd.DataFrame({"report_date": dates, "market_code": ["002602"] * 2,
+                      "market_name": [None, None]}), "supplemental")
+    assert cov["market_name"].tolist() == [None]
+
+
+def test_coverage_refuses_to_call_an_ingest_gap_a_market_event(store_env):
+    """Coverage is derived from what was INGESTED, not from what CFTC published. A store
+    holding 2006 and 2026 and nothing between must not report Soybean Meal as entering in
+    2026 — that is an ingest artifact dressed up as a fact about the market."""
+    from cotdata import vintage_ingest as vi
+    cov = pd.DataFrame([
+        {"report_type": "supplemental", "report_year": 2006, "market_code": "001602",
+         "market_name": "WHEAT", "first_report_date": pd.Timestamp("2006-01-03"),
+         "last_report_date": pd.Timestamp("2006-12-26"), "weeks": 52},
+        {"report_type": "supplemental", "report_year": 2026, "market_code": "001602",
+         "market_name": "WHEAT-SRW", "first_report_date": pd.Timestamp("2026-01-06"),
+         "last_report_date": pd.Timestamp("2026-07-28"), "weeks": 30},
+        {"report_type": "supplemental", "report_year": 2026, "market_code": "026603",
+         "market_name": "SOYBEAN MEAL", "first_report_date": pd.Timestamp("2026-01-06"),
+         "last_report_date": pd.Timestamp("2026-07-28"), "weeks": 30},
+    ])
+    changes = vi.coverage_changes(cov)
+    assert [c["change"] for c in changes] == ["gap"]
+    assert "2007-2025" in changes[0]["market_name"]
+    assert not [c for c in changes if c["change"] == "enter"]
 
 
 def test_coverage_reports_an_entry_rather_than_leaving_it_silent(store_env):
@@ -332,6 +418,58 @@ def test_coverage_cli_writes_the_artifact(store_env, capsys):
     assert "13 markets per year" not in out          # the fixture holds 3
     assert "3-3 markets per year" in out
     assert "covered set is constant" in out
+
+
+# ── Header spelling tolerance ───────────────────────────────────────────────
+# _resolve sits on the path that produces the permanent row_sha256, and the variant list
+# is the only thing between a CFTC header correction and a failed Friday ingest. It
+# shipped untested.
+def test_a_corrected_cftc_header_still_resolves(store_env):
+    from cotdata import vintage_ingest as vi
+    want = "NComm_Postions_Spread_All_NoCIT"          # two defects in one name
+    for corrected in ("NComm_Positions_Spread_All_NoCIT",     # typo fixed
+                      "NonComm_Postions_Spread_All_NoCIT",    # prefix normalised
+                      "NonComm_Positions_Spread_All_NoCIT"):  # both, in one pass
+        got = vi._resolve(pd.DataFrame({corrected: [7]}), want)
+        assert got.iloc[0] == 7, corrected
+
+
+def test_a_genuine_rename_still_raises(store_env):
+    """A spelling variant is not a rename. Anything outside the enumerated list must fail
+    loudly rather than ingest as nulls that later read as revisions."""
+    from cotdata import vintage_ingest as vi
+    with pytest.raises(vi.ValidationError, match="known spelling variant"):
+        vi._resolve(pd.DataFrame({"IndexTraderLong": [1]}), "CIT_Positions_Long_All")
+
+
+def test_header_variants_cannot_resolve_to_another_field(store_env):
+    """The regression the widening could have introduced: before it, a renamed column
+    raised. It must not now silently land on a DIFFERENT field's column."""
+    import itertools
+
+    from cotdata import vintage_ingest as vi
+
+    targets = {}
+    for cats in (vi._SUPPLEMENTAL_CATEGORIES, vi._DISAGG_CATEGORIES, vi._TFF_CATEGORIES):
+        for cat, cols in cats.items():
+            for i, col in enumerate(cols):
+                if col:
+                    targets.setdefault(col, set()).add((cat, i))
+    for field, col in vi._CONCENTRATION.items():
+        targets.setdefault(col, set()).add(("conc", field))
+    targets.setdefault("Open_Interest_All", set()).add(("oi", 0))
+
+    cands = {t: {t, *vi._header_candidates(t)} for t in targets}
+    for a, b in itertools.combinations(cands, 2):
+        if targets[a] == targets[b]:
+            continue      # the same field, asked for by several reports
+        assert not (cands[a] & cands[b]), f"{a} and {b} share a candidate spelling"
+
+    # and against a real file: no target may match two of its columns at once
+    from cotdata.providers import cftc_cit
+    header = set(cftc_cit._parse_zip(CIT_2026).columns)
+    for t, cl in cands.items():
+        assert len(cl & header) <= 1, f"{t} matches several real columns"
 
 
 # ── Store / producer plumbing ───────────────────────────────────────────────

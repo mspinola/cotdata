@@ -27,8 +27,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   - **Coverage is 12 markets, then 13 from 2013**, when Soybean Meal entered. Both counts
     circulate because both are right for part of the history. That is the only entry and
-    there are no exits, and three markets were renamed without changing code (001612 moved
-    exchange from KCBT to CME and kept it), which is why coverage keys on `market_code`.
+    there are no exits, and **six** markets were renamed without changing code (four NYBOT
+    to ICE in 2007, the two wheats relabelled in 2013, including 001612 changing exchange
+    from KCBT to CBOT and keeping its code), which is why coverage keys on `market_code`
+    and reports the name at the latest report date rather than the lexicographic max.
   - **The report is futures-and-options combined and the file cannot say so** — it carries
     no `FutOnly_or_Combined` column, so the existing `_combined_flag` would have defaulted
     it to `False` and put a guessed value in the natural key. Established by matching open
@@ -42,7 +44,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   **The open-interest identity is exact on only ~55% of market-weeks, and that is
   rounding.** The residual never exceeds 2 contracts against a tolerance of 4, and the rate
-  is flat across 21 years (62.6% to 71.7% by year, sd 2.7pp). Control: on the same weeks,
+  is flat across 21 years (51.6% to 59.5% by year, sd 2.1pp; the *breach* rate, either side
+  off, is 67.7% and ranges 62.6% to 71.7%). Control: on the same weeks,
   Legacy *futures-only* is exact on 99.7% of rows while Legacy *combined* shows the
   identical +/-1 pattern on 10%. Combined reports publish delta-weighted option equivalents
   rounded to whole contracts, independently per category, which is the same n-addends
@@ -63,13 +66,28 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`cotdata-vintage coverage`** — emits which markets a report actually covered per year,
   derived from the stored observations rather than from a list in source, and prints every
   entry and exit. A covered set treated as constant is how a consumer reports on 12 markets
-  believing it has 13.
+  believing it has 13. It compares **consecutive years only** and emits a `gap` record
+  otherwise: coverage is derived from what was INGESTED, so a store holding 2006 and 2026
+  and nothing between would otherwise report Soybean Meal as entering in 2026, presenting
+  an ingest artifact as a fact about the market.
 
 ### Changed
-- `vintage_ingest._resolve` now tolerates CFTC's `Postions`/`Positions` and
-  `NComm`/`NonComm` header variants alongside the single/double-underscore one it already
-  handled. All are real spellings in shipped CFTC files, two of them typos; tolerating both
-  directions means a future correction upstream is not a breakage here.
+- `vintage_ingest._resolve` now tolerates CFTC's `Postions`/`Positions`, `Spead`/`Spread`
+  and `NComm`/`NonComm` header variants alongside the single/double-underscore one it
+  already handled, and **composes up to three of them**. All are real spellings in shipped
+  CFTC files, three of them typos. Composition is what makes the tolerance useful on the
+  column that needs it most: `NComm_Postions_Spread_All_NoCIT` carries two defects at once,
+  so the realistic upstream cleanup — fix the typo and normalise the prefix in one pass —
+  is exactly the case a single-substitution search cannot reach.
+
+  This widens a lookup that previously RAISED on anything it did not recognise, so the
+  regression to worry about is a variant silently landing on a different field's column.
+  It cannot: across every column name the four canonicalisers ask for, no candidate
+  spelling of one field is a candidate of another, and no target matches two real columns
+  in the shipped 2026 Legacy, Disaggregated, TFF or Supplemental headers. Both properties
+  are asserted, not argued, by
+  `tests/test_cit_supplemental.py::test_header_variants_cannot_resolve_to_another_field`.
+  A genuine rename still raises.
 
 ## [0.3.0] - 2026-08-02
 

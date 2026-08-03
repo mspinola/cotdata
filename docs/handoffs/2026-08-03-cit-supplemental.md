@@ -194,9 +194,12 @@ Fixtures from real files trimmed to two or three markets, committed for offline 
 ## 7. Report back (answers)
 
 **Covered-market set.** 12 markets 2006-2012, 13 from 2013. One entry, no exits:
-Soybean Meal (026603) from 2013-01-08. Three renames without a code change, including
-001612 moving exchange from KCBT to CME and keeping its code, which is why the coverage
-artifact keys on `market_code` and not on name. Full table: measurements doc §3.
+Soybean Meal (026603) from 2013-01-08. **Six** renames without a code change, in two waves
+(four NYBOT to ICE in 2007, the two wheats relabelled in 2013, including 001612 changing
+exchange from KCBT to CBOT and keeping its code), which is why the coverage artifact keys
+on `market_code` and not on name — and why it takes the name at the latest report date
+rather than the lexicographic max, since `'I' < 'N'` makes max-of-strings report the
+pre-2007 NYBOT name forever. Full table: measurements doc §3.
 
 **Schema.** Absorbed cleanly, no changes to the natural key, `VALUE_FIELDS` or
 `ALL_COLUMNS`. One deliberate deviation on category spellings, §2 above.
@@ -204,10 +207,12 @@ artifact keys on `market_code` and not on name. Full table: measurements doc §3
 **Legacy-identity exception rate.** Summing the four canonical categories per side, the
 identity is exact on 55.2% (long) and 55.4% (short) of 13,584 market-weeks, and the
 residual is **never more than 2 contracts** against a tolerance of 4. Counting a
-market-week as a breach if either side is off gives 67.7%.
+market-week as a breach if either side is off gives a **breach** rate of 67.7%. Two
+different rates; keep the qualifier attached.
 
-It is **stable across the whole history**: per-year 62.6% to 71.7%, mean 67.7%, standard
-deviation 2.7 percentage points, no trend and no break at 2013 or 2018.
+Both are **stable across the whole history**: exact-rate per-year 51.6% to 59.5% (sd
+2.1pp), breach-rate per-year 62.6% to 71.7% (sd 2.7pp), no trend and no break at 2013 or
+2018.
 
 The cause is combined reporting, established by control: on the same 2026 weeks and the
 same identity, Legacy **futures-only** is exact on 99.7% of rows and Legacy **combined**

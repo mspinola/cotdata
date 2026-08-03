@@ -117,16 +117,19 @@ def coverage(frame: pd.DataFrame) -> pd.DataFrame:
     Soybean Meal (026603) entered in 2013, taking the count from 12 to 13, which is why
     both counts are quoted in the wild. Returns one row per (report_year, market_code)
     with the market name and the weeks observed.
+
+    Aggregation is shared with ``vintage_ingest.derive_coverage`` rather than reimplemented.
+    That one reads the stored OBSERVATIONS and this one reads the downloaded FILES, so the
+    two answer slightly different questions and must not answer them differently: an
+    earlier pair of copies drifted on the name rule alone, reporting the pre-2007 NYBOT
+    name for four ICE markets. Their agreement is pinned by
+    tests/test_cit_supplemental.py::test_coverage_artifact_matches_the_set_derived_from_the_data.
     """
-    df = frame[[REPORT_DATE, CONTRACT_CODE, "Market_and_Exchange_Names"]].copy()
-    df["report_year"] = df[REPORT_DATE].dt.year
-    df["market_name"] = df["Market_and_Exchange_Names"].astype(str).str.strip()
-    g = df.groupby(["report_year", CONTRACT_CODE], sort=True)
-    out = g.agg(market_name=("market_name", lambda s: sorted(s.unique())[-1]),
-                first_report_date=(REPORT_DATE, "min"),
-                last_report_date=(REPORT_DATE, "max"),
-                weeks=(REPORT_DATE, "nunique")).reset_index()
-    return out.rename(columns={CONTRACT_CODE: "market_code"})
+    from ..vintage_ingest import _coverage_from
+    df = frame[[REPORT_DATE, CONTRACT_CODE, "Market_and_Exchange_Names"]].rename(
+        columns={REPORT_DATE: "report_date", CONTRACT_CODE: "market_code",
+                 "Market_and_Exchange_Names": "market_name"})
+    return _coverage_from(df, "supplemental")
 
 
 def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> dict:
@@ -172,7 +175,12 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> dict:
         if col not in [CONTRACT_CODE, REPORT_DATE]:
             allrows[col] = allrows[col].astype(str)
 
-    cov = coverage(allrows)
+    # Coverage over what this run actually WROTE, not over everything in the files. All
+    # 13 Supplemental codes resolve in the registry today so the two coincide, but a
+    # coverage report that silently described markets the store does not hold would be
+    # exactly the kind of "reports on 12 believing it has 13" error the artifact exists
+    # to prevent, pointed the other way.
+    cov = coverage(allrows[allrows[CONTRACT_CODE].isin(want)])
 
     wrote = 0
     for code in sorted(want):
