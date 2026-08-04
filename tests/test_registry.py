@@ -17,7 +17,7 @@ from cotdata.registry import (
 # ── loading & basic shape ────────────────────────────────────────────────────
 def test_registry_loads_all_symbols():
     symbols = all_symbols()
-    assert len(symbols) == 49, f"Expected 49 symbols, got {len(symbols)}"
+    assert len(symbols) == 51, f"Expected 51 symbols, got {len(symbols)}"
 
 
 def test_basic_symbol_loading():
@@ -80,7 +80,7 @@ def test_by_asset_class():
 # ── hashability (frozen dataclass must stay hashable, incl. scaled hist_codes) ─
 def test_symbols_are_hashable():
     # Would raise TypeError: unhashable type 'list' if hist_codes held a list.
-    assert len(set(all_symbols())) == 49
+    assert len(set(all_symbols())) == 51
     assert symbol("LBR") in {symbol("LBR")}
     hash(symbol("LBR"))  # scaled hist_codes — the tricky one
 
@@ -247,5 +247,9 @@ def test_golden_identity_checksum():
     (registry.yaml carries FIXED identity only; unintended drift is a bug)."""
     ident = sorted((s.internal, s.cftc_code, s.asset_class) for s in all_symbols())
     digest = hashlib.md5(repr(ident).encode()).hexdigest()
-    assert digest == "e6b0b92caa0f25f68dea62024bddf899", (
+    # Updated 2026-08-04 for a deliberate addition: ZR (rough rice, 039601) and WBS
+    # (ICE Europe WTI, 067411), the two codes of crowdmon's contract-spec backlog that
+    # Norgate actually carries. Previous value e6b0b92caa0f25f68dea62024bddf899, over 49
+    # symbols.
+    assert digest == "3dd3df8eb26d850654107e16568cddb6", (
         "registry identity facts changed; update the expected checksum if intended")
