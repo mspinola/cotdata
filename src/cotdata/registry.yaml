@@ -50,6 +50,13 @@ Energies:
     cftc_code: "022651"
   NG:
     cftc_code: "023651"
+  # Added 2026-08-04 for crowdmon's contract-spec backlog. NOT a duplicate of CL: open
+  # interest tracks it (0.771) but Managed Money net is negative and flow correlation is
+  # near zero, so it is a different holder base (crowdmon
+  # docs/design/amendments-2026-08-03.md §C15). Norgate carries it as &WBS.
+  WBS:                      # WTI Crude Oil (ICE Futures Europe)
+    cftc_code: "067411"
+    databento: null         # ICE product — not on GLBX.MDP3
 
 Grains:
   ZC:
@@ -62,6 +69,12 @@ Grains:
     cftc_code: "007601"
   ZW:
     cftc_code: "001602"
+  # Added 2026-08-04 for crowdmon's contract-spec backlog: the smallest market of the ten
+  # candidates and the strongest on the criterion that decides, Managed Money share 0.433
+  # against a covered median of 0.137 (crowdmon docs/design/amendments-2026-08-03.md §C17,
+  # decision in docs/handoffs/2026-08-03-spec-backlog-producer.md §9).
+  ZR:                       # Rough Rice (CBOT)
+    cftc_code: "039601"
   # Held-out generalization grains (new symbols, never in the deploy selection).
   ZO:                       # Oats (CBOT)
     cftc_code: "004603"
