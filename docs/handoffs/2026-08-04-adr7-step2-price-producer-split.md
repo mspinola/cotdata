@@ -1,6 +1,10 @@
 # Handoff: ADR-0007 step 2, move price production out of `cotdata`
 
-**Status:** **CLAIMED, NOT STARTED.** This is a work order and a re-measurement, no code
+**Status:** **STEP 1 SHIPPED (2026-08-08).** The `marketdata` futures provider exists.
+Steps 2–5 of §7 (contract specs are done; consumers not yet repointed; nothing deleted
+from `cotdata`) remain. See `docs/handoffs/2026-08-08-adr7-step2-provider-shipped.md`,
+which also records a store-layout finding this document did not anticipate.
+Originally: **CLAIMED, NOT STARTED** — a work order and a re-measurement, no code
 **Date:** 2026-08-04
 **Lives at:** `cotdata/docs/handoffs/2026-08-04-adr7-step2-price-producer-split.md`
 **Target:** a Claude Code session in a `cotdata` worktree, with `marketdata` beside it
