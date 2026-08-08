@@ -81,8 +81,9 @@ are unchanged, so a repoint is an import change and not a semantic one.
 ## 3. The both-tiers rule is enforced in three places
 
 The work order's §4 warned that shipping a `backadj`-only futures producer would break
-`crowdmon` with a `raise` inside `riskunits` on a weekly scheduled job. Three guards, so
-the rule cannot be lost by a later edit to any one of them:
+`crowdmon` with a `raise` inside `riskunits` on a weekly scheduled job. **That consumer is
+gone — see §5a — and the rule still holds, on `npf`'s evidence rather than `crowdmon`'s.**
+Three guards, so it cannot be lost by a later edit to any one of them:
 
 1. **Producer.** Both tiers are fetched and reconstructed before either is written, so a
    failure on the second leaves nothing on disk rather than a half-written symbol.
@@ -133,15 +134,90 @@ Windows-only, so no other machine can produce this half at any Python version.
 the whole run, and `--domain futures` explains why rather than raising
 `ModuleNotFoundError`. Worth writing into ADR-0007's open questions as resolved.
 
+## 5a. `crowdmon` was deprecated three days after the work order was written
+
+Checked because `cotdata`'s `CLAUDE.md` mentioned it in passing. It is not a passing
+matter: **the work order's §4 — the section it says it exists to record — rests entirely
+on `crowdmon`, and `crowdmon` is now inert.**
+
+`crowdmon/DEPRECATED.md`, decided **2026-08-07**, one day after the work order's own
+`crowdmon` companion document. Four pre-registered tests, no positive result, and the §10
+validation came back uninformative with the hand-identified clean episodes **spent**. The
+repo is frozen, not deleted, with three stated conditions for revisiting.
+
+Its §3 was resolved **2026-08-08**, the day this provider was written:
+
+- both launchd jobs (`crowdmon-publish`, `crowdmon-live-tests`) unloaded, plists deleted
+- `cot-analyzer`'s `/damage` page removed in that repo's PR #22, with its artifact reader
+- the one open work order closed unstarted
+- **"This package now has no consumers at all; nothing in `npf` or `livebook` ever
+  imported it."** `~/code/crowdmon_store` is written by nothing and read by nothing
+
+### The requirement survives. Its justification has to move
+
+The both-tiers rule is **not** weakened by this, and §3 above should not be relaxed. But
+it can no longer be argued from `crowdmon`, and it does not need to be — a live consumer
+makes the same case harder.
+
+`npf/books/treasury_seasonal.py` (npf pushed 2026-08-06, no deprecation) sets
+`RETURN_TIER = "propadj"` and records why, amended 2026-07-26 after its first run came
+back void:
+
+> Norgate's `backadj` is ADDITIVE: roll gaps accumulate into the level, so the series is
+> not a price and can cross zero. On the verdict window ZB's back-adjusted close runs
+> −12.24 to 48.36 and is negative on 454 days, while the contract actually traded 72.66 to
+> 112.19. A percent return needs a positive denominator, and **15 of ZB's 100
+> verdict-window trades had their SIGN INVERTED.**
+
+And, independently of `propadj`, the same file needs both stored frames anyway:
+
+> Roll DETECTION still reads backadj and unadj, because their difference IS the
+> accumulated adjustment and is precisely what steps at a roll.
+
+Fifteen sign-inverted trades in a live book is a sharper argument than a `raise` inside a
+weekly job in a package that no longer runs. **Anchor §4 on `npf`.**
+
+### What this does to §7.3
+
+The work order says: *"Repoint `crowdmon`'s ten call sites. It is the smallest consumer
+and the one whose tier requirements are strictest, so it fails loudest. **Do it first, not
+last.**"*
+
+That instruction is now void. Repointing a frozen package with zero consumers is pure
+waste, and `DEPRECATED.md` §2 asks for the opposite — it wants the live pins *neutralised*
+because "a frozen repo should not have tests that depend on data collected after it was
+frozen". Repointing would add a dependency on data collected after the freeze.
+
+**Do not repoint `crowdmon`.** The ten call sites leave §7.3 entirely, and with them the
+step that was supposed to de-risk everything after it. What remains:
+
+| consumer | needs | status |
+|---|---|---|
+| `crowdmon` | both tiers + `propadj` | **dropped — deprecated, no consumers** |
+| `npf` | both tiers + `propadj` (live book) | ADR-0007 **defers** this, with `livebook` |
+| `cotmetrics` / `cot-analyzer` | `backadj` only | the only repoint actually left |
+
+So the "hard one first" ordering has evaporated, and what is left of §7.3–§7.4 is the
+`backadj`-only repoint the work order calls "therefore easy". That is a genuine
+simplification and also a genuine loss: the strictest consumer was the one that would have
+proved the provider correct by failing loudly, and nothing else exercises `propadj` until
+the deferred `npf` pass runs. **The Windows-box comparison in §7 is now the main evidence
+that this port preserved the numbers**, which is an argument for running it sooner.
+
+Whether `npf`'s deferral still makes sense given it is now the *only* `propadj` consumer
+is ADR-0007's call, not this handoff's. Flagging it because the deferral was decided when
+it was one of two.
+
 ## 6. Scope left out, deliberately
 
-- **§7.3 repoint `crowdmon`** (6 modules, 10 call sites) and **§7.4 `cotmetrics` /
-  `cot-analyzer`**. Not started. The work order says do `crowdmon` first because its tier
-  requirements are strictest and it fails loudest, and that ordering still holds.
+- **§7.3 repoint `crowdmon`** — **do not do this**, see §5a. **§7.4 `cotmetrics` /
+  `cot-analyzer`** is not started and is now the only repoint left standing.
 
-  One repoint task the work order's call-site table does not capture, found while
-  checking the `MME`/`MFS` question. `ContractMaster.load()` does not only *call*
-  `cotdata`; it parses the shape of `cotdata`'s manifest:
+  The rest of this bullet is retained because it documents a coupling the work order's
+  call-site table does not capture, and the same pattern may appear elsewhere. It was found
+  while checking the `MME`/`MFS` question, before §5a established that `crowdmon` should not
+  be repointed at all. `ContractMaster.load()` does not only *call* `cotdata`; it parses
+  the shape of `cotdata`'s manifest:
 
   ```python
   for name in load_manifest().get("prices", {}):
