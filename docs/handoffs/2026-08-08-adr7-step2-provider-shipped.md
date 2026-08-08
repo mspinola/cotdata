@@ -138,14 +138,41 @@ the whole run, and `--domain futures` explains why rather than raising
 - **§7.3 repoint `crowdmon`** (6 modules, 10 call sites) and **§7.4 `cotmetrics` /
   `cot-analyzer`**. Not started. The work order says do `crowdmon` first because its tier
   requirements are strictest and it fails loudest, and that ordering still holds.
+
+  One repoint task the work order's call-site table does not capture, found while
+  checking the `MME`/`MFS` question. `ContractMaster.load()` does not only *call*
+  `cotdata`; it parses the shape of `cotdata`'s manifest:
+
+  ```python
+  for name in load_manifest().get("prices", {}):
+      sym, _, adj = str(name).rpartition("_")     # "ES_backadj" -> ("ES", "backadj")
+  ```
+
+  `marketdata`'s entries live under `"bars"` and read `futures/norgate/ES_backadj`, so
+  `rpartition("_")` yields `futures/norgate/ES` and matches no registry symbol. Every
+  symbol would go non-joinable. It fails loudly — `test_every_registry_symbol_but_the_
+  uncovered_ones_joins` breaks — but swapping the import is not sufficient, and the
+  eleventh coupling is a manifest *format* rather than a function call.
 - **§7.5 delete from `cotdata`.** Not started, and it must not be until the repointing
   lands. `cotdata`'s price code is still every consumer's only working path.
 - **`MME` / `MFS`.** Norgate carries no continuous series for either, so `cotdata` prices
   them off the EEM and EFA ETF proxies through yfinance. Serving them in `marketdata`
   needs a futures-domain path in the yfinance provider, which is separate work from the
   Norgate producer. They are **absent** from the futures registry rather than present and
-  unserviceable. A consumer repointed at `marketdata` loses them until that is built —
-  worth confirming against `crowdmon`'s universe before §7.3.
+  unserviceable.
+
+  **Checked against `crowdmon`, and this costs it nothing.** Both already fail
+  `contract_master.coverage()`, which requires a spec plus both stored tiers: they carry
+  `norgate: null`, so they report `missing: specs,unadj_price,backadj_price` and
+  `joinable: False` today. `tests/test_contract_master_live.py` pins exactly that
+  (`not_joinable <= {"MFS", "MME"}`), the 2026-08-04 spec inventory measured
+  `joinable-but-unseen []` and `seen-but-unjoinable []`, and both are `Role: heldout` in
+  the deployed `params.yaml`. `futures/roll.py:110` names them directly as the ETF proxies
+  with no Delivery Month, which raises rather than returning a wrong answer. The counts
+  agree: `crowdmon` reports 49 of 51 joinable and the ported futures registry holds 49.
+  After §7.3 the rows still appear — symbols keep coming from `cotdata`'s registry, since
+  COT identity stays here — and still read non-joinable, so the live test's assertion
+  survives the repoint unchanged.
 - **Step 3 (`livebook`).** Still out, still a live book.
 
 ## 7. Not yet run against real Norgate
