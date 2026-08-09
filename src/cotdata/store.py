@@ -28,25 +28,6 @@ def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
             os.remove(tmp)
 
 
-# ── Prices ────────────────────────────────────────────────────────────────
-# ADR-0007 makes this package COT-only, and the CONSUMER bar API (get_prices,
-# roll_dates, the derived propadj tier) is gone — read bars from `marketdata`.
-#
-# These two survive because the databento provider does not have a marketdata
-# equivalent yet and still writes here (ADR-0006: an independently-built
-# alternative to Norgate, and the source for the intraday news-failure work).
-# Keeping the write path without the read path would make its output unreadable
-# through the library, so the store-level pair stays; only the consumer API left.
-def write_prices(symbol: str, adjustment: str, df: pd.DataFrame, source: str) -> None:
-    _atomic_write_parquet(df, config.prices_dir() / f"{symbol}_{adjustment}.parquet")
-    _touch_manifest("prices", f"{symbol}_{adjustment}", df, source)
-
-
-def read_prices(symbol: str, adjustment: str) -> pd.DataFrame:
-    p = config.prices_dir() / f"{symbol}_{adjustment}.parquet"
-    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
-
-
 # ── COT Legacy ────────────────────────────────────────────────────────────
 def write_cot_legacy(name: str, df: pd.DataFrame, source: str) -> None:
     _atomic_write_parquet(df, config.cot_legacy_dir() / f"{name}.parquet")
@@ -102,11 +83,13 @@ def read_cot_supplemental(name: str) -> pd.DataFrame:
 # half, and they never touch the same manifest file. Listing every domain here (and
 # refusing unknown ones) is what stops a new domain quietly joining the wrong side.
 #
-# `metadata` (futures contract specs) is still DECLARED but nothing writes it any
-# more: ADR-0007 moved contract specs to marketdata along with the bars. It stays
-# on the map because stores written before that move carry `metadata` entries, and
-# an undeclared domain is skipped by migrate_manifests() — which would strand those
-# entries in the legacy aggregate forever. Read-only legacy; do not add writers.
+# `prices` and `metadata` are still DECLARED and nothing writes either any more:
+# ADR-0007 moved every bar and the contract-specs table to marketdata, and the
+# databento producer followed them. They stay on the map because stores written
+# before those moves carry such entries, and an undeclared domain is SKIPPED by
+# migrate_manifests() — which would strand them in the legacy aggregate forever,
+# and make reconcile_manifest() resolve their directory by fallback rather than by
+# declaration. Read-only legacy on both: do not add a writer to either.
 HALVES = ("cot", "prices")
 _DOMAIN_HALF = {
     "prices": "prices",
@@ -132,10 +115,10 @@ def half_for(kind: str) -> str:
 
 
 def _empty_manifest() -> dict:
-    # No `metadata` key: a store created from here on never gets contract specs
-    # (they live in marketdata now). Legacy stores that have them still read fine —
+    # COT domains only: a store created from here on never gets bars or contract
+    # specs (both live in marketdata). Legacy stores that have them still read fine —
     # load_manifest() overlays whatever domains it finds on disk.
-    return {"schema_version": config.SCHEMA_VERSION, "prices": {},
+    return {"schema_version": config.SCHEMA_VERSION,
             "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}, "cot_supplemental": {}}
 
 

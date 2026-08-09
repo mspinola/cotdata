@@ -124,14 +124,16 @@ Three facts that were each written down separately and never composed:
    broadened toward parity with Norgate".
 
 **Composed: a databento-backed futures store cannot produce `propadj` at all**, so any
-consumer needing correct percentage returns cannot be served by one. This is a live constraint
-rather than a historical note, and it is a **tier fact, not an operating system fact**, a
-distinction that has been got wrong more than once:
+consumer needing correct percentage returns cannot be served by one. It is a **tier fact, not
+an operating system fact**, a distinction that has been got wrong more than once:
 
-Step 2 §7.5 sharpened it into a structural one. `marketdata` now refuses to derive `propadj`
-unless BOTH stored tiers are present, rather than returning an empty frame — the store cannot
-hand back a silently wrong series. databento, which still writes into `$COTDATA_STORE`, does
-write both tiers, but there is no bar reader here that derives the third from them.
+**Fact 3 is now out of date, and the constraint with it.** ADR-0007 scoped databento to one
+`backadj` series per symbol for the Linux dashboard. When it was ported into `marketdata`
+(2026-08-09) it came across as a full futures provider writing BOTH stored tiers, because
+that package enforces both-tiers-or-neither on every producer — `propadj` derives from the
+pair, and `get_bars` raises rather than returning empty when only one is present. So a
+databento-backed store now produces `propadj` like any other. The §5 table below is kept as
+written because the OS/tier distinction it draws is still the point.
 
 | box | Python >= 3.10 | Norgate | can produce a store carrying all tiers |
 |---|---|---|---|

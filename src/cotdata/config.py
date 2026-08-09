@@ -21,6 +21,12 @@ def store_root() -> Path:
     return Path(root)
 
 
+# LEGACY, read-only. Nothing writes either directory any more — bars, contract specs
+# and the databento producer all moved to marketdata (ADR-0007). They survive because
+# `store.reconcile_manifest` resolves a domain's directory through `_DOMAIN_DIRS`, and
+# a store written before those moves still carries `prices` and `metadata` entries to
+# reconcile. Deleting these would make reconcile fall back to a guessed path for
+# exactly the entries it exists to clean up.
 def prices_dir() -> Path:
     return store_root() / "prices"
 

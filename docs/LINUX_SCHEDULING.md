@@ -1,41 +1,30 @@
 # Scheduling cotdata on Linux (cron)
 
-For the cross-platform Databento producer path (no Norgate/Windows required) — see [Cross-platform prices without Norgate](../README.md#cross-platform-prices-without-norgate-databento) in the README for the one-time `--ingest-databento` / `--build-databento` setup before automating it here.
+> **Only COT is scheduled here now.** ADR-0007 moved every price producer to
+> [`marketdata`](https://pypi.org/project/crucible-marketdata/), databento included, so
+> the nightly price job on this box is `marketdata-update --ingest-databento` /
+> `--build-databento` against `$MARKETDATA_STORE`. See that package's README. The COT
+> half below is unchanged.
+>
+> **Upgrading?** Delete the old `run-prices.sh` — it calls `cotdata-prices`, which no
+> longer exists, so the job will fail every night until it is replaced or removed.
 
 ## Goal
 
-A databento server schedules **prices nightly** and **COT soon after its Friday ~3:30pm ET release**, with a daily catch-up for holiday delays. Two properties hold:
+**COT soon after its Friday ~3:30pm ET release**, with a daily catch-up for holiday delays. Two properties hold:
 
-- **Idempotent.** `--cot-all` HEAD-checks each CFTC year zip and skips it if unchanged. `--ingest-databento` resumes from the last fetched date, so a re-run pulls only new days. Running before new data lands is a harmless no-op.
-- **Fails loudly.** A run exits non-zero only on a hard fetch error (source unreachable), not when there is simply nothing new. Because ingest is resumable and COT is idempotent, a failed or missed run is picked up by the next one, so no explicit retry logic is needed.
+- **Idempotent.** `--cot-all` HEAD-checks each CFTC year zip and skips it if unchanged. Running before new data lands is a harmless no-op.
+- **Fails loudly.** A run exits non-zero only on a hard fetch error (source unreachable), not when there is simply nothing new. Because COT is idempotent, a failed or missed run is picked up by the next one, so no explicit retry logic is needed.
 
 ## Wrapper scripts
 
-Cron runs with a bare environment, so put the config and the venv path in a wrapper script (one per command, mirroring the Windows pair).
+Cron runs with a bare environment, so put the config and the venv path in a wrapper script.
 
-> **Ready-made templates:** copy [`docs/examples/linux/run-prices.sh`](examples/linux/run-prices.sh) and [`run-cot.sh`](examples/linux/run-cot.sh) out of the repo into your `<DIR>`, `chmod +x` them, and fill in the placeholders — keep them outside the repo so a `git pull` never clobbers your edited paths.
+> **Ready-made template:** copy [`run-cot.sh`](examples/linux/run-cot.sh) out of the repo into your `<DIR>`, `chmod +x` it, and fill in the placeholders — keep it outside the repo so a `git pull` never clobbers your edited paths.
 
-Inside the scripts, overwrite the plain-text markers: `REPLACE_WITH_STORE_PATH` = your store, `REPLACE_WITH_VENV_PATH` = your virtualenv, `REPLACE_WITH_DATABENTO_KEY` = your Databento key. (They're plain markers, not `<...>` placeholders, because an unedited `<...>` would be read as a shell redirection and the script would fail.) The `<DIR>` in the crontab lines below is normal fill-in notation.
+Inside it, overwrite the plain-text markers: `REPLACE_WITH_STORE_PATH` = your store, `REPLACE_WITH_VENV_PATH` = your virtualenv. (They're plain markers, not `<...>` placeholders, because an unedited `<...>` would be read as a shell redirection and the script would fail.) The `<DIR>` in the crontab lines below is normal fill-in notation.
 
-`run-prices.sh` — the two-stage databento build:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-export COTDATA_STORE=REPLACE_WITH_STORE_PATH
-export DATABENTO_API_KEY=REPLACE_WITH_DATABENTO_KEY
-BIN=REPLACE_WITH_VENV_PATH/bin/cotdata-prices
-"$BIN" --ingest-databento     # Stage 1 (paid): raw .n.0/.n.1 to raw store
-"$BIN" --build-databento      # Stage 2 (free): back-adjusted prices
-```
-
-Databento is the only price producer left in this package. ADR-0007 moved the Norgate and
-Yahoo bar producers to [`marketdata`](https://pypi.org/project/crucible-marketdata/), so the
-markets databento does not cover — ICE softs, lumber, the MSCI ETF proxies — are fetched by
-`marketdata-update --bars` against `$MARKETDATA_STORE` on whichever box produces that store,
-not by this script.
-
-`run-cot.sh` — COT (note the different command):
+`run-cot.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -44,10 +33,10 @@ export COTDATA_STORE=REPLACE_WITH_STORE_PATH
 REPLACE_WITH_VENV_PATH/bin/cotdata-cot --cot-all
 ```
 
-Make them executable:
+Make it executable:
 
 ```bash
-chmod +x run-prices.sh run-cot.sh
+chmod +x run-cot.sh
 ```
 
 ## Crontab entries
@@ -55,10 +44,6 @@ chmod +x run-prices.sh run-cot.sh
 Add the jobs with `crontab -e`. Cron uses the **server's local** timezone, so convert the ET times below if it is not on Eastern (or set the server to a known zone). `flock` stops a slow run from overlapping the next, and the redirect keeps a log:
 
 ```cron
-# Prices — nightly (Mon-Sat). GLBX settlements are disseminated the morning after the
-# session, so an early-morning run captures the prior session's finalized settlement.
-30 6 * * 1-6     flock -n /tmp/cotdata-prices.lock <DIR>/run-prices.sh >> <DIR>/prices.log 2>&1
-
 # COT — daily morning catch-up (holiday-delayed releases and a safety net).
 10 8 * * *       flock -n /tmp/cotdata-cot.lock <DIR>/run-cot.sh >> <DIR>/cot.log 2>&1
 
@@ -77,19 +62,19 @@ Set `MAILTO=you@example.com` at the top of the crontab to have cron email the ou
 
 ### Cron job runs manually but not on schedule
 
-Cron's environment is far barer than an interactive shell — no `PATH` beyond `/usr/bin:/bin`, no `.bashrc`/`.profile` sourced, no venv activation. This is exactly why the wrapper scripts above call the venv's binary by full path (`<VENV>/bin/cotdata-prices`, `<VENV>/bin/cotdata-cot`) rather than a bare command name, and `export` every variable instead of relying on a login shell to have set them. If a script works when you run it by hand but not under cron, the first thing to check is whether it depends on something your interactive shell set up implicitly.
+Cron's environment is far barer than an interactive shell — no `PATH` beyond `/usr/bin:/bin`, no `.bashrc`/`.profile` sourced, no venv activation. This is exactly why the wrapper script above calls the venv's binary by full path (`<VENV>/bin/cotdata-cot`) rather than a bare command name, and `export` every variable instead of relying on a login shell to have set them. If a script works when you run it by hand but not under cron, the first thing to check is whether it depends on something your interactive shell set up implicitly.
 
 ### Job silently does nothing
 
-Check `<DIR>/prices.log` or `<DIR>/cot.log` first — the wrappers redirect both stdout and stderr there. If the log is empty or missing entirely, cron likely never ran the job: check `grep CRON /var/log/syslog` (Debian/Ubuntu) or `journalctl -u cron` (systemd) for the scheduled time to confirm cron invoked it at all.
+Check `<DIR>/cot.log` first — the wrapper redirects both stdout and stderr there. If the log is empty or missing entirely, cron likely never ran the job: check `grep CRON /var/log/syslog` (Debian/Ubuntu) or `journalctl -u cron` (systemd) for the scheduled time to confirm cron invoked it at all.
 
 ### Overlapping runs / stale lock
 
-`flock -n` fails fast (doesn't block) if another instance already holds the lock file, so a slow `run-prices.sh` won't stack with the next scheduled run — the second invocation just no-ops and exits. The lock releases automatically when the holding process exits, including on a crash, so a stale lock that blocks forever generally indicates a *hung*, still-running process, not manual cleanup — check with `ps aux | grep cotdata` before deleting anything under `/tmp`.
+`flock -n` fails fast (doesn't block) if another instance already holds the lock file, so a slow `run-cot.sh` won't stack with the next scheduled run — the second invocation just no-ops and exits. The lock releases automatically when the holding process exits, including on a crash, so a stale lock that blocks forever generally indicates a *hung*, still-running process, not manual cleanup — check with `ps aux | grep cotdata` before deleting anything under `/tmp`.
 
 ### Permission denied running the wrapper
 
-Confirm `chmod +x` was applied to both `.sh` files, and that the shebang (`#!/usr/bin/env bash`) resolves — run `which bash` to confirm it's on `PATH` for the cron user (usually is, but matters more on minimal containers).
+Confirm `chmod +x` was applied to the `.sh` file, and that the shebang (`#!/usr/bin/env bash`) resolves — run `which bash` to confirm it's on `PATH` for the cron user (usually is, but matters more on minimal containers).
 
 ### Timezone confusion on the Friday window
 

@@ -20,7 +20,8 @@ DEST="REPLACE_WITH_LOCAL_STORE"
 
 # What each exclusion is for:
 #   _cache, _raw   producer-internal, most of the bytes. _cache is cotdata's cache
-#                  of downloaded CFTC zips; _raw is the PAID databento raw store.
+#                  of downloaded CFTC zips. _raw is a pre-ADR-0007 leftover (databento's
+#                  paid bronze store, now marketdata's) — still excluded.
 #   citpy          consumer-owned, not written by any producer, so --delete removes
 #                  it and no producer run brings it back. Kept as a backstop: such
 #                  files belong outside the store. See docs/SYNCING.md.

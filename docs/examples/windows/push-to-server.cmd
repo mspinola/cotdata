@@ -50,7 +50,8 @@ set "SSH=%SSH_EXE% -i %KEY% -o BatchMode=yes -o StrictHostKeyChecking=accept-new
 REM Data first, manifests last, so a manifest never announces parquet that has not
 REM landed (harmless if reversed; readers open parquet directly). --delete makes
 REM this a true mirror. The exclusions match the Mac push:
-REM   _cache, _raw   producer-internal; _raw/databento (the paid databento bronze)
+REM   _cache, _raw   producer-internal. _raw/databento (the paid databento bronze) is a
+REM                  pre-ADR-0007 leftover here, owned by marketdata now
 REM                  rides under _raw and so is excluded, per ADR-0006.
 REM   citpy          consumer-owned on the server; excluding it from --delete is
 REM                  what stops the mirror from wiping it.

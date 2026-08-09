@@ -127,18 +127,17 @@ def test_write_status_file_roundtrip(tmp_path, monkeypatch):
     from cotdata import status as st
     from cotdata import store
     # seed the store manifest via a real write
-    idx = __import__("pandas").date_range("2026-07-10", periods=3, freq="D", name="Date")
-    df = __import__("pandas").DataFrame({"Open": [1, 2, 3], "High": [1, 2, 3], "Low": [1, 2, 3],
-                                         "Close": [1, 2, 3], "Volume": [1, 2, 3],
-                                         "Open Interest": [1, 2, 3]}, index=idx)
-    store.write_prices("ES", "backadj", df, source="test")
+    idx = __import__("pandas").date_range("2026-07-10", periods=3, freq="D",
+                                          name="Report_Date")
+    df = __import__("pandas").DataFrame({"Open_Interest_All": [1, 2, 3]}, index=idx)
+    store.write_cot_legacy("ES_13874A", df, source="test")
 
-    path = st.write_status_file(last_run={"kinds": ["prices"], "ok": ["ES"], "failed": []})
+    path = st.write_status_file(last_run={"kinds": ["cot_legacy"], "ok": ["ES"], "failed": []})
     assert path.endswith("status.json")
     doc = json.loads((tmp_path / "status.json").read_text())
-    assert doc["newest_data"]["prices"] == "2026-07-12"
-    assert doc["last_run"]["kinds"] == ["prices"]
-    assert doc["domains"]["prices"]["entries"] == 1
+    assert doc["newest_data"]["cot_legacy"] == "2026-07-12"
+    assert doc["last_run"]["kinds"] == ["cot_legacy"]
+    assert doc["domains"]["cot_legacy"]["entries"] == 1
 
 
 def test_run_summary_ok_and_failed():

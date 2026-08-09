@@ -29,37 +29,16 @@ def test_exits_zero_on_cot_success(tmp_path, monkeypatch):
         update.main()  # must not raise SystemExit
 
 
-def test_exits_nonzero_when_the_databento_build_fails(tmp_path, monkeypatch):
-    """The price half is databento only now: ADR-0007 moved the Norgate and Yahoo
-    producers (and the --require-final finals gate that covered them) to marketdata.
-    What this file protects is unchanged — a scheduler must be able to tell a failed
-    run from a quiet one."""
-    _argv(monkeypatch, tmp_path, "--build-databento")
-    from cotdata import update
-    with mock.patch("cotdata.providers.databento.build",
-                    return_value={"kind": "build_databento", "ok": False, "wrote": 0}):
-        with pytest.raises(SystemExit) as ei:
-            update.main()
-    assert ei.value.code not in (0, None)
-
-
-def test_exits_zero_on_databento_build_success(tmp_path, monkeypatch):
-    _argv(monkeypatch, tmp_path, "--build-databento")
-    from cotdata import update
-    with mock.patch("cotdata.providers.databento.build",
-                    return_value={"kind": "build_databento", "ok": True, "wrote": 3}):
-        update.main()  # must not raise SystemExit
-
-
 def test_retired_price_flags_are_refused_not_ignored(tmp_path, monkeypatch):
-    """A scheduler line still carrying --prices must fail loudly.
+    """A scheduler line still carrying ANY price action must fail loudly.
 
     argparse rejects an unknown flag, so this is really a guard against quietly
     re-adding one as a no-op alias: a nightly job that keeps exiting 0 while
     fetching nothing is a store that silently stops being updated.
     """
     from cotdata import update
-    for flag in ("--prices", "--prices-yahoo", "--metadata", "--require-final"):
+    for flag in ("--prices", "--prices-yahoo", "--metadata", "--require-final",
+                 "--ingest-databento", "--build-databento", "--reconcile-databento"):
         _argv(monkeypatch, tmp_path, flag)
         with pytest.raises(SystemExit) as ei:
             update.main()

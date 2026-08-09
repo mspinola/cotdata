@@ -490,8 +490,17 @@ def test_store_round_trip_and_get_cot(store_env):
         cot.get_cot("ZW", report="cit")
 
 
-def test_cotdata_prices_refuses_the_supplemental_action(store_env):
-    """One host does one job: the price half must not become a second COT producer."""
+def test_the_supplemental_action_is_reachable_from_the_scheduled_entry_point(store_env):
+    """`cotdata-cot` is what the scheduled job calls, so --cot-supplemental has to be
+    reachable through it.
+
+    This replaces a test that asserted `cotdata-prices` REFUSED the action, which was
+    the half-split talking: one host, one job. Every price producer moved to marketdata
+    (ADR-0007), `cotdata-prices` is gone, and there is no other half to refuse."""
+    from unittest import mock
+
     from cotdata import update
-    with pytest.raises(SystemExit):
-        update.main_prices(["--cot-supplemental"])
+    with mock.patch("cotdata.providers.cftc_cit.update",
+                    return_value={"kind": "cot_supplemental", "ok": True, "wrote": 1}) as m:
+        update.main_cot(["--cot-supplemental"])
+    m.assert_called_once()

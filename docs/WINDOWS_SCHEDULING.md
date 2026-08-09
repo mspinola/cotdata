@@ -3,7 +3,7 @@
 New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDOWS_SETUP.md) — install Python, create the venv, and confirm `cotdata-update --cot-legacy` works by hand before automating it.
 
 > [!IMPORTANT]
-> **The price task now runs a different package.** ADR-0007 moved Norgate bar production to
+> **The price task runs a different package.** ADR-0007 moved ALL bar production to
 > [`crucible-marketdata`](https://pypi.org/project/crucible-marketdata/), so the nightly job is
 > `marketdata-update --bars --domain futures --require-final` against `$MARKETDATA_STORE`, not
 > `cotdata-prices --prices`. It is still scheduled here, on the same box, at the same time,
@@ -12,8 +12,8 @@ New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDO
 > store variable moved.
 >
 > **Upgrading?** Edit `run-prices.cmd` to the new command and give it `MARKETDATA_STORE`. A
-> wrapper still calling `cotdata-prices --prices` now dies on an unrecognised flag, which
-> Task Scheduler shows as a failed run — loud, not silent.
+> wrapper still calling `cotdata-prices` now fails to resolve the command at all — that entry
+> point no longer exists — which Task Scheduler shows as a failed run. Loud, not silent.
 
 ## Goal
 
@@ -24,7 +24,7 @@ New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDO
 
 ## Wrapper scripts
 
-Create **two** wrapper scripts — they run *different* commands from *different* packages: `marketdata-update` for the bars, `cotdata-cot` for the COT half. cotdata's own entry points stay half-scoped (`cotdata-cot` / `cotdata-prices`) and each refuses the other half's flags, so a host is scoped to one job and a price box cannot quietly become a second COT producer.
+Create **two** wrapper scripts — they run *different* commands from *different* packages: `marketdata-update` for the bars, `cotdata-cot` for the COT. (`cotdata-cot` is an alias of `cotdata-update`; it used to be half of a scoped pair, and the other half went with the price producers.)
 
 > **Ready-made templates:** copy [`docs/examples/windows/run-prices.cmd`](examples/windows/run-prices.cmd) and [`run-cot.cmd`](examples/windows/run-cot.cmd) out of the repo into your `<DIR>` (e.g. `C:\Users\you\cotdata\scheduler\`) rather than retyping them — then just fill in the placeholders. Keep them outside the repo so a `git pull` never clobbers your edited paths.
 
