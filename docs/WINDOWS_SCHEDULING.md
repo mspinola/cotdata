@@ -93,9 +93,19 @@ Register-ScheduledTask -TaskName "cotdata COT (Fri release)" -Action $act -Trigg
 
 (Or in the Task Scheduler GUI: New Task → Trigger *Weekly, Friday, 3:25pm* → check *"Repeat task every: 2 minutes for a duration of: 45 minutes."*)
 
-**Event-driven prices with `--require-final`.** cotdata reads two Norgate databases: **Continuous Futures** (the `&ES` / `_CCB` series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Their **Final** prices land ~8:40pm ET (Futures) and ~8:55pm ET (Continuous Futures), but your Norgate Data Updater still has to *pull* them on its next poll. Rather than guess a fixed time, `--require-final` checks `norgatedata.last_database_update_time()` for both databases and only fetches once each has been refreshed at/after `--final-cutoff` (default `20:55` local — set it to your machine's local equivalent of 8:55pm ET). Until then it **defers with a non-zero exit**, so the restart setting below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
+**Event-driven prices with `--require-final`.** Norgate's **Final** futures prices land ~8:40pm ET (the `Futures` database) and ~8:55pm ET (`Continuous Futures`), but your Norgate Data Updater still has to *pull* them on its next poll. `--require-final` waits for that, and it asks the **data** rather than the clock:
 
-**Retry / wait via restart-on-failure.** Give each task a *restart on failure* — it does double duty: it retries transient fetch errors, and (for the price task) waits out the gap between 8:55pm and NDU actually pulling the Finals (each retry is a cheap `last_database_update_time` check that exits immediately until ready). On a genuine no-session day the retries simply exhaust, harmlessly. `schtasks` can't set this, so use PowerShell (applies to all three tasks):
+```
+ready := norgate_latest_bar_date > store_latest_bar_date
+```
+
+checked across a quorum of liquid continuous references (`ES`, `CL`, `ZC`), all of which must have advanced, so one lagging reference cannot green-light a partial capture. Until then it **defers with a non-zero exit**, so the restart setting below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
+
+Two properties follow from comparing bar dates, and both are why nothing here needs a trading calendar. Weekends and holidays produce no new bar, so "no session today" and "session not settled yet" give the same answer. And Norgate does not publish an in-progress session's bar at all (probed on the producer, 2026-07-28: at 11am Tuesday the newest continuous bar was Monday's final OHLC, with no Tuesday bar in existence), so bar *presence* is already a settled-session signal.
+
+> **`--final-cutoff` is deprecated and ignored.** It is still accepted so an existing wrapper does not break, and it does nothing. The flag used to be the whole mechanism: `--require-final` checked `norgatedata.last_database_update_time()` for both databases against a fixed local cutoff (default `20:55`). That **broke in production on 2026-07-27**, when Norgate finalized `Futures` at 8:49pm and `Continuous Futures` at 8:55pm. The check wanted both at or after 20:55, so the task deferred on every attempt, the chained sync never ran, and prices sat on the prior Friday's bar. The failure is intrinsic to a clock threshold: it must sit below the earliest evening publish and above any daytime refresh, and Norgate's publish time drifts night to night, so no single value is safe. Delete the flag from your wrapper if it is there.
+
+**Retry / wait via restart-on-failure.** Give each task a *restart on failure* — it does double duty: it retries transient fetch errors, and (for the price task) waits out the gap between 8:55pm and NDU actually pulling the Finals (each retry is a short trailing-window read and a date compare, exiting immediately until ready). On a genuine no-session day the retries simply exhaust, harmlessly. `schtasks` can't set this, so use PowerShell (applies to all three tasks):
 
 ```powershell
 $s = New-ScheduledTaskSettingsSet -RestartInterval (New-TimeSpan -Minutes 10) -RestartCount 6
@@ -142,7 +152,7 @@ Confirm the relevant `newest data` date advanced (and `last write (UTC)` is rece
 
 ### Testing the timing and conditions
 
-- **A daytime prices run only proves the wrapper resolves** — with no Finals yet it just defers. To exercise the actual write path in daylight, run `cotdata-prices --prices --metadata` by hand (no `--require-final`), or fire the task after ~8:55pm ET.
+- **A daytime prices run usually only proves the wrapper resolves** — if last night's run captured, the store already holds the newest settled bar, so a daytime run finds nothing newer and defers. The exception is worth knowing: if last night's run *failed or never fired*, a daytime run finds Norgate ahead of the store and captures immediately, so a missed night self-heals at the next trigger rather than waiting for the evening. To exercise the write path on demand regardless, run `cotdata-prices --prices --metadata` by hand (no `--require-final`), or fire the task after ~8:55pm ET.
 - **Test the trigger itself** by moving it a couple of minutes out, watching it fire, then setting it back:
   ```bat
   schtasks /Change /TN "cotdata prices" /ST 14:20
