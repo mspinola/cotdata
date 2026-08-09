@@ -1,6 +1,7 @@
 # Handoff: ADR-0007 step 2, the `marketdata` futures provider is written
 
-**Status:** **STEP 1 OF §7 SHIPPED.** Contract specs (§7.2) came with it. Steps §7.3–§7.5
+**Status:** **STEP 1 OF §7 SHIPPED AND VERIFIED ON THE WINDOWS BOX (2026-08-09, §7).**
+Contract specs (§7.2) came with it. Steps §7.3–§7.5
 — repoint `crowdmon`, repoint `cotmetrics`/`cot-analyzer`, delete from `cotdata` — are
 **not started**
 **Date:** 2026-08-08
@@ -61,7 +62,8 @@ partial progress, and the honest measurement is that the consumer path was 0% bu
 
 ## 2. What shipped
 
-In `marketdata`, all green (89 tests, ruff clean):
+In `marketdata`, all green (119 tests, ruff clean) and verified against a real Norgate
+run — see §7:
 
 | Piece | Note |
 |---|---|
@@ -73,6 +75,8 @@ In `marketdata`, all green (89 tests, ruff clean):
 | `store.{write,read,upsert}_metadata` | contract specs. The scoped-run upsert is ported too — specs share one table |
 | `registry.yaml` | 49 futures symbols |
 | `update.py` | `--domain`, `--metadata`, `--full` |
+| `bars.get_bars(volume=)` | front / reconstructed volume. Added after the Windows run — the producer wrote the columns and nothing served them (§7) |
+| `scripts/verify_against_cotdata.py` | the port-verification harness, with its comparison logic unit tested |
 | `provenance` / `pin` | made tier-aware (see §4) |
 
 `get_prices(symbol, adjustment=...)` becomes `get_bars(symbol, adjustment)`. Tier names
@@ -251,22 +255,58 @@ it was one of two.
   survives the repoint unchanged.
 - **Step 3 (`livebook`).** Still out, still a live book.
 
-## 7. Not yet run against real Norgate
+## 7. RUN AGAINST REAL NORGATE, 2026-08-09 — identical
 
-Every test is offline. The provider has not executed against a live NDU, because this
-work happened on Linux and §5.3 is exactly the reason it could not. The pure logic —
-`propadj` derivation, the finals-gate cores, the roll-gap check, the tier/store
-plumbing — is covered by tests; the `norgatedata` call sites are ported from code that
-has run in production in `cotdata` for months, but they are unexercised **here**.
+**This section said "not yet run" when it was written. It has now run, on the Windows
+producer, and the port is verified.** `marketdata/scripts/verify_against_cotdata.py`
+against a `cotdata` store built by the original producer:
 
-**First action for whoever picks this up on the Windows box:**
+| symbol | rows per tier | passthrough | reconstruction |
+|---|---:|---|---|
+| ES | 7,279 | identical | identical |
+| CL | 10,887 | identical | identical |
+| GC | 12,156 | identical | identical |
+| ZS | 12,271 | identical | identical |
+| DC | 7,299 | identical | identical |
 
-```
-marketdata-update --bars --domain futures --symbols ES
-marketdata-update --check
-```
+49,892 rows per tier, both tiers, plus contract specs for all five, exit 0. **Exact
+equality, not a tolerance**: both producers drive the same Norgate install through two
+code paths, so a difference would have been a port bug rather than vendor
+disagreement. Symbols span an index, an energy, a metal and the two markets whose
+`backadj` history goes non-positive.
 
-then compare `ES_backadj` against `cotdata`'s existing `ES_backadj` for the same dates.
-Both producers can run side by side — separate roots, separate manifests, nothing
-deleted — so that comparison is available until §7.5, and it is the cheapest possible
-check that the port preserved the numbers.
+That is what §7.5 needs before `cotdata`'s price code is deleted, and it was obtainable
+only while both halves still exist. **It is now on the record, so the deletion no longer
+has to wait on it.**
+
+### What the real box found that the offline suite could not
+
+Two defects, on the first two contacts, and neither was in the data:
+
+1. **`--domain futures` stopped at the import guard.** The provider was ported without
+   its dependency: `cotdata` declares `norgate = ["norgatedata"]` and `marketdata` had
+   no such extra, so nothing installed it. The guard behaved correctly and its message
+   was wrong for the one machine that matters, sending the Windows producer to
+   `--domain equities`.
+2. **`get_bars` had no `volume=` parameter.** The producer half of volume
+   reconstruction was ported and the consumer half was not, so the columns were written
+   and nothing served them. `npf`'s `ml/labels.py:50` passes `volume=` through, so a
+   repointed call would have raised `TypeError`.
+
+Neither is visible to a suite that cannot install the vendor or call a parameter that
+does not exist. **The lesson for §7.4 and §7.5: offline green says nothing about the
+producer box**, and each repoint should be exercised there before it is called done.
+
+The second was found only because the harness was changed to report the columns it had
+**not** compared. It had been printing reconstruction columns solely when they differed,
+so "compared and identical" and "never compared" rendered as the same silence and a PASS
+could not be distinguished from a PASS that skipped half the frame.
+
+### One expectation this corrected
+
+The reconstruction columns were expected to drift, because each producer reconstructs
+incrementally over its own store's history and `marketdata`'s was fresh where `cotdata`'s
+had accumulated over months. They agree exactly. Norgate's historical individual-contract
+volumes are immutable and the algorithm is identical, so the incremental path converges
+on what a full recompute produces — which makes the harness's `--strict-volume` usable
+rather than theoretical.
