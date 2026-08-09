@@ -34,7 +34,7 @@ EXCLUDES=(
 )
 
 # Two passes so a manifest never arrives before the data it describes. Harmless if
-# reversed (get_prices reads parquet directly), but free to get right.
+# reversed (readers open parquet directly), but free to get right.
 rsync -az --delete "${EXCLUDES[@]}" --exclude 'manifests/' "$SRC/" "$DEST/"
 rsync -az "$SRC/manifests/" "$DEST/manifests/"
 

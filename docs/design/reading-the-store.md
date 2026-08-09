@@ -5,6 +5,12 @@ each of which has already cost a session that reasoned from a plausible-looking 
 plausible-looking count. None of them is about report comparability, which has its own
 document: [`cross-report-comparability.md`](cross-report-comparability.md).
 
+**Scope note (ADR-0007 step 2).** §1–§3 are about this store. §4 and §5 are about the BAR
+store, which moved to [`crucible-marketdata`](https://pypi.org/project/crucible-marketdata/)
+along with the providers that fill it. They stay here, updated to the new API, because they
+are the reason this document exists: both are naming-and-composition traps that cost real
+time, and a reader arriving from a COT question is exactly who walks into them.
+
 ---
 
 ## 1. The Disaggregated universe is mostly power and gas basis
@@ -81,8 +87,8 @@ precede any differencing, because the other order fails silently.
 
 ## 4. Volume: the fuller-sounding parameter is the narrower series
 
-`get_prices` takes `volume="front"` or `volume="reconstructed"`, documented as "continuous
-front-month volume" and "true market volume (first + second expiring contract)".
+`marketdata.get_bars` takes `volume="front"` or `volume="reconstructed"`, documented as
+"continuous front-month volume" and "true market volume (first + second expiring contract)".
 
 **The second reads like the fuller series and is the narrower one.**
 `Volume_Reconstructed = FirstVolume + SecondVolume`, exactly two expiries, while the plain
@@ -111,16 +117,21 @@ Three facts that were each written down separately and never composed:
 1. **`propadj` is derived on read** from `unadj` + `backadj`. It is not a stored tier.
 2. **Norgate is the only vendor supplying all tiers, and it is Windows-only by mechanism
    rather than by licence**: `norgatedata` talks to a locally installed Norgate Data Updater
-   application rather than to an API
-   ([`../../src/cotdata/providers/norgate.py`](../../src/cotdata/providers/norgate.py)).
+   application rather than to an API (`marketdata/providers/norgate.py`, moved there by
+   ADR-0007 step 2 §7.1).
 3. **databento owes exactly one series per symbol**, `backadj`, because crucible-stack
    ADR-0007 scopes it to the Linux dashboard's needs and says its coverage "should not be
    broadened toward parity with Norgate".
 
 **Composed: a databento-backed futures store cannot produce `propadj` at all**, so any
 consumer needing correct percentage returns cannot be served by one. This is a live constraint
-on ADR-0007 step 2 rather than a historical note, and it is a **tier fact, not an operating
-system fact**, a distinction that has been got wrong more than once:
+rather than a historical note, and it is a **tier fact, not an operating system fact**, a
+distinction that has been got wrong more than once:
+
+Step 2 §7.5 sharpened it into a structural one. `marketdata` now refuses to derive `propadj`
+unless BOTH stored tiers are present, rather than returning an empty frame — the store cannot
+hand back a silently wrong series. databento, which still writes into `$COTDATA_STORE`, does
+write both tiers, but there is no bar reader here that derives the third from them.
 
 | box | Python >= 3.10 | Norgate | can produce a store carrying all tiers |
 |---|---|---|---|

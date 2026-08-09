@@ -26,9 +26,12 @@ The slow part is the API pull, so roll dates are cached per (root, rule) on disk
 re-run, or extra --tol-days values, cost no extra pulls. Pull a symbol once, then sweep
 tolerances for free.
 
+Since ADR-0007 the Norgate store is a $MARKETDATA_STORE (`bars/futures/norgate/`);
+the pre-move cotdata `prices/` layout is still read, so an older synced copy works.
+
 Usage:
     DATABENTO_API_KEY=... python scripts/investigate_databento_roll_rule.py \
-        --norgate-store ~/code/cotdata_store \
+        --norgate-store ~/code/marketdata_store \
         --symbols CL ZS NG HE --tol-days 3 7 10      # sweep, one pull per rule
 """
 from __future__ import annotations
@@ -50,8 +53,11 @@ _DEFAULT_RULES = ["c", "n", "v"]
 def norgate_roll_dates(store: str, symbol: str) -> pd.DatetimeIndex:
     """Roll dates from a Norgate-built store: the first session on each new front
     contract, read from the `Delivery Month` column of the backadj parquet."""
-    p = Path(store) / "prices" / f"{symbol}_backadj.parquet"
-    if not p.exists():
+    for layout in ("bars/futures/norgate", "prices"):   # marketdata, then pre-ADR-0007
+        p = Path(store) / layout / f"{symbol}_backadj.parquet"
+        if p.exists():
+            break
+    else:
         return pd.DatetimeIndex([])
     df = pd.read_parquet(p)
     if "Delivery Month" not in df.columns:
@@ -117,7 +123,8 @@ def score(dbrolls: pd.DatetimeIndex, ngrolls: pd.DatetimeIndex, tol_days: int):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--norgate-store", required=True, help="A Norgate-built cotdata store.")
+    ap.add_argument("--norgate-store", required=True,
+                    help="A Norgate-built store — a $MARKETDATA_STORE since ADR-0007.")
     ap.add_argument("--symbols", nargs="+", default=_DEFAULT_SYMBOLS)
     ap.add_argument("--rules", nargs="+", default=_DEFAULT_RULES, help="c=calendar n=OI v=volume")
     ap.add_argument("--tol-days", nargs="+", type=int, default=[3],

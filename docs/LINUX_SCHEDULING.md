@@ -4,7 +4,7 @@ For the cross-platform Databento producer path (no Norgate/Windows required) —
 
 ## Goal
 
-A databento server schedules the same way as the Windows/Norgate producer: **prices nightly**, **COT caught soon after its Friday ~3:30pm ET release**, with a daily catch-up for holiday delays. The same two properties hold:
+A databento server schedules **prices nightly** and **COT soon after its Friday ~3:30pm ET release**, with a daily catch-up for holiday delays. Two properties hold:
 
 - **Idempotent.** `--cot-all` HEAD-checks each CFTC year zip and skips it if unchanged. `--ingest-databento` resumes from the last fetched date, so a re-run pulls only new days. Running before new data lands is a harmless no-op.
 - **Fails loudly.** A run exits non-zero only on a hard fetch error (source unreachable), not when there is simply nothing new. Because ingest is resumable and COT is idempotent, a failed or missed run is picked up by the next one, so no explicit retry logic is needed.
@@ -17,19 +17,23 @@ Cron runs with a bare environment, so put the config and the venv path in a wrap
 
 Inside the scripts, overwrite the plain-text markers: `REPLACE_WITH_STORE_PATH` = your store, `REPLACE_WITH_VENV_PATH` = your virtualenv, `REPLACE_WITH_DATABENTO_KEY` = your Databento key. (They're plain markers, not `<...>` placeholders, because an unedited `<...>` would be read as a shell redirection and the script would fail.) The `<DIR>` in the crontab lines below is normal fill-in notation.
 
-`run-prices.sh` — the two-stage databento build plus the Yahoo fallback:
+`run-prices.sh` — the two-stage databento build:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 export COTDATA_STORE=REPLACE_WITH_STORE_PATH
-export COTDATA_PRICE_SOURCE=databento
 export DATABENTO_API_KEY=REPLACE_WITH_DATABENTO_KEY
 BIN=REPLACE_WITH_VENV_PATH/bin/cotdata-prices
 "$BIN" --ingest-databento     # Stage 1 (paid): raw .n.0/.n.1 to raw store
 "$BIN" --build-databento      # Stage 2 (free): back-adjusted prices
-"$BIN" --prices-yahoo         # softs / lumber / MSCI fallback
 ```
+
+Databento is the only price producer left in this package. ADR-0007 moved the Norgate and
+Yahoo bar producers to [`marketdata`](https://pypi.org/project/crucible-marketdata/), so the
+markets databento does not cover — ICE softs, lumber, the MSCI ETF proxies — are fetched by
+`marketdata-update --bars` against `$MARKETDATA_STORE` on whichever box produces that store,
+not by this script.
 
 `run-cot.sh` — COT (note the different command):
 

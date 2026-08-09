@@ -1,9 +1,14 @@
-"""Producer CLI:  cotdata-update --prices --symbols ES NQ
-                  cotdata-update --cot-all
+"""Producer CLI:  cotdata-update --cot-all
+                  cotdata-update --build-databento --symbols ES NQ
                   cotdata-update --check        # read-only store status
                   cotdata-update --reconcile    # prune stale manifest ghosts
-Writes to $COTDATA_STORE. Schedule prices nightly (after the Norgate Data
-Updater) and COT weekly (Friday, after the CFTC release)."""
+Writes to $COTDATA_STORE. Schedule COT weekly (Friday, after the CFTC release).
+
+ADR-0007 moved bar production out of this package: the Norgate and Yahoo price
+producers, and the consumer bar API, now live in `marketdata` — run
+`marketdata-update --bars` on the nightly job. What remains on the price side is
+databento, which has no marketdata equivalent yet (ADR-0006: an independently
+built alternative to Norgate, and the source for the intraday work)."""
 import argparse
 import datetime as _dt
 
@@ -16,8 +21,7 @@ from . import config
 # exist to contain. Read-only actions (--check, --reconcile) belong to both.
 _HALF_ACTIONS = {
     "cot": ("cot_legacy", "cot_disagg", "cot_tff", "cot_supplemental", "cot_all"),
-    "prices": ("prices", "metadata", "prices_yahoo", "ingest_databento",
-               "build_databento"),
+    "prices": ("ingest_databento", "build_databento"),
 }
 
 
@@ -32,13 +36,18 @@ def _reject_other_half(parser, args, half: str) -> None:
             f"cotdata-update to run both from one machine.")
 
 
-def main(argv=None, half=None) -> None:
+# Parser dests that are NOT producer actions: read-only or one-shot maintenance, and
+# modifiers on another flag. Everything else must be classified into a half above —
+# test_every_action_flag_is_assigned_to_a_half reads both lists to enforce it, so a new
+# action flag fails the suite until someone decides which side of the seam it is on.
+_NON_ACTIONS = frozenset({
+    "help", "symbols", "check", "migrate_manifests", "reconcile",
+    "reconcile_databento", "windowed_n1_stats", "batch",
+})
+
+
+def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="cotdata producer — fetch sources into the store.")
-    p.add_argument("--prices", action="store_true", help="Update Norgate price bars (Windows).")
-    p.add_argument("--metadata", action="store_true", help="Update Norgate contract metadata (Windows).")
-    p.add_argument("--prices-yahoo", action="store_true",
-                   help="Update prices from Yahoo Finance for registry symbols that resolve to "
-                        "yfinance on this deployment (cross-platform; research-grade).")
     p.add_argument("--ingest-databento", action="store_true",
                    help="Databento Stage 1 (paid API, cross-platform): fetch raw .n.0/.n.1 "
                         "ohlcv-1d + statistics into the append-only raw store ($COTDATA_DATABENTO_RAW). "
@@ -70,18 +79,6 @@ def main(argv=None, half=None) -> None:
     p.add_argument("--cot-all", action="store_true",
                    help="Update all COT pipelines (Legacy, Disagg, TFF, Supplemental).")
     p.add_argument("--symbols", nargs="+", default=None, help="Internal symbols; default = all in registry.")
-    p.add_argument("--full", action="store_true",
-                   help="Full rebuild of reconstructed volume (ignore the incremental "
-                        "60-day window). Use after a reconstruction-logic change.")
-    p.add_argument("--require-final", action="store_true",
-                   help="For --prices: only fetch once Norgate has a NEWER settled continuous "
-                        "bar than the store already holds (a new session has landed). "
-                        "Otherwise defer with a non-zero exit so a scheduler retries. Immune "
-                        "to Norgate's publish-time drift; needs no cutoff or calendar.")
-    p.add_argument("--final-cutoff", default="20:55", metavar="HH:MM",
-                   help="DEPRECATED and ignored: the finals gate is now data-driven "
-                        "(newer-bar-than-store), not a wall-clock cutoff. Accepted so "
-                        "existing schedulers do not break.")
     p.add_argument("--check", action="store_true",
                    help="Print store status (row counts, newest data, staleness) from "
                         "the manifest and exit. Read-only, cross-platform, no network.")
@@ -99,6 +96,11 @@ def main(argv=None, half=None) -> None:
                         "entries whose file is missing (so a restart does not skip them as "
                         "'already current' and leave a silent hole). Local files only, no "
                         "API. Exit.")
+    return p
+
+
+def main(argv=None, half=None) -> None:
+    p = _parser()
     args = p.parse_args(argv)
     if half:
         _reject_other_half(p, args, half)
@@ -161,45 +163,15 @@ def main(argv=None, half=None) -> None:
             print("  symbols: " + ", ".join(syms))
         return
 
-    if not (args.prices or args.metadata or args.prices_yahoo or args.ingest_databento
-            or args.build_databento or args.cot_legacy or args.cot_disagg or args.cot_tff
-            or args.cot_supplemental or args.cot_all):
-        p.error("nothing to do — pass --check, --prices, --prices-yahoo, --ingest-databento, "
-                "--build-databento, --metadata, --cot-legacy, --cot-disagg, --cot-tff, "
-                "--cot-supplemental, or --cot-all")
-
-    if args.prices or args.metadata:
-        from .providers import norgate
+    if not (args.ingest_databento or args.build_databento or args.cot_legacy
+            or args.cot_disagg or args.cot_tff or args.cot_supplemental or args.cot_all):
+        p.error("nothing to do — pass --check, --ingest-databento, --build-databento, "
+                "--cot-legacy, --cot-disagg, --cot-tff, --cot-supplemental, or "
+                "--cot-all. Norgate/Yahoo bars moved to marketdata (ADR-0007): use "
+                "'marketdata-update --bars'.")
 
     kinds = []
-    last_run = None
     failed_kinds = []  # domains that hard-failed → non-zero exit so a scheduler retries
-    deferred = []      # work skipped because inputs aren't ready yet (also non-zero exit)
-    if args.prices:
-        ready = True
-        if args.require_final:
-            ready, detail = norgate.finals_ready()
-            if not ready:
-                print(f"prices: no new settled Norgate bar yet (--require-final) "
-                      f"— deferring. {detail}")
-                deferred.append("prices")
-        if ready:
-            last_run = norgate.update(symbols=args.symbols, full=args.full)
-            kinds.append("prices")
-            if last_run and last_run.get("symbols_failed"):
-                failed_kinds.append("prices")
-
-    if args.metadata:
-        norgate.update_metadata(symbols=args.symbols)
-        kinds.append("metadata")
-
-    if args.prices_yahoo:
-        from .providers import yfinance as yprov
-        r = yprov.update(symbols=args.symbols)
-        kinds.append("prices_yahoo")
-        if not (r or {}).get("ok", True):
-            failed_kinds.append("prices_yahoo")
-
     if args.ingest_databento:
         from .providers import databento
         if args.batch:
@@ -256,21 +228,19 @@ def main(argv=None, half=None) -> None:
     # Structured heartbeat for downstream tools: rebuild status.json from the now-
     # updated manifest. Pollers detect new data via newest_data[<domain>].
     from . import status
-    run = dict(last_run or {})
-    run["kinds"] = kinds
-    run["failed"] = failed_kinds
-    run["deferred"] = deferred
-    run["at"] = _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    # `deferred` is gone with the Norgate finals gate: no source left here has a
+    # "not published yet" state — the CFTC zips and the databento raw store are
+    # either reachable or they are not. The gate itself moved to
+    # `marketdata-update --bars --require-final`.
+    run = {"kinds": kinds, "failed": failed_kinds,
+           "at": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"}
     path = status.write_status_file(last_run=run)
     print(f"status written -> {path}")
 
-    # Exit non-zero so Task Scheduler / cron retries, either on a hard failure
-    # (source unreachable) or when --require-final deferred because the Finals
-    # aren't in yet. Ordinary "no new data yet" is NOT a failure.
-    if failed_kinds or deferred:
-        parts = ([f"failed: {', '.join(failed_kinds)}"] if failed_kinds else []) + \
-                ([f"deferred: {', '.join(deferred)}"] if deferred else [])
-        raise SystemExit("cotdata-update: " + " | ".join(parts))
+    # Exit non-zero on a hard failure (source unreachable) so Task Scheduler / cron
+    # retries. Ordinary "no new data yet" is NOT a failure.
+    if failed_kinds:
+        raise SystemExit(f"cotdata-update: failed: {', '.join(failed_kinds)}")
 
 if __name__ == "__main__":
     main()
@@ -282,5 +252,6 @@ def main_cot(argv=None) -> None:
 
 
 def main_prices(argv=None) -> None:
-    """`cotdata-prices`: the price half. Norgate needs Windows with NDU running."""
+    """`cotdata-prices`: the price half, now databento only (ADR-0007 moved Norgate
+    and Yahoo to `marketdata`). Cross-platform; needs DATABENTO_API_KEY to ingest."""
     main(argv, half="prices")

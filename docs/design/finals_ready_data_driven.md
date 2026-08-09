@@ -5,6 +5,17 @@ answered the open question (Norgate never shows an in-progress session's bar); t
 wired data-driven with unit tests. What remains is a few nights confirming it flips ready at
 the right moment against the live feed.
 
+**MOVED, 2026-08-09.** The mechanism argued for here now lives in `marketdata`
+(`marketdata/providers/norgate.py`, reached by
+`marketdata-update --bars --domain futures --require-final`), because ADR-0007 step 2 moved
+bar production out of `cotdata` — §7.1 ported the code and §7.5 deleted the copy here. The
+design is unchanged and the reasoning below still holds; only the package and the CLI moved.
+Two details this document states are now out of date on their face: `--final-cutoff` no
+longer exists in either package (§107 kept it as an accepted-but-ignored fallback; §7.5
+removed it with the rest of the flags), and the file path in the Problem section is
+`cotdata`'s, which is gone. Left as written, per the doc lifecycle: this is a point-in-time
+record of a decision, not a living manual.
+
 ## Problem
 
 `--require-final` gates the nightly Norgate price capture so it never stores an

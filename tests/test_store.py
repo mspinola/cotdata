@@ -21,12 +21,18 @@ def _sample():
 
 
 def test_prices_roundtrip_and_manifest(store_env):
-    from cotdata import get_prices, load_manifest, store
+    """The store-level price pair, which the databento producer still writes through.
+
+    The CONSUMER bar API (get_prices/roll_dates/propadj, the volume views) left with
+    ADR-0007 and is tested in marketdata now — see test_consumer_bar_api_is_gone.
+    """
+    from cotdata import load_manifest, store
     store.write_prices("ES", "backadj", _sample(), source="test")
 
-    df = get_prices("ES", "backadj")
+    df = store.read_prices("ES", "backadj")
     assert list(df.columns)[:6] == ["Open", "High", "Low", "Close", "Volume", "Open Interest"]
-    assert df.index.name == "Date" and len(df) == 5
+    assert len(df) == 5
+    assert store.read_prices("ZZ", "backadj").empty      # absent symbol -> empty
 
     m = load_manifest()
     assert m["prices"]["ES_backadj"]["n_rows"] == 5
@@ -63,106 +69,37 @@ def test_reconcile_noop_when_clean(store_env):
     assert store.reconcile_manifest() == {}      # nothing to prune
 
 
-def test_roll_dates_from_delivery_month(store_env):
-    from cotdata import roll_dates, store
-    store.write_prices("ES", "backadj", _sample(), source="test")
-    rolls = roll_dates("ES", "backadj")
-    # first bar + the delivery-month change on day 4
-    assert len(rolls) == 2
-    assert pd.Timestamp("2020-01-04") in rolls
+def test_consumer_bar_api_is_gone(store_env):
+    """ADR-0007 §7.5: this package answers positioning questions, not price ones.
+
+    Asserted rather than assumed. A re-export costs one line to add back, and a
+    consumer that finds `cotdata.get_prices` importable again will use it — landing
+    on a store the nightly job no longer fills, which reads as stale data rather
+    than as a wrong import. Bars come from `marketdata.get_bars`.
+    """
+    import importlib
+
+    import cotdata
+
+    for name in ("get_prices", "roll_dates"):
+        assert not hasattr(cotdata, name)
+        assert name not in cotdata.__all__
+    for mod in ("cotdata.prices", "cotdata.providers.norgate", "cotdata.providers.yfinance"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(mod)
 
 
-def test_missing_symbol_returns_empty(store_env):
-    from cotdata import get_prices
-    assert get_prices("ZZ", "backadj").empty
+def test_contract_specs_are_no_longer_written_here(store_env):
+    """Contract specs moved to marketdata with the bars they describe (§7.2).
 
-
-def _sample_reconstructed():
-    """Sample carrying the v2 reconstruction columns, with one 'raw' fallback row
-    (row 2) where no individual contracts were available."""
-    df = _sample()
-    df["Volume_Reconstructed"] = [15, 14, 10, 18, 20]  # row idx 2 == front-month (raw)
-    df["Volume_Source"] = ["reconstructed", "reconstructed", "raw",
-                           "reconstructed", "reconstructed"]
-    return df
-
-
-def test_default_volume_view_is_byte_identical(store_env):
-    """volume='front' (default) must not change the pre-v2 output shape."""
-    from cotdata import get_prices, store
-    store.write_prices("ES", "backadj", _sample_reconstructed(), source="test")
-
-    df = get_prices("ES", "backadj")  # default volume='front'
-    assert list(df.columns) == ["Open", "High", "Low", "Close", "Volume",
-                                "Open Interest", "Delivery Month"]
-    assert "Volume_Source" not in df.columns
-    assert "Volume_Reconstructed" not in df.columns
-    assert df["Volume"].tolist() == [10] * 5          # untouched front-month
-
-
-def test_reconstructed_volume_view(store_env):
-    """volume='reconstructed' swaps Volume in, keeps per-row raw fallback, and
-    surfaces Volume_Source for audit."""
-    from cotdata import get_prices, store
-    store.write_prices("ES", "backadj", _sample_reconstructed(), source="test")
-
-    df = get_prices("ES", "backadj", volume="reconstructed")
-    assert "Volume_Source" in df.columns
-    assert "Volume_Reconstructed" not in df.columns   # internal — not leaked
-    # reconstructed values flow into Volume; the 'raw' row keeps front-month (10)
-    assert df["Volume"].tolist() == [15, 14, 10, 18, 20]
-    assert df["Volume_Source"].tolist() == ["reconstructed", "reconstructed",
-                                            "raw", "reconstructed", "reconstructed"]
-
-
-def test_reconstructed_view_falls_back_on_pre_v2_store(store_env):
-    """A store written before reconstruction existed → reconstructed view returns
-    front-month volume labelled 'raw', never NaN."""
-    from cotdata import get_prices, store
-    store.write_prices("ES", "backadj", _sample(), source="test")  # no recon cols
-
-    df = get_prices("ES", "backadj", volume="reconstructed")
-    assert df["Volume"].tolist() == [10] * 5
-    assert (df["Volume_Source"] == "raw").all()
-
-
-def test_invalid_volume_arg_raises(store_env):
-    from cotdata import get_prices, store
-    store.write_prices("ES", "backadj", _sample(), source="test")
-    with pytest.raises(ValueError):
-        get_prices("ES", "backadj", volume="bogus")
-
-
-def _specs(symbols, tick=1.0):
-    """Minimal contract_specs frame (Symbol-keyed, RangeIndex — as norgate writes)."""
-    return pd.DataFrame({"Symbol": symbols, "Tick Size": [tick] * len(symbols)})
-
-
-def test_upsert_metadata_preserves_unlisted_symbols(store_env):
-    """A scoped upsert must keep rows for symbols not in the incoming frame — the
-    data-loss regression: writing 5 symbols must not drop the other 42."""
+    The domain stays DECLARED so pre-ADR-0007 stores still migrate and reconcile
+    their `metadata` entries instead of stranding them — but there is no writer.
+    """
     from cotdata import store
 
-    store.write_metadata(_specs(["ES", "NQ", "DC", "ZO", "KE"]), source="test")
-
-    # Scoped refresh of only DC + a brand-new symbol
-    store.upsert_metadata(_specs(["DC", "EMD"], tick=9.9), source="norgate")
-
-    df = store.read_metadata()
-    assert set(df["Symbol"]) == {"ES", "NQ", "DC", "ZO", "KE", "EMD"}  # none dropped
-    # DC replaced with the new value; untouched markets keep their original
-    assert df.set_index("Symbol").loc["DC", "Tick Size"] == 9.9
-    assert df.set_index("Symbol").loc["ES", "Tick Size"] == 1.0
-    assert df.set_index("Symbol").loc["EMD", "Tick Size"] == 9.9  # new row added
-    # manifest reflects the union, not just the 2 upserted rows
-    assert store.load_manifest()["metadata"]["contract_specs"]["n_rows"] == 6
-
-
-def test_upsert_metadata_on_empty_store_writes_all(store_env):
-    """Upsert against an empty store behaves like a plain write."""
-    from cotdata import store
-    store.upsert_metadata(_specs(["ES", "NQ"]), source="norgate")
-    assert set(store.read_metadata()["Symbol"]) == {"ES", "NQ"}
+    assert store.half_for("metadata") == "prices"     # still mapped, for old stores
+    for name in ("write_metadata", "upsert_metadata", "read_metadata"):
+        assert not hasattr(store, name)
 
 
 def test_schema_version_and_require_schema(store_env):

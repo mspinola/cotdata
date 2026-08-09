@@ -209,9 +209,10 @@ Step 3 stays out. `npf` and `livebook` are a separate pass with a live book behi
 
 ## 8. Outcome, appended 2026-08-08
 
-**Step 1 of §7 executed** (`marketdata` PR #7), and §7.2 came with it. §7.3–§7.5 are not
-started. Full record:
-[`2026-08-08-adr7-step2-provider-shipped.md`](2026-08-08-adr7-step2-provider-shipped.md).
+**§7 is complete.** Step 1 shipped as `marketdata` PR #7 and §7.2 came with it (full record:
+[`2026-08-08-adr7-step2-provider-shipped.md`](2026-08-08-adr7-step2-provider-shipped.md));
+§7.3 was voided by §8.2; §7.4 and §7.5 landed 2026-08-09. §8.5 records what §7.5 actually
+deleted and the one thing it deliberately did not.
 
 Body preserved verbatim above, per the register convention. This section carries the
 corrections; §4 and §7.3 carry pointers to it.
@@ -303,3 +304,61 @@ reporting `missing: specs,unadj_price,backadj_price`, pinned by
 `tests/test_contract_master_live.py` as the only two non-joinable, absent from both vintage
 panels per the 2026-08-04 spec inventory, and `Role: heldout` in the deployed `params.yaml`.
 The counts agree: 49 of 51 joinable, and 49 futures symbols ported.
+
+### 8.5 What §7.5 deleted, and the exception it kept
+
+Landed 2026-08-09. Gone from `cotdata`: `prices.py` (including the derived `propadj` tier),
+`providers/norgate.py`, `providers/yfinance.py`, the `get_prices` / `roll_dates` exports,
+`store.{write,upsert,read}_metadata`, the `--prices` / `--metadata` / `--prices-yahoo` /
+`--require-final` / `--final-cutoff` / `--full` CLI flags, the `norgate` and `yahoo` extras,
+and the `packaging` runtime dependency that existed only for `norgatedata`.
+
+**`providers/databento.py` stays**, and with it `store.write_prices` / `read_prices`,
+`config.prices_dir()` and the `prices` manifest half it writes through. §7.5 was scoped to
+"delete the price surface", and databento is inside that surface by shape but outside it by
+argument: ADR-0006 accepted it as a *validated provider-different alternative*, it is the
+fleet's only intraday-capable source, and ADR-0007 never scoped a marketdata equivalent. So
+`cotdata-prices` survives, scoped to `--ingest-databento` / `--build-databento`. The
+*consumer* bar API left; the store-level pair the retained producer writes through did not.
+That is the line, and it is worth stating because "cotdata is COT-only" is now true of its
+public API and not yet of its store.
+
+**Three findings the plan did not anticipate**, each a case of the deletion exposing
+something §7.1 had left:
+
+1. **`finals_ready()` had no caller.** It was ported in §7.1 but never wired to a CLI flag,
+   so `cotdata-update --prices --require-final` was the only way to reach it. Deleting that
+   would have left the Windows nightly job ungated, and the failure it prevents is silent —
+   a fetch before Norgate settles writes a provisional bar over a real one with nothing in
+   the store to say so. Fixed in `marketdata` PR #12, which landed
+   `marketdata-update --bars --domain futures --require-final` (and keeps `--final-cutoff`
+   accepted-and-ignored so a scheduler carrying cotdata's flag does not break). Worth
+   recording that #12 and a duplicate written here converged on the same design
+   independently, hours apart: the gate is not a matter of taste, and a second pass
+   reaching for it is a signal the deletion could not proceed without it.
+
+2. **Six behaviours had tests only in `cotdata`.** §7.1 ported the provider and not its
+   tests; `marketdata`'s suite covered the pure functions and left everything reachable only
+   through `update()` untested — volume reconstruction, the volume-rank pick, the
+   incremental window, `full=True`, the NDU-down abort, the all-null spec-row skip. Deleting
+   here would have been the moment those stopped being tested anywhere. Ported as
+   `marketdata` PR #13. **A file-count check would have missed this entirely**: the test
+   *files* existed on both sides, with zero name overlap and a real coverage gap
+   underneath.
+
+3. **Two harnesses read the Norgate store by path.**
+   `scripts/validate_databento_vs_norgate.py` and
+   `scripts/investigate_databento_roll_rule.py` open `prices/<SYM>_backadj.parquet`
+   directly rather than through an API, so no call-site grep finds them — the same class of
+   coupling as §8.3, one layer out. Both now read `bars/futures/norgate/` first and fall
+   back to the old layout, so the ADR-0006 parity gate still runs across the split.
+
+**Known breakage, accepted.** `crowdmon` (frozen, archived) and
+`npf/docs/crowdmon/reproduce_forced_flow_mechanism.py` still call `cotdata.get_prices`.
+Both are point-in-time records under their repos' doc lifecycle and were left untouched on
+purpose; §8.2 already voided the `crowdmon` repoint on the same grounds.
+
+**Still open for `crucible-stack`:** ADR-0007's "Status of the work" needs updating, and it
+now has a second decision to record — that databento remains in `cotdata` with no
+marketdata equivalent, which is a live exception to the ADR's own boundary rather than a
+step still to do.

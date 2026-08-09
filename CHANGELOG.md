@@ -6,6 +6,54 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed — BREAKING
+
+- **Price bars, and the Norgate and Yahoo producers, are gone from this package**
+  (crucible-stack ADR-0007 step 2 §7.5). cotdata is now CFTC positioning only. Every bar,
+  tier and contract spec lives in
+  [`crucible-marketdata`](https://pypi.org/project/crucible-marketdata/), which keeps its
+  own store (`MARKETDATA_STORE`), its own producer and its own schedule.
+
+  | gone from cotdata | use instead |
+  |---|---|
+  | `cotdata.get_prices(sym, adjustment, start=, volume=)` | `marketdata.get_bars(sym, tier, start=, volume=)` (`start`/`volume` are keyword-only there) |
+  | `cotdata.roll_dates(sym)` | no replacement — see below |
+  | `cotdata.store.read_metadata()` | `marketdata.read_metadata()` |
+  | `cotdata-update --prices` / `--metadata` / `--require-final` | `marketdata-update --bars --domain futures --require-final`, `--metadata` |
+  | `cotdata-update --prices-yahoo` | `marketdata-update --bars --domain equities` |
+  | `cotdata[norgate]`, `cotdata[yahoo]` extras | `crucible-marketdata[norgate]`, `crucible-marketdata[yahoo]` |
+  | `COTDATA_PRICE_SOURCE` | marketdata's registry resolves the vendor per symbol |
+
+  Also removed: `cotdata/prices.py` (including the derived `propadj` tier),
+  `providers/norgate.py`, `providers/yfinance.py`, `store.{write,upsert,read}_metadata`,
+  and the `packaging` runtime dependency that existed only for `norgatedata`.
+
+  **Deleted rather than deprecated.** A shim left importable would read a store the nightly
+  job no longer fills, and stale data is much harder to notice than an `AttributeError` —
+  the failure is a number that looks right and is months old.
+
+  `roll_dates` is dropped outright rather than ported: a sweep of the four consumer repos
+  found no caller. npf has a `roll_dates` of its own in `books/treasury_seasonal.py`, which
+  is a different function (a threshold on the back-adjustment offset, not a
+  `Delivery Month` change) and is unaffected. The `Delivery Month` column it read is still
+  in marketdata's frames, so the two-line derivation is available to anyone who wants it.
+
+  **What stayed, deliberately:** the **databento** provider and the store-level
+  `write_prices` / `read_prices` it writes through. It has no marketdata equivalent yet, and
+  deleting it would destroy a validated provider-different alternative (ADR-0006) plus the
+  only intraday-capable source in the fleet. `cotdata-prices` therefore still exists,
+  scoped to `--ingest-databento` / `--build-databento`. There is no consumer *bar API* here
+  any more — read that output with `cotdata.store.read_prices(symbol, adjustment)`.
+
+  The `metadata` manifest domain is still declared but has no writer, so pre-0.4.0 stores
+  can still migrate and reconcile their existing entries rather than stranding them in the
+  legacy aggregate.
+
+  **Known breakage, recorded rather than fixed:** `crowdmon` (frozen, archived) and
+  `npf/docs/crowdmon/reproduce_forced_flow_mechanism.py` still call `cotdata.get_prices`.
+  Both are point-in-time records under their repos' doc lifecycle and were left untouched
+  on purpose.
+
 ### Added
 - **The CFTC Supplemental (Commodity Index Trader) report, as a fourth `report_type`.**
   13 select agricultural markets with the index-trader book split out of the commercial and

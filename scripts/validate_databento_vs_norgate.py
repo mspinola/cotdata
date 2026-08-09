@@ -24,10 +24,15 @@ It exits non-zero if any symbol falls outside tolerance, so it can gate a promot
 It needs real data, so it is NOT run in CI — the comparison logic is unit tested in
 tests/test_validate_databento.py against synthetic frames.
 
+Since ADR-0007 the two stores belong to two packages: the Norgate side is a
+$MARKETDATA_STORE (`bars/futures/norgate/`), the databento side is a $COTDATA_STORE
+(`prices/`). `read_backadj` accepts either layout, so a Norgate store synced before
+the move still reads.
+
 Usage:
     python scripts/validate_databento_vs_norgate.py \
-        --norgate-store /path/to/norgate_store \
-        --databento-store /path/to/databento_store \
+        --norgate-store /path/to/marketdata_store \
+        --databento-store /path/to/cotdata_store \
         --symbols ES CL GC
 """
 from __future__ import annotations
@@ -48,16 +53,26 @@ _DEFAULT_REL_TOL = 0.10             # worst |Δchange| as a fraction of a typica
 _DEFAULT_MAX_OUTLIER_DAYS = 8       # days/yr allowed to exceed REL_TOL (roll-date mismatches)
 
 
+# Where a store keeps `<symbol>_backadj.parquet`, newest layout first.
+# ADR-0007 moved the Norgate side into `marketdata`, which keys a series by
+# `bars/<domain>/<source>/`; the databento side still writes cotdata's flat
+# `prices/`. Both are read here rather than one, because this harness compares two
+# stores that are now produced by two different packages — and because a Norgate
+# store synced before the move still has the old shape.
+_LAYOUTS = ("bars/futures/norgate", "prices")
+
+
 def read_backadj(store_path: str, symbol: str) -> pd.DataFrame:
-    """Read one symbol's backadj OHLC frame straight from a store's parquet, normalized
-    the way get_prices would (tz-naive daily Date index). Empty if absent."""
-    p = Path(store_path) / "prices" / f"{symbol}_backadj.parquet"
-    if not p.exists():
-        return pd.DataFrame()
-    df = pd.read_parquet(p)
-    df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
-    df.index.name = "Date"
-    return df.sort_index()
+    """Read one symbol's backadj OHLC frame straight from a store's parquet,
+    normalized to a tz-naive daily Date index. Empty if absent."""
+    for layout in _LAYOUTS:
+        p = Path(store_path) / layout / f"{symbol}_backadj.parquet"
+        if p.exists():
+            df = pd.read_parquet(p)
+            df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+            df.index.name = "Date"
+            return df.sort_index()
+    return pd.DataFrame()
 
 
 def _roll_dates(df: pd.DataFrame) -> pd.DatetimeIndex:
@@ -152,7 +167,9 @@ def format_report(m: dict, fails: list) -> str:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Validate databento backadj against Norgate.")
-    p.add_argument("--norgate-store", required=True, help="Path to the Norgate-built store.")
+    p.add_argument("--norgate-store", required=True,
+                   help="Path to the Norgate-built store — a $MARKETDATA_STORE since "
+                        "ADR-0007. The pre-move cotdata layout is still accepted.")
     p.add_argument("--databento-store", required=True, help="Path to the databento-built store.")
     p.add_argument("--symbols", nargs="+", default=_DEFAULT_SYMBOLS)
     p.add_argument("--change-corr-min", type=float, default=_DEFAULT_CHANGE_CORR_MIN)

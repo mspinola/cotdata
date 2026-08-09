@@ -24,11 +24,17 @@ COTDATA_STORE=~/code/cotdata_store_server \
 COTDATA_DATABENTO_RAW=~/code/cotdata_store/_raw/databento \
 cotdata-update --build-databento
 
-COTDATA_STORE=~/code/cotdata_store python scripts/validate_databento_vs_norgate.py \
-  --norgate-store ~/code/cotdata_store \
+python scripts/validate_databento_vs_norgate.py \
+  --norgate-store ~/code/marketdata_store \
   --databento-store ~/code/cotdata_store_server \
   --symbols <...>
 ```
+
+> **Since ADR-0007 step 2** the Norgate side of this comparison is a `$MARKETDATA_STORE`
+> (`bars/futures/norgate/`), not a cotdata store — the run above was made before the split
+> and its `--norgate-store` pointed at `~/code/cotdata_store`. Both harnesses read either
+> layout, so the numbers below reproduce against either copy. The databento side is
+> unchanged: it still writes `prices/` under `$COTDATA_STORE`.
 
 ## Result: three buckets
 
@@ -83,7 +89,7 @@ so it is a cheap one-request-per-rule pull, no statistics), reads the roll dates
 
 ```
 DATABENTO_API_KEY=... python scripts/investigate_databento_roll_rule.py \
-  --norgate-store ~/code/cotdata_store \
+  --norgate-store ~/code/marketdata_store \
   --symbols CL ZS NG HE ZC LE --tol-days 3
 ```
 
