@@ -330,16 +330,21 @@ something §7.1 had left:
    so `cotdata-update --prices --require-final` was the only way to reach it. Deleting that
    would have left the Windows nightly job ungated, and the failure it prevents is silent —
    a fetch before Norgate settles writes a provisional bar over a real one with nothing in
-   the store to say so. Fixed first, as `marketdata` PR #13, because the deletion was not
-   safe without it.
+   the store to say so. Fixed in `marketdata` PR #12, which landed
+   `marketdata-update --bars --domain futures --require-final` (and keeps `--final-cutoff`
+   accepted-and-ignored so a scheduler carrying cotdata's flag does not break). Worth
+   recording that #12 and a duplicate written here converged on the same design
+   independently, hours apart: the gate is not a matter of taste, and a second pass
+   reaching for it is a signal the deletion could not proceed without it.
 
 2. **Six behaviours had tests only in `cotdata`.** §7.1 ported the provider and not its
    tests; `marketdata`'s suite covered the pure functions and left everything reachable only
    through `update()` untested — volume reconstruction, the volume-rank pick, the
    incremental window, `full=True`, the NDU-down abort, the all-null spec-row skip. Deleting
-   here would have been the moment those stopped being tested anywhere. Ported in the same
-   PR. **A file-count check would have missed this entirely**: the test *files* existed on
-   both sides, with zero name overlap and a real coverage gap underneath.
+   here would have been the moment those stopped being tested anywhere. Ported as
+   `marketdata` PR #13. **A file-count check would have missed this entirely**: the test
+   *files* existed on both sides, with zero name overlap and a real coverage gap
+   underneath.
 
 3. **Two harnesses read the Norgate store by path.**
    `scripts/validate_databento_vs_norgate.py` and
