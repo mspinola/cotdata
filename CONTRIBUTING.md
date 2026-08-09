@@ -75,9 +75,14 @@ pytest tests/
 ```
 
 ### Important Note on Norgate Testing
-The Norgate integration (`src/cotdata/providers/norgate.py` and `tests/test_adjustment.py`) **only runs on Windows** because it requires the proprietary Norgate Data Updater application to be installed, running, and authenticated locally.
-- If you submit a PR on a Mac or Linux machine, only the generic CFTC parsing tests will run locally.
-- The CI pipeline will attempt to run cross-platform tests where possible, but cannot test live Norgate API calls. Please be extremely careful when modifying Norgate adapter logic.
+There is none here any more. ADR-0007 moved the Norgate integration to
+[`crucible-marketdata`](https://github.com/mspinola/marketdata), so Norgate changes and
+their Windows-only constraints belong in that repo's CONTRIBUTING.
+
+Everything in this repo runs cross-platform with no vendor SDK: the CFTC parsers hit
+cftc.gov, and the databento provider's tests drive a synthetic raw store rather than the
+API. If a test needs a network or a paid key to pass, it does not belong in `tests/` —
+put it in `scripts/` and say so in its docstring, as the databento parity harnesses do.
 
 ## Code Style
 

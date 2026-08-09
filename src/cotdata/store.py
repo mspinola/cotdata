@@ -28,37 +28,15 @@ def _atomic_write_parquet(df: pd.DataFrame, path: Path) -> None:
             os.remove(tmp)
 
 
-# ── Metadata ──────────────────────────────────────────────────────────────
-# Unlike prices/COT (one parquet per symbol), contract specs live in ONE table
-# keyed by Symbol. So a *scoped* refresh must upsert (see upsert_metadata) — a
-# plain write_metadata would replace the whole table and drop unlisted markets.
-def write_metadata(df: pd.DataFrame, source: str = "norgate") -> None:
-    _atomic_write_parquet(df, config.metadata_dir() / "contract_specs.parquet")
-    _touch_manifest("metadata", "contract_specs", df, source)
-
-
-def upsert_metadata(df: pd.DataFrame, source: str = "norgate") -> None:
-    """Merge `df` into the existing contract_specs table by ``Symbol``: rows for
-    symbols present in `df` are replaced/added; rows for symbols NOT in `df` are
-    kept. Use for a scoped (subset-of-symbols) refresh so it never drops the
-    contract specs of markets that weren't in the request. Use write_metadata to
-    replace the whole table (a full registry regeneration)."""
-    existing = read_metadata()
-    if not existing.empty and "Symbol" in existing.columns:
-        keep = existing[~existing["Symbol"].isin(df["Symbol"])]
-        merged = pd.concat([keep, df], ignore_index=True)
-    else:
-        merged = df
-    merged = merged.sort_values("Symbol").reset_index(drop=True)
-    write_metadata(merged, source=source)
-
-
-def read_metadata() -> pd.DataFrame:
-    p = config.metadata_dir() / "contract_specs.parquet"
-    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
-
-
 # ── Prices ────────────────────────────────────────────────────────────────
+# ADR-0007 makes this package COT-only, and the CONSUMER bar API (get_prices,
+# roll_dates, the derived propadj tier) is gone — read bars from `marketdata`.
+#
+# These two survive because the databento provider does not have a marketdata
+# equivalent yet and still writes here (ADR-0006: an independently-built
+# alternative to Norgate, and the source for the intraday news-failure work).
+# Keeping the write path without the read path would make its output unreadable
+# through the library, so the store-level pair stays; only the consumer API left.
 def write_prices(symbol: str, adjustment: str, df: pd.DataFrame, source: str) -> None:
     _atomic_write_parquet(df, config.prices_dir() / f"{symbol}_{adjustment}.parquet")
     _touch_manifest("prices", f"{symbol}_{adjustment}", df, source)
@@ -123,6 +101,12 @@ def read_cot_supplemental(name: str) -> pd.DataFrame:
 # the CFTC producer writes the `cot` half, the price producers write the `prices`
 # half, and they never touch the same manifest file. Listing every domain here (and
 # refusing unknown ones) is what stops a new domain quietly joining the wrong side.
+#
+# `metadata` (futures contract specs) is still DECLARED but nothing writes it any
+# more: ADR-0007 moved contract specs to marketdata along with the bars. It stays
+# on the map because stores written before that move carry `metadata` entries, and
+# an undeclared domain is skipped by migrate_manifests() — which would strand those
+# entries in the legacy aggregate forever. Read-only legacy; do not add writers.
 HALVES = ("cot", "prices")
 _DOMAIN_HALF = {
     "prices": "prices",
@@ -148,7 +132,10 @@ def half_for(kind: str) -> str:
 
 
 def _empty_manifest() -> dict:
-    return {"schema_version": config.SCHEMA_VERSION, "metadata": {}, "prices": {},
+    # No `metadata` key: a store created from here on never gets contract specs
+    # (they live in marketdata now). Legacy stores that have them still read fine —
+    # load_manifest() overlays whatever domains it finds on disk.
+    return {"schema_version": config.SCHEMA_VERSION, "prices": {},
             "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}, "cot_supplemental": {}}
 
 

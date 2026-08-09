@@ -2,11 +2,12 @@
 import os
 from pathlib import Path
 
-# v2 — reconstructed volume promoted: prices carry Volume_Reconstructed /
-# Volume_Source, and get_prices(volume="reconstructed") serves them. The store
-# was migrated by a full producer pass (2026-07-14) and now carries v2 shape;
-# schema_version() reflects the on-disk manifest, so a fresh/partial store can
-# still read <2.
+# v2 — reconstructed volume promoted: bars carry Volume_Reconstructed /
+# Volume_Source. The reader that serves them moved to marketdata with the bars
+# themselves (ADR-0007); this number stays because it stamps THIS store, and a
+# consumer keys cache invalidation on it. The store was migrated by a full
+# producer pass (2026-07-14) and now carries v2 shape; schema_version() reflects
+# the on-disk manifest, so a fresh/partial store can still read <2.
 SCHEMA_VERSION = 2
 
 

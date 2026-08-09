@@ -109,21 +109,27 @@ Run these from inside the clone (`C:\...\cotdata`, where you already are after S
 
 ### For Producer (Windows with Norgate)
 
-If you have a Norgate subscription and will produce prices on this machine:
+Norgate bars are produced by the **sibling package** since ADR-0007 — this repo no longer
+talks to Norgate at all. On the Windows producer install both:
+
 ```cmd
-pip install -e ".[norgate]"
-:: uv venv:  uv pip install -e ".[norgate]"
+pip install -e .                          :: cotdata (CFTC COT)
+pip install "crucible-marketdata[norgate]"  :: bars, incl. the norgatedata dependency
+:: uv venv:  uv pip install -e .  &&  uv pip install "crucible-marketdata[norgate]"
 ```
+
+They keep separate stores (`COTDATA_STORE`, `MARKETDATA_STORE`) and separate schedules; the
+rest of this guide covers both because they run on the same box.
 
 ### For Consumer (Read-Only)
 
-If you only read data (no Norgate producer), you do not need the clone at all:
+If you only read data, you do not need the clone at all:
 ```cmd
 pip install cotdata
 :: uv venv:  uv pip install cotdata
 ```
 
-From PyPI, current as of 0.3.0. If you already cloned and would rather track `main`, `pip install -e .` from inside the clone does the same job and updates on `git pull`.
+From PyPI, current as of 0.4.0. If you already cloned and would rather track `main`, `pip install -e .` from inside the clone does the same job and updates on `git pull`.
 
 Installation may take 1–2 minutes (many dependencies). Watch for any errors — if it says a package failed to download, your internet may have glitched; try again.
 
@@ -132,11 +138,14 @@ Verify installation:
 python -c "import cotdata; print(cotdata.__version__)"
 ```
 
-Should print a version number. **Note:** because the version hasn't been bumped, the editable clone install *and* the stale PyPI build both report `0.1.0` — the version string alone won't tell you which one you have. Confirm you got the right one by checking the CLI has the producer flags:
+Should print a version number. Confirm the CLI resolves too:
 ```cmd
 cotdata-update --help
 ```
-If `--metadata` and `--require-final` appear, you're on the clone. If they don't, you installed the stale PyPI build — reinstall with `-e` from inside the clone. If `import` errors instead, your venv isn't activated (look for `(.venv)`/`(cotdata)` in the prompt).
+If `--cot-all` and `--build-databento` appear, you are set. If `import` errors instead, your
+venv isn't activated (look for `(.venv)`/`(cotdata)` in the prompt). If you see `--prices` or
+`--metadata`, you are on a pre-0.4.0 build from before the ADR-0007 split — those flags are
+gone, and Norgate bars come from `marketdata-update --bars`.
 
 ## Step 4: Set Environment Variables
 
@@ -282,7 +291,7 @@ If you'd rather keep the `pip`-installed copy, add its `Scripts` directory to `P
 
 ### Dependencies Won't Install on a Newer Python
 
-**Problem:** `pip install "cotdata[norgate]"` fails while building a dependency (`norgatedata`, or a package with no matching wheel), often with a compiler error or "no matching distribution found." Or `import cotdata` works but `cotdata-update` isn't found and `where python` / `where pip` point at an `AppData\Local\Python\pythoncore-3.14-64` path.
+**Problem:** `pip install "crucible-marketdata[norgate]"` fails while building a dependency (`norgatedata`, or a package with no matching wheel), often with a compiler error or "no matching distribution found." Or `import cotdata` works but `cotdata-update` isn't found and `where python` / `where pip` point at an `AppData\Local\Python\pythoncore-3.14-64` path.
 
 **Cause:** You're on a Python newer than 3.11 (e.g. 3.13 or 3.14). The workspace pins **3.11** because that's what the dependencies publish prebuilt wheels for; on a brand-new Python, pip falls back to compiling from source (which usually fails) or installs into a global per-version location instead of your venv.
 
@@ -295,7 +304,7 @@ If you'd rather keep the `pip`-installed copy, add its `Scripts` directory to `P
    py -3.11 -m venv .venv
    ```
 3. Activate it (`.venv\Scripts\activate.bat`) and confirm `python --version` prints `3.11.x` **and** `where pip` points inside `...\cotdata\.venv\Scripts\`.
-4. Reinstall into the venv: `pip install "cotdata[norgate]"`. `cotdata-update` now lands in `.venv\Scripts\` (on PATH while activated).
+4. Reinstall into the venv: `pip install -e . && pip install "crucible-marketdata[norgate]"`. `cotdata-update` and `marketdata-update` now land in `.venv\Scripts\` (on PATH while activated).
 
 ### Virtual Environment Won't Activate
 
@@ -311,7 +320,7 @@ If you'd rather keep the `pip`-installed copy, add its `Scripts` directory to `P
 
 ### The install succeeded but a console script is missing
 
-Symptom: `pip install -e ".[norgate]"` printed success and exited 0, but
+Symptom: `pip install -e .` printed success and exited 0, but
 `.venv\Scripts\cotdata-prices.exe` (or `cotdata-cot.exe`, or `cotdata-update.exe`
 after a fresh setup) is not there.
 
@@ -334,7 +343,7 @@ If that path is not inside your `.venv\Scripts\`, the install went elsewhere.
 **Fix:** use uv's own installer, which always targets the active uv venv.
 
 ```powershell
-uv pip install -e ".[norgate]"
+uv pip install -e .
 ```
 
 Then confirm the executables exist:
@@ -353,7 +362,7 @@ disk, this is almost always why.
 **Problem:** `import cotdata` fails
 
 **Likely causes:**
-1. **Installed with plain `pip` into a `uv` venv** (most common with uv) → a uv venv has no `pip`, so `pip install` used your *global* pip and installed cotdata outside the venv. Reinstall from inside the clone with `uv pip install -e ".[norgate]"`. Confirm with `where pip` (points at global) vs `where python` (points at `...\.venv\Scripts\`).
+1. **Installed with plain `pip` into a `uv` venv** (most common with uv) → a uv venv has no `pip`, so `pip install` used your *global* pip and installed cotdata outside the venv. Reinstall from inside the clone with `uv pip install -e .`. Confirm with `where pip` (points at global) vs `where python` (points at `...\.venv\Scripts\`).
 2. Virtual environment not activated (no `(.venv)`/`(cotdata)` in prompt) → run `.venv\Scripts\activate.bat`
 3. Installation failed → try `pip install --upgrade pip`, then re-run the [Step 3](#step-3-install-cotdata) install for your role
 4. Wrong Python being used → run `python -m pip list` and check cotdata is there
@@ -373,18 +382,20 @@ disk, this is almost always why.
 
 ### Norgate Errors on Producer Machine
 
-**Problem:** `cotdata-update --prices` fails with "Norgate not found"
+**Problem:** `marketdata-update --bars --domain futures` fails with "Norgate not found"
 
 **Fix:**
-1. You installed with the `[norgate]` extra (`pip install -e ".[norgate]"`)? Check: `pip list | findstr norgatedata`
+0. You are running the right command? `cotdata-update --prices` no longer exists — Norgate
+   bars moved to `marketdata` in ADR-0007.
+1. You installed with the `[norgate]` extra (`pip install "crucible-marketdata[norgate]"`)? Check: `pip list | findstr norgatedata`
 2. Norgate Data Updater installed and running? Look for "Norgate Data Updater" in the Start menu and open it
 3. If Norgate says "authentication required," sign in with your Norgate account
 4. Test with: `python -c "from norgatedata import Norgate; print(Norgate)"`
 
 ## Next Steps
 
-- **Read data:** See the [README](../README.md#reading-data-consumer) for `get_prices()`, `get_cot()`, and adjustments
-- **Produce prices:** If you have Norgate, follow the [Producing data](../README.md#producing-data-producer) section
+- **Read data:** See the [README](../README.md#reading-data-consumer) for `get_cot()`, and `marketdata.get_bars()` for bars
+- **Produce data:** Follow the [Producing data](../README.md#producing-data-producer) section
 - **Schedule runs:** Automate daily updates with [Task Scheduler](WINDOWS_SCHEDULING.md)
 - **Develop locally:** Clone the repo, install with `pip install -e .`, and run tests with `pytest`
 
@@ -399,28 +410,30 @@ python -c "import cotdata; df = cotdata.get_cot('ES'); print(df)"
 
 No credentials needed; reads freely from the store.
 
-### Production (Norgate Prices, Windows)
+### Production (Norgate Bars, Windows)
 
 ```cmd
-set COTDATA_STORE=\\shared\cotdata_store
-set PYTHONPATH=%PYTHONPATH%;C:\code\cotdata
-cotdata-update --prices --metadata --require-final
+set MARKETDATA_STORE=\\shared\marketdata_store
+marketdata-update --bars --domain futures --require-final
+marketdata-update --metadata
 ```
 
-Norgate Data Updater must be running. Set `COTDATA_STORE` to a network share if multiple machines read from it.
+Norgate Data Updater must be running. Note this is `MARKETDATA_STORE`, a separate directory
+from `COTDATA_STORE` — pointing both at one path merges two producers' layouts into one
+folder, which is not a supported configuration. Either can be a network share if multiple
+machines read from it.
 
 ### Server (Databento Prices, Cross-Platform)
 
 ```cmd
 set COTDATA_STORE=C:\data\cotdata_store
-set COTDATA_PRICE_SOURCE=databento
 set DATABENTO_API_KEY=db-...
 cotdata-update --ingest-databento
 cotdata-update --build-databento
 cotdata-update --cot-all
 ```
 
-No Norgate needed. Databento is slower but works anywhere.
+No Norgate needed. Databento is slower but works anywhere. Read the result back with `cotdata.store.read_prices(symbol, adjustment)`; markets it does not cover (ICE softs, lumber, MSCI proxies) come from `marketdata`.
 
 ## Getting Help
 

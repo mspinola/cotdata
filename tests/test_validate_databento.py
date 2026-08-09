@@ -98,10 +98,16 @@ def test_roll_dates_from_delivery_month():
     assert m["rolls_norgate"] == 1 and m["rolls_common"] == 1
 
 
-def test_read_backadj_roundtrip(tmp_path):
-    prices = tmp_path / "prices"
-    prices.mkdir()
-    _frame(_NG_CLOSE).to_parquet(prices / "ES_backadj.parquet")
+@pytest.mark.parametrize("layout", ["prices", "bars/futures/norgate"])
+def test_read_backadj_roundtrip(tmp_path, layout):
+    """Both store layouts, because this harness now spans two packages: ADR-0007
+    moved the Norgate side into marketdata (`bars/<domain>/<source>/`) while the
+    databento side still writes cotdata's flat `prices/`. Reading only one would
+    silently report the Norgate store as absent and skip every symbol — a green
+    run that compared nothing."""
+    d = tmp_path / layout
+    d.mkdir(parents=True)
+    _frame(_NG_CLOSE).to_parquet(d / "ES_backadj.parquet")
     got = val.read_backadj(str(tmp_path), "ES")
     assert not got.empty and got.index.name == "Date" and got.index.tz is None
     assert val.read_backadj(str(tmp_path), "NOPE").empty

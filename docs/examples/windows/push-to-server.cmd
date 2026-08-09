@@ -48,7 +48,7 @@ set "DEST=REPLACE_WITH_REMOTE"
 set "SSH=%SSH_EXE% -i %KEY% -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=%KNOWN%"
 
 REM Data first, manifests last, so a manifest never announces parquet that has not
-REM landed (harmless if reversed; get_prices reads parquet directly). --delete makes
+REM landed (harmless if reversed; readers open parquet directly). --delete makes
 REM this a true mirror. The exclusions match the Mac push:
 REM   _cache, _raw   producer-internal; _raw/databento (the paid databento bronze)
 REM                  rides under _raw and so is excluded, per ADR-0006.

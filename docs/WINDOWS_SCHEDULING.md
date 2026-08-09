@@ -2,6 +2,19 @@
 
 New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDOWS_SETUP.md) — install Python, create the venv, and confirm `cotdata-update --cot-legacy` works by hand before automating it.
 
+> [!IMPORTANT]
+> **The price task now runs a different package.** ADR-0007 moved Norgate bar production to
+> [`crucible-marketdata`](https://pypi.org/project/crucible-marketdata/), so the nightly job is
+> `marketdata-update --bars --domain futures --require-final` against `$MARKETDATA_STORE`, not
+> `cotdata-prices --prices`. It is still scheduled here, on the same box, at the same time,
+> with the same restart-on-failure trick — every operational fact below about NDU, the
+> interactive session, deferred exit codes and retry is unchanged. Only the command and the
+> store variable moved.
+>
+> **Upgrading?** Edit `run-prices.cmd` to the new command and give it `MARKETDATA_STORE`. A
+> wrapper still calling `cotdata-prices --prices` now dies on an unrecognised flag, which
+> Task Scheduler shows as a failed run — loud, not silent.
+
 ## Goal
 
 **Prices daily**, and **COT caught within minutes of its Friday ~3:30pm ET release** while surviving holiday delays. Two properties make this simple:
@@ -11,18 +24,19 @@ New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDO
 
 ## Wrapper scripts
 
-Create **two** wrapper scripts — they run *different* commands. Each sets `COTDATA_STORE` and calls the venv's half-scoped entry point: `cotdata-prices` for the price half, `cotdata-cot` for the COT half. Each refuses the other half's flags, so a host is scoped to one job and a price box cannot quietly become a second COT producer. `cotdata-update` still runs both if a single machine must do everything.
+Create **two** wrapper scripts — they run *different* commands from *different* packages: `marketdata-update` for the bars, `cotdata-cot` for the COT half. cotdata's own entry points stay half-scoped (`cotdata-cot` / `cotdata-prices`) and each refuses the other half's flags, so a host is scoped to one job and a price box cannot quietly become a second COT producer.
 
 > **Ready-made templates:** copy [`docs/examples/windows/run-prices.cmd`](examples/windows/run-prices.cmd) and [`run-cot.cmd`](examples/windows/run-cot.cmd) out of the repo into your `<DIR>` (e.g. `C:\Users\you\cotdata\scheduler\`) rather than retyping them — then just fill in the placeholders. Keep them outside the repo so a `git pull` never clobbers your edited paths.
 
 > **Fill in your real paths.** Inside the `.cmd` files, overwrite the plain-text markers `REPLACE_WITH_STORE_PATH` (your synced store, e.g. `\\Mac\code\cotdata_store`) and `REPLACE_WITH_VENV_PATH` (your virtualenv, e.g. `C:\Users\you\code\cotdata\.venv`). **Don't use angle-bracket placeholders like `<STORE>` inside a `.cmd`** — cmd reads `<` and `>` as redirection and the script fails with "The syntax of the command is incorrect," even on `REM` comment lines. The `<DIR>` notation in the *task commands* further down is fine to substitute since those are quoted or typed at the prompt.
 
-`run-prices.cmd` — prices (with `--require-final`, so it runs only once Norgate's **Final** prices are in, not interim bars):
+`run-prices.cmd` — bars (with `--require-final`, so it runs only once Norgate's **Final** prices are in, not interim bars). Note `MARKETDATA_STORE`: a *different* directory from `COTDATA_STORE`, not an alias for it.
 
 ```bat
 @echo off
-set COTDATA_STORE=REPLACE_WITH_STORE_PATH
-"REPLACE_WITH_VENV_PATH\Scripts\cotdata-prices.exe" --prices --metadata --require-final
+set MARKETDATA_STORE=REPLACE_WITH_MARKETDATA_STORE_PATH
+"REPLACE_WITH_VENV_PATH\Scripts\marketdata-update.exe" --bars --domain futures --require-final
+"REPLACE_WITH_VENV_PATH\Scripts\marketdata-update.exe" --metadata
 ```
 
 `run-cot.cmd` — COT (note the **different** command, `--cot-all`):
@@ -33,7 +47,7 @@ set COTDATA_STORE=REPLACE_WITH_STORE_PATH
 "REPLACE_WITH_VENV_PATH\Scripts\cotdata-cot.exe" --cot-all
 ```
 
-Using the full venv `\Scripts\cotdata-prices.exe` / `\Scripts\cotdata-cot.exe` path (rather than relying on the command being on `PATH`) matters here: Task Scheduler runs with a different, often bare, environment than your interactive shell, so a bare command name that resolves fine in Command Prompt can fail to resolve under the scheduler.
+Using the full venv `\Scripts\marketdata-update.exe` / `\Scripts\cotdata-cot.exe` path (rather than relying on the command being on `PATH`) matters here: Task Scheduler runs with a different, often bare, environment than your interactive shell, so a bare command name that resolves fine in Command Prompt can fail to resolve under the scheduler.
 
 `run-vintage.cmd` — **optional**, the as-published (vintage) capture. Copy
 [`docs/examples/windows/run-vintage.cmd`](examples/windows/run-vintage.cmd); it runs
@@ -53,9 +67,9 @@ before enabling it:
 Create three tasks (plus an optional fourth if you enable vintage capture) — times are the **machine's local** time; convert from ET if it isn't on Eastern:
 
 ```bat
-:: 1) Prices — fire at the Continuous Futures Final (~8:55pm ET); --require-final + restart
+:: 1) Bars — fire at the Continuous Futures Final (~8:55pm ET); --require-final + restart
 ::    below keep retrying (cheap no-ops) until Norgate has actually pulled the Finals.
-schtasks /Create /TN "cotdata prices" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55
+schtasks /Create /TN "marketdata bars" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55
 
 :: 2) COT — daily morning catch-up for holiday-delayed releases and as a safety net
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
@@ -93,13 +107,13 @@ Register-ScheduledTask -TaskName "cotdata COT (Fri release)" -Action $act -Trigg
 
 (Or in the Task Scheduler GUI: New Task → Trigger *Weekly, Friday, 3:25pm* → check *"Repeat task every: 2 minutes for a duration of: 45 minutes."*)
 
-**Event-driven prices with `--require-final`.** cotdata reads two Norgate databases: **Continuous Futures** (the `&ES` / `_CCB` series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Their **Final** prices land ~8:40pm ET (Futures) and ~8:55pm ET (Continuous Futures), but your Norgate Data Updater still has to *pull* them on its next poll. Rather than guess a fixed time, `--require-final` checks `norgatedata.last_database_update_time()` for both databases and only fetches once each has been refreshed at/after `--final-cutoff` (default `20:55` local — set it to your machine's local equivalent of 8:55pm ET). Until then it **defers with a non-zero exit**, so the restart setting below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
+**Event-driven bars with `--require-final`.** The producer reads two Norgate databases: **Continuous Futures** (the `&ES` / `_CCB` series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Their **Final** prices land ~8:40pm ET (Futures) and ~8:55pm ET (Continuous Futures), but your Norgate Data Updater still has to *pull* them on its next poll. Rather than guess a fixed time, `--require-final` asks a **data** question: does Norgate hold a NEWER settled bar than the store already does, for a quorum of liquid reference symbols? That needs no wall-clock cutoff and no trading calendar, so it is immune to Norgate's publish-time drift — an early publish is caught early and a late one simply defers. (It replaced a fixed `--final-cutoff`, which broke in production on 2026-07-27 when Norgate finalized one database at 8:49pm and the check demanded 8:55pm for both. See [design/finals_ready_data_driven.md](design/finals_ready_data_driven.md).) Until it is ready the run **defers with a non-zero exit** having fetched nothing, so the restart setting below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
 
 **Retry / wait via restart-on-failure.** Give each task a *restart on failure* — it does double duty: it retries transient fetch errors, and (for the price task) waits out the gap between 8:55pm and NDU actually pulling the Finals (each retry is a cheap `last_database_update_time` check that exits immediately until ready). On a genuine no-session day the retries simply exhaust, harmlessly. `schtasks` can't set this, so use PowerShell (applies to all three tasks):
 
 ```powershell
 $s = New-ScheduledTaskSettingsSet -RestartInterval (New-TimeSpan -Minutes 10) -RestartCount 6
-foreach ($t in "cotdata prices","cotdata COT (Fri release)","cotdata COT (catch-up)") {
+foreach ($t in "marketdata bars","cotdata COT (Fri release)","cotdata COT (catch-up)") {
     Set-ScheduledTask -TaskName $t -Settings $s
 }
 ```
@@ -117,7 +131,7 @@ Test in three layers: fire the task, read the result, then confirm it actually w
 Don't wait for the trigger — run it now:
 
 ```bat
-schtasks /Run /TN "cotdata prices"
+schtasks /Run /TN "marketdata bars"
 ```
 
 (Or in `taskschd.msc`: right-click the task → **Run**.) Running the *task* rather than the `.cmd` by hand is the stronger test: it exercises the scheduler's own account, environment, and working directory, which is where scheduled runs usually differ from your interactive shell.
@@ -125,7 +139,7 @@ schtasks /Run /TN "cotdata prices"
 ### 2. Read what happened
 
 ```bat
-schtasks /Query /TN "cotdata prices" /V /FO LIST
+schtasks /Query /TN "marketdata bars" /V /FO LIST
 ```
 
 Check **Last Run Time** and **Last Result**. For per-run detail, enable history once (right-click the task or the library root → **Enable All Tasks History**) and read the task's **History** tab.
@@ -142,12 +156,12 @@ Confirm the relevant `newest data` date advanced (and `last write (UTC)` is rece
 
 ### Testing the timing and conditions
 
-- **A daytime prices run only proves the wrapper resolves** — with no Finals yet it just defers. To exercise the actual write path in daylight, run `cotdata-prices --prices --metadata` by hand (no `--require-final`), or fire the task after ~8:55pm ET.
+- **A daytime bars run only proves the wrapper resolves** — with no Finals yet it just defers. To exercise the actual write path in daylight, run `marketdata-update --bars --domain futures` by hand (no `--require-final`), or fire the task after ~8:55pm ET.
 - **Test the trigger itself** by moving it a couple of minutes out, watching it fire, then setting it back:
   ```bat
-  schtasks /Change /TN "cotdata prices" /ST 14:20
+  schtasks /Change /TN "marketdata bars" /ST 14:20
   :: watch it run, then restore
-  schtasks /Change /TN "cotdata prices" /ST 20:55
+  schtasks /Change /TN "marketdata bars" /ST 20:55
   ```
   This catches the two silent killers below — a disabled task, or the default *"only if on AC power"* condition skipping runs on a laptop.
 - **Keep a permanent record** by having the wrapper redirect output to a log file (see [Diagnosing a silent failure](#diagnosing-a-silent-failure)).
@@ -196,19 +210,19 @@ visible, separate problem rather than a silent missing write.
 
 **The single most common cotdata-on-Task-Scheduler failure.** The `norgatedata` package doesn't call a remote API — it talks locally to the **Norgate Data Updater (NDU)** app, which is a GUI program that has to be running and authenticated *in your desktop session*.
 
-If a task's General tab has **"Run whether user is logged in or not"** checked, Windows runs it in a non-interactive session (effectively no desktop), and it cannot reach an NDU instance running in your logged-in session — `cotdata-prices --prices` will fail even though NDU looks fine when you check it yourself.
+If a task's General tab has **"Run whether user is logged in or not"** checked, Windows runs it in a non-interactive session (effectively no desktop), and it cannot reach an NDU instance running in your logged-in session — `marketdata-update --bars` will fail even though NDU looks fine when you check it yourself.
 
 **Fix:** for the prices task, use **"Run only when user is logged on"** (the default) so it executes in your interactive session alongside NDU. This does mean the machine needs to be logged in (not just powered on) at run time — screen lock is fine, logged-out is not.
 
 ### Task shows success but wrote nothing
 
-`cotdata-update` exits non-zero on a hard fetch error, but a **deferred** `--require-final` run (NDU hasn't pulled the Finals yet) also exits non-zero — that's by design, not a bug, and the restart-on-failure setting is what turns those into a working poll loop. Don't "fix" this by making the wrapper swallow the exit code; that breaks retry.
+`marketdata-update` exits non-zero on a hard fetch error, but a **deferred** `--require-final` run (NDU hasn't pulled the Finals yet) also exits non-zero — that's by design, not a bug, and the restart-on-failure setting is what turns those into a working poll loop. Don't "fix" this by making the wrapper swallow the exit code; that breaks retry.
 
 To confirm a run actually wrote data, check `status.json` in the store (`newest_data.prices` advancing) rather than trusting Task Scheduler's Last Run Result alone — see [Operations](../README.md#operations) in the README.
 
-### Task Scheduler can't find `cotdata-prices` / `cotdata-cot`
+### Task Scheduler can't find `marketdata-update` / `cotdata-cot`
 
-Always call the fully-qualified `<VENV>\Scripts\cotdata-prices.exe` (or `cotdata-cot.exe`) inside the wrapper `.cmd`, never a bare command name. The scheduler's environment doesn't inherit your interactive shell's activated venv or `PATH` changes.
+Always call the fully-qualified `<VENV>\Scripts\marketdata-update.exe` (or `cotdata-cot.exe`) inside the wrapper `.cmd`, never a bare command name. The scheduler's environment doesn't inherit your interactive shell's activated venv or `PATH` changes.
 
 ### Diagnosing a silent failure
 

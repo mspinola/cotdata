@@ -173,6 +173,14 @@ def by_asset_class(asset_class: str) -> List[Symbol]:
 # registry: (1) a deployment default (COTDATA_PRICE_SOURCE), (2) per-symbol capability
 # (which vendors carry a series — the norgate/databento/yahoo mappings), and (3) an
 # optional per-symbol override. See ADR-0006.
+#
+# ADR-0007 NOTE. Only the `databento` mapping has a producer left in this package —
+# `norgate` and `yahoo` moved to `marketdata`, which resolves them against its OWN
+# registry. They stay here because this file is a CAPABILITY map that a deployment may
+# share between the two packages via COTDATA_REGISTRY, and because deleting a column
+# from a shared registry breaks the other reader. So `resolve_source` can still name a
+# vendor this package cannot produce: that is a statement about the market, not a
+# promise that `cotdata-update` will fetch it.
 
 def _can_serve(sym: Symbol, source: str) -> bool:
     """Whether `source` has a price series for `sym` (its vendor mapping is present)."""

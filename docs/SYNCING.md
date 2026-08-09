@@ -6,6 +6,15 @@ the producer and the consumers are different machines, something has to move the
 This page is about **what** to move and what to leave behind. The transport is the easy
 part and comes last.
 
+> [!NOTE]
+> **Two stores since ADR-0007.** Daily bars moved to
+> [`crucible-marketdata`](https://pypi.org/project/crucible-marketdata/) and its own
+> `$MARKETDATA_STORE`. The Windows box still produces both and still pushes both to the same
+> replicas, so the topology, exclusions, auth gotchas and preflight advice below apply
+> unchanged — there are now **two source directories to mirror instead of one**, and the
+> `prices/`, `metadata/` rows in the exclusion table describe the bar store rather than this
+> one. Where a command names `cotdata-prices --prices`, read
+> `marketdata-update --bars --domain futures --require-final`.
 ## This deployment: one Norgate producer, two replicas
 
 A single Windows server is the only producer (Norgate prices, CFTC COT). It feeds two
@@ -23,14 +32,14 @@ so nothing had to move. It is now a **standalone physical Windows server**, and 
 folder was deliberately not carried over, so a real network sync replaced it.
 
 - **Producer:** the Windows server (Norgate prices, CFTC COT), one-directional.
-- **Consumer:** the Mac, read-only, `COTDATA_PRICE_SOURCE` unset (Norgate default).
+- **Consumer:** the Mac, read-only.
 - **Transport:** `robocopy /MIR` ([`examples/windows/sync-store.cmd`](examples/windows/sync-store.cmd))
   pushing to an SMB share the Mac exports for `~/code/cotdata_store`, reached from the
   server as `\\<mac>\cotdata_store` (use the Mac's LAN IP if its name will not resolve
   from a headless server).
 - **Trigger:** chained onto the end of the producer task behind an `errorlevel` guard, so
   it fires only after a successful run rather than on a timer (a deferred
-  `--require-final` prices run exits non-zero and is skipped).
+  `--require-final` bar run exits non-zero and is skipped).
 - **Auth gotcha:** a task set to run whether the user is logged on or not has no cached
   SMB credentials in its non-interactive session, so the UNC write fails access-denied
   even though it works logged on. Store one on the server with `cmdkey /add`, or chain the
@@ -46,7 +55,7 @@ synced Norgate: the dashboard then shows exactly what local research shows, at l
 maintenance than a per-symbol roll-rule table.
 
 - **Producer:** the same Windows server (Norgate prices, CFTC COT).
-- **Consumer:** a remote Ubuntu VPS, read-only, `COTDATA_PRICE_SOURCE` unset (Norgate).
+- **Consumer:** a remote Ubuntu VPS, read-only.
 - **Transport:** an `rsync` push over SSH, chained onto the producer task, using a packaged
   rsync on Windows (cwRsync or WSL). robocopy cannot speak SSH, and SMB must never be
   exposed over the internet, so the Mac's SMB path does not carry here. See
@@ -94,18 +103,27 @@ interactive-session requirement. Give it its own task:
 
 | Task | Command | Task Scheduler "General" |
 |---|---|---|
-| prices | `cotdata-prices --prices --metadata --require-final` | Run only when user is logged on (NDU needs a desktop session) |
+| bars | `marketdata-update --bars --domain futures --require-final` | Run only when user is logged on (NDU needs a desktop session) |
 | COT | `cotdata-cot --cot-all` | Run whether user is logged in or not |
+
+The bar task writes `$MARKETDATA_STORE` and the COT task writes `$COTDATA_STORE`. Two
+producers writing two *disjoint* stores is not the two-producer hazard above — that one is
+about two producers writing the *same* files.
 
 ## What NOT to sync
 
 This is the part that matters, and on a real store it is most of the bytes.
 
+Per store, since there are now two. `bars/` and `metadata/` live in `$MARKETDATA_STORE`;
+everything else here is `$COTDATA_STORE`. `prices/` appears in the cotdata store only when
+the databento producer is in use.
+
 | Directory | Sync? | Why |
 |---|---|---|
-| `prices/` | **yes** | the data |
+| `bars/` (marketdata) | **yes** | the data |
+| `metadata/` (marketdata) | **yes** | contract specs |
 | `cot_legacy/`, `cot_disagg/`, `cot_tff/` | **yes** | the data |
-| `metadata/` | **yes** | contract specs |
+| `prices/` | **yes**, if you run databento | the ADR-0006 alternative producer's output |
 | `manifests/` | **yes** | per-half bookkeeping |
 | `status.json` | yes | the producer's own view, useful on the replica |
 | `_cache/` | **NO** | cotdata's own download cache of CFTC source zips, producer-internal, free to rebuild |
@@ -234,7 +252,7 @@ If a manifest arrives before the parquet it describes, a consumer briefly sees a
 pointing at data that has not landed. The other order is harmless: data present but not
 yet announced.
 
-In practice this is a nicety rather than a hazard, because `get_prices` and `get_cot`
+In practice this is a nicety rather than a hazard, because `get_cot`
 read parquet directly and the manifest is status only. But if your transport lets you
 control ordering, sync the data directories first and `manifests/` last.
 

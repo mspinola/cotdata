@@ -1,15 +1,20 @@
 """Stage-2 databento build (ADR-0006): additive back-adjustment from the raw store.
 
 Populates a raw store directly (as ingest would leave it), runs build(), and reads
-the result back through the real consumer API (cotdata.get_prices) to verify unadj,
-settlement override, Open Interest, and the Norgate-style additive back-adjustment.
+the result back out of the store to verify unadj, settlement override, Open Interest,
+and the Norgate-style additive back-adjustment.
+
+Reads via `store.read_prices` rather than a consumer bar API: ADR-0007 moved that API
+to `marketdata` and left only the store-level pair databento writes through. The two
+differ only in normalisation (`get_prices` sorted the index and named it 'Date'), and
+build() writes a sorted DatetimeIndex, so what is asserted here is unchanged.
 """
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-import cotdata
+from cotdata import store
 from cotdata.providers.databento import build
 
 
@@ -63,8 +68,8 @@ def test_build_back_adjusts_the_roll_gap(stores):
     res = build(["ES"])
     assert res["ok"] and res["wrote"] == 1
 
-    unadj = cotdata.get_prices("ES", adjustment="unadj")
-    backadj = cotdata.get_prices("ES", adjustment="backadj")
+    unadj = store.read_prices("ES", "unadj")
+    backadj = store.read_prices("ES", "backadj")
 
     # unadj keeps the raw front prices (roll gap intact: 102 -> 110).
     assert list(unadj["Close"]) == [100, 101, 102, 110, 111, 112]
@@ -88,8 +93,8 @@ def test_build_detects_rolls_from_instrument_id_not_symbol(stores):
                  sym="ES.n.1", instrument_id=[20, 20, 20, 30, 30, 30])
 
     build(["ES"])
-    unadj = cotdata.get_prices("ES", adjustment="unadj")
-    backadj = cotdata.get_prices("ES", adjustment="backadj")
+    unadj = store.read_prices("ES", "unadj")
+    backadj = store.read_prices("ES", "backadj")
     # The constant `symbol` alias would find no rolls; instrument_id finds the d3 roll,
     # gap = 105 - 102 = +3, applied to the pre-roll segment.
     assert list(unadj["Close"]) == [100, 101, 102, 110, 111, 112]
@@ -106,8 +111,8 @@ def test_build_uses_settlement_and_open_interest(stores):
     _write_stats(raw, "ES", ".n.1", dates, settle=[103.5, 104.5, 105.5, 113.5, 114.5, 115.5])
 
     build(["ES"])
-    unadj = cotdata.get_prices("ES", adjustment="unadj")
-    backadj = cotdata.get_prices("ES", adjustment="backadj")
+    unadj = store.read_prices("ES", "unadj")
+    backadj = store.read_prices("ES", "backadj")
 
     # Close is the settlement, not the ohlcv last trade; OI comes from stat_type 9.
     assert list(unadj["Close"]) == [100.5, 101.5, 102.5, 110.5, 111.5, 112.5]
@@ -123,8 +128,8 @@ def test_build_no_rolls_leaves_series_unadjusted(stores, capsys):
     _write_ohlcv(raw, "ES", ".n.1", dates, [110, 111, 112, 113, 114], ["B"] * 5)
 
     build(["ES"])
-    unadj = cotdata.get_prices("ES", adjustment="unadj")
-    backadj = cotdata.get_prices("ES", adjustment="backadj")
+    unadj = store.read_prices("ES", "unadj")
+    backadj = store.read_prices("ES", "backadj")
 
     assert list(backadj["Close"]) == list(unadj["Close"])   # no roll → no adjustment
     assert "no rolls detected" in capsys.readouterr().out
@@ -140,7 +145,7 @@ def test_build_applies_norgate_unit_scale(stores):
     _write_stats(raw, "SI", ".n.0", dates, oi=[7000] * 4)
 
     build(["SI"])
-    unadj = cotdata.get_prices("SI", adjustment="unadj")
+    unadj = store.read_prices("SI", "unadj")
     assert list(unadj["Close"]) == [2500.0, 2510.0, 2520.0, 2530.0]         # x100 -> cents
     assert unadj["High"].iloc[0] == (25.0 + 0.5) * 100
     assert list(unadj["Open Interest"]) == [7000] * 4                       # counts unscaled
@@ -154,7 +159,7 @@ def test_build_leaves_unscaled_symbol_in_native_units(stores):
     dates = pd.date_range("2020-01-01", periods=3, freq="D")
     _write_ohlcv(raw, "ES", ".n.0", dates, [4000.0, 4001.0, 4002.0], "A")
     build(["ES"])
-    assert list(cotdata.get_prices("ES", adjustment="unadj")["Close"]) == [4000.0, 4001.0, 4002.0]
+    assert list(store.read_prices("ES", "unadj")["Close"]) == [4000.0, 4001.0, 4002.0]
 
 
 def test_build_skips_symbol_missing_from_raw_store(stores):
@@ -213,7 +218,7 @@ def _roll_frames(dates):
 
 
 def test_windowed_n1_stats_matches_full_backadj(tmp_path, monkeypatch):
-    import cotdata
+    from cotdata import store
     from cotdata.providers.databento import ingest
     dates = pd.date_range("2020-01-01", periods=6)          # roll at 2020-01-03 (id 10→20)
 
@@ -225,7 +230,7 @@ def test_windowed_n1_stats_matches_full_backadj(tmp_path, monkeypatch):
         ingest(symbols=["ES"], client=client, end="2020-01-07", cold_start="2020-01-01",
                n1_stats_window=window)
         build(["ES"])
-        return cotdata.get_prices("ES", adjustment="backadj"), client
+        return store.read_prices("ES", "backadj"), client
 
     full_bad, full_client = run("full", None)
     win_bad, win_client = run("win", 1)

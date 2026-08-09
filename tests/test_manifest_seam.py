@@ -144,7 +144,7 @@ def test_cot_entry_point_refuses_price_actions(store_env, capsys):
     racing the first, which is exactly what the split manifests exist to contain."""
     from cotdata import update
     with pytest.raises(SystemExit):
-        update.main_cot(["--prices"])
+        update.main_cot(["--build-databento"])
     assert "belong(s) to the prices half" in capsys.readouterr().err
 
 
@@ -169,9 +169,8 @@ def test_combined_entry_point_applies_no_half_restriction():
 
     from cotdata import update
     parser = argparse.ArgumentParser()
-    both = argparse.Namespace(prices=True, cot_all=True, metadata=False,
-                              prices_yahoo=False, ingest_databento=False,
-                              build_databento=False, cot_legacy=False,
+    both = argparse.Namespace(build_databento=True, cot_all=True,
+                              ingest_databento=False, cot_legacy=False,
                               cot_disagg=False, cot_tff=False)
     # Each scoped half rejects the other's action ...
     for half in ("cot", "prices"):
@@ -183,13 +182,17 @@ def test_combined_entry_point_applies_no_half_restriction():
 
 
 def test_every_action_flag_is_assigned_to_a_half():
-    """A new action must be classified, or the entry points silently allow it."""
+    """A new action must be classified, or the entry points silently allow it.
+
+    Read off the PARSER, not a list copied beside it. The copied list was the bug:
+    it stayed green through this change while naming three flags that no longer
+    exist, so it could not have caught a fourth being added either. Now a new flag
+    fails here until it is put on one side of the seam or declared a non-action.
+    """
     from cotdata import update
+    flags = {a.dest for a in update._parser()._actions} - update._NON_ACTIONS
     assigned = set(update._HALF_ACTIONS["cot"]) | set(update._HALF_ACTIONS["prices"])
-    actions = {"prices", "metadata", "prices_yahoo", "ingest_databento",
-               "build_databento", "cot_legacy", "cot_disagg", "cot_tff",
-               "cot_supplemental", "cot_all"}
-    assert actions == assigned
+    assert flags == assigned
 
 
 # ── dropping the legacy aggregate ─────────────────────────────────────────
