@@ -1,6 +1,10 @@
 # Handoff: ADR-0007 step 2, move price production out of `cotdata`
 
-**Status:** **CLAIMED, NOT STARTED.** This is a work order and a re-measurement, no code
+**Status:** **STEP 1 SHIPPED (2026-08-08).** The `marketdata` futures provider exists.
+Steps 2–5 of §7 (contract specs are done; consumers not yet repointed; nothing deleted
+from `cotdata`) remain. See `docs/handoffs/2026-08-08-adr7-step2-provider-shipped.md`,
+which also records a store-layout finding this document did not anticipate.
+Originally: **CLAIMED, NOT STARTED** — a work order and a re-measurement, no code
 **Date:** 2026-08-04
 **Lives at:** `cotdata/docs/handoffs/2026-08-04-adr7-step2-price-producer-split.md`
 **Target:** a Claude Code session in a `cotdata` worktree, with `marketdata` beside it
@@ -95,6 +99,12 @@ fixed by `propadj`, so this consumer has already been bitten by a tier choice.
 
 ## 4. The finding this handoff exists to record
 
+> **SUPERSEDED IN ITS CONSUMER, NOT IN ITS CONCLUSION — see §8.1.** The constraint below
+> is real and the producer enforces it. But `crowdmon` was deprecated on 2026-08-07, three
+> days after this was written, and by 2026-08-08 had no consumers at all, so it can no
+> longer carry the argument. §8.1 re-anchors it on `npf`, which makes the same case from a
+> live book. **Read §8.1 before quoting this section.**
+
 Stated nowhere before today, and it is the constraint that decides which machine can produce
 a store the newest consumer can use.
 
@@ -188,7 +198,108 @@ into ADR-0007's open-questions section as resolved rather than leaving it readin
 3. Repoint `crowdmon`'s ten call sites (§3). It is the smallest consumer and the one whose
    tier requirements are strictest, so it fails loudest if the provider is wrong. **Do it
    first, not last.**
+   > **VOID — see §8.2.** `crowdmon` is deprecated and has no consumers. Do not repoint it.
+   > This step, and the de-risking it was meant to provide, are gone.
 4. Repoint `cotmetrics` / `cot-analyzer`, which are `backadj`-only and therefore easy.
 5. Delete from `cotdata`, and update `crucible-stack` ADR-0007's "Status of the work".
 
 Step 3 stays out. `npf` and `livebook` are a separate pass with a live book behind them.
+
+---
+
+## 8. Outcome, appended 2026-08-08
+
+**Step 1 of §7 executed** (`marketdata` PR #7), and §7.2 came with it. §7.3–§7.5 are not
+started. Full record:
+[`2026-08-08-adr7-step2-provider-shipped.md`](2026-08-08-adr7-step2-provider-shipped.md).
+
+Body preserved verbatim above, per the register convention. This section carries the
+corrections; §4 and §7.3 carry pointers to it.
+
+### 8.1 §4's constraint stands. Its consumer does not
+
+**The requirement is unchanged and is enforced three ways** in the shipped provider: both
+tiers are fetched before either is written, a read finding one raises and names the
+missing one, and a test covers both halves. Nothing here relaxes it.
+
+What changed is that §4 argued it entirely from `crowdmon`, and `crowdmon` is gone.
+`crowdmon/DEPRECATED.md` decides deprecation on **2026-08-07** — one day after this
+handoff's own companion document, `crowdmon/docs/design/amendments-2026-08-04.md` §D14 —
+after four pre-registered tests returned no positive result and the §10 validation came
+back uninformative with its clean episodes spent. Its §3 was resolved **2026-08-08**: both
+launchd jobs unloaded, `cot-analyzer`'s `/damage` page removed (that repo's PR #22), the
+one open work order closed unstarted, and the package left with **no consumers at all** —
+"nothing in `npf` or `livebook` ever imported it".
+
+So §4's closing warning — that a `backadj`-only producer breaks `crowdmon` with a `raise`
+inside `riskunits` on a weekly scheduled job — describes a job that no longer runs.
+
+**Re-anchor on `npf`, which makes the case from a live book.**
+`npf/books/treasury_seasonal.py` sets `RETURN_TIER = "propadj"`, amended 2026-07-26 after
+its first run came back void:
+
+> Norgate's `backadj` is ADDITIVE: roll gaps accumulate into the level, so the series is
+> not a price and can cross zero. On the verdict window ZB's back-adjusted close runs
+> −12.24 to 48.36 and is negative on 454 days, while the contract actually traded 72.66 to
+> 112.19. A percent return needs a positive denominator, and **15 of ZB's 100
+> verdict-window trades had their SIGN INVERTED.**
+
+The same file needs both stored frames independently of `propadj`: *"Roll DETECTION still
+reads backadj and unadj, because their difference IS the accumulated adjustment and is
+precisely what steps at a roll."*
+
+Fifteen sign-inverted trades in a live book is a stronger argument than the one §4 made,
+and it survives the deprecation. §4's table of which box can produce a consumable store is
+unaffected — it turns on Norgate supplying all the tiers, not on who consumes them.
+
+### 8.2 §7.3 is void, and §7's ordering with it
+
+Repointing a frozen package with zero consumers is waste. `crowdmon/DEPRECATED.md` §2
+asks for the opposite: it wants that package's live pins **neutralised**, because "a frozen
+repo should not have tests that depend on data collected after it was frozen". Repointing
+would add a dependency on data collected after the freeze.
+
+The consumer list in §3 now reads:
+
+| consumer | needs | status |
+|---|---|---|
+| `crowdmon` (§3, 6 modules / 10 call sites) | both tiers + `propadj` | **dropped** |
+| `npf` | both tiers + `propadj` (live book) | ADR-0007 **defers**, with `livebook` |
+| `cotmetrics` / `cot-analyzer` | `backadj` only | the only repoint left |
+
+**What is lost with it.** §7.3's instruction was not arbitrary: `crowdmon` was to go first
+*because* it fails loudest, so it would prove the provider before the easy consumers
+depended on it. Removing it removes that check. Nothing now exercises `propadj` until the
+deferred `npf` pass runs, so **§7's "compare against `cotdata`'s existing `ES_backadj`" on
+the Windows box is the main remaining evidence that the port preserved the numbers.** Run
+it early rather than late.
+
+**One question this handoff does not answer.** ADR-0007 defers `npf` on the grounds that it
+is a live book, decided when it was one of two `propadj` consumers. It is now the only one.
+Whether the deferral still holds is ADR-0007's call.
+
+### 8.3 A finding §3's call-site table does not capture
+
+`crowdmon`'s `ContractMaster.load()` couples to the *shape* of the manifest, not only to
+`cotdata`'s functions:
+
+```python
+for name in load_manifest().get("prices", {}):
+    sym, _, adj = str(name).rpartition("_")     # "ES_backadj" -> ("ES", "backadj")
+```
+
+`marketdata`'s entries live under `"bars"` and read `futures/norgate/ES_backadj`, so that
+parse yields `futures/norgate/ES` and matches no registry symbol — every symbol would go
+non-joinable. It fails loudly rather than silently. Recorded even though §8.2 retires the
+`crowdmon` repoint, because the coupling is a manifest *format* rather than a call, and §3's
+method — counting call sites — would not have found it in any consumer.
+
+### 8.4 The §6 question about `MME`/`MFS`, answered
+
+They are **not ported** to `marketdata` (Norgate carries no continuous series for either;
+`cotdata` prices them off the EEM and EFA ETF proxies). This costs `crowdmon` nothing even
+had it been repointed: both already fail `coverage()` for the same underlying reason,
+reporting `missing: specs,unadj_price,backadj_price`, pinned by
+`tests/test_contract_master_live.py` as the only two non-joinable, absent from both vintage
+panels per the 2026-08-04 spec inventory, and `Role: heldout` in the deployed `params.yaml`.
+The counts agree: 49 of 51 joinable, and 49 futures symbols ported.
