@@ -7,14 +7,18 @@ This page is about **what** to move and what to leave behind. The transport is t
 part and comes last.
 
 > [!NOTE]
-> **Two stores since ADR-0007.** Daily bars moved to
+> **Two stores since ADR-0007.** Every bar — Norgate, databento and Yahoo alike — moved to
 > [`crucible-marketdata`](https://pypi.org/project/crucible-marketdata/) and its own
 > `$MARKETDATA_STORE`. The Windows box still produces both and still pushes both to the same
 > replicas, so the topology, exclusions, auth gotchas and preflight advice below apply
 > unchanged — there are now **two source directories to mirror instead of one**, and the
-> `prices/`, `metadata/` rows in the exclusion table describe the bar store rather than this
-> one. Where a command names `cotdata-prices --prices`, read
+> `bars/`, `metadata/` and `_raw/` rows describe the bar store rather than this one. Where a
+> command names `cotdata-prices --prices`, read
 > `marketdata-update --bars --domain futures --require-final`.
+>
+> A cotdata store built before the move still has `prices/`, `metadata/` and `_raw/` sitting
+> in it. Nothing writes them any more; leaving them is harmless and deleting them is safe
+> once the bar store is confirmed synced.
 ## This deployment: one Norgate producer, two replicas
 
 A single Windows server is the only producer (Norgate prices, CFTC COT). It feeds two
@@ -72,12 +76,15 @@ maintenance than a per-symbol roll-rule table.
   give it an explicit writable `-o UserKnownHostsFile=`, and use cygdrive (`/cygdrive/c/…`)
   paths throughout, including the key. The example script wires all three.
 
-**Provider cutover (one-time).** The server previously held a databento-built store, so its
-`prices/` and `manifests/prices.json` carry databento data under the very keys the Norgate
-push writes. `sync_preflight.py` will (correctly) refuse: it sees the same
-`prices/<SYM>_<adj>.parquet` produced by a different source on each side, the 94-collision
-case from "Check before you mirror". That refusal is the tool working, not a
-misconfiguration. Resolve it once by clearing the server's `prices/` and `manifests/`
+**Provider cutover (one-time, and now historical).** The server previously held a
+databento-built store, so its `prices/` and `manifests/prices.json` carry databento data
+under the very keys the Norgate push writes. `sync_preflight.py` will (correctly) refuse: it
+sees the same `prices/<SYM>_<adj>.parquet` produced by a different source on each side, the
+94-collision case from "Check before you mirror". That refusal is the tool working, not a
+misconfiguration. **ADR-0007 removed the possibility**: the vendor is a directory in
+marketdata's layout (`bars/futures/norgate/` beside `bars/futures/databento/`), so two
+vendors cannot contend for one path at all. Resolve the legacy case once by clearing the
+server's `prices/` and `manifests/`
 before the first Norgate push, so the store is rebuilt as a clean Norgate replica; every
 push after that is a same-source mirror with nothing to collide.
 
@@ -114,20 +121,19 @@ about two producers writing the *same* files.
 
 This is the part that matters, and on a real store it is most of the bytes.
 
-Per store, since there are now two. `bars/` and `metadata/` live in `$MARKETDATA_STORE`;
-everything else here is `$COTDATA_STORE`. `prices/` appears in the cotdata store only when
-the databento producer is in use.
+Per store, since there are now two. `bars/`, `metadata/` and `_raw/` live in
+`$MARKETDATA_STORE`; everything else here is `$COTDATA_STORE`.
 
 | Directory | Sync? | Why |
 |---|---|---|
 | `bars/` (marketdata) | **yes** | the data |
 | `metadata/` (marketdata) | **yes** | contract specs |
 | `cot_legacy/`, `cot_disagg/`, `cot_tff/` | **yes** | the data |
-| `prices/` | **yes**, if you run databento | the ADR-0006 alternative producer's output |
+| `prices/` | **NO** (legacy) | pre-ADR-0007 leftover; bars live in the marketdata store now |
 | `manifests/` | **yes** | per-half bookkeeping |
 | `status.json` | yes | the producer's own view, useful on the replica |
 | `_cache/` | **NO** | cotdata's own download cache of CFTC source zips, producer-internal, free to rebuild |
-| `_raw/` | **NO** | databento append-only raw store, producer-internal |
+| `_raw/` | **NO** | databento's append-only PAID raw store, producer-internal (marketdata's now) |
 | anything a consumer added by hand | **NO** | no producer creates it, so a mirror deletes it (see below) |
 | `manifest.json` | **NO** | legacy aggregate, nothing writes it (see below) |
 

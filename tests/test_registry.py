@@ -6,10 +6,8 @@ import pytest
 from cotdata.registry import (
     all_symbols,
     by_asset_class,
-    default_price_source,
     hist_code_scales,
     load_registry,
-    resolve_source,
     symbol,
 )
 
@@ -23,23 +21,31 @@ def test_registry_loads_all_symbols():
 def test_basic_symbol_loading():
     es = symbol("ES")
     assert es.internal == "ES"
-    assert es.norgate == "&ES"
     assert es.asset_class == "Equities"
     assert es.is_equity is True
     assert es.cftc_code == "13874A"
     assert es.hist_codes == ()
 
 
-def test_yahoo_only_market_has_no_norgate_symbol():
-    """MSCI MME/MFS are priced off ETF proxies (EEM/EFA); Norgate carries no series
-    for them, so norgate is None (registry `norgate: null`) — that's the signal the
-    Norgate producer filters on. A defaulted '&MME' would send it fetching a
-    nonexistent &MME_CCB."""
-    for s in ("MME", "MFS"):
-        assert symbol(s).norgate is None, s
-        assert symbol(s).yahoo in ("EEM", "EFA")
-    # Norgate-covered markets still default to '&<internal>'.
-    assert symbol("ES").norgate == "&ES"
+def test_the_registry_carries_no_vendor_mappings():
+    """ADR-0007: this is a CFTC-positioning registry. The norgate / yahoo / databento
+    columns, the `price_source` override and `resolve_source` moved to marketdata's
+    registry with the producers that read them.
+
+    Asserted rather than assumed, because re-adding a column is one line and a stale
+    vendor mapping here would be read as authoritative by whoever finds it — while the
+    thing that actually resolves vendors lives in the other package and would have
+    moved on.
+    """
+    import dataclasses
+
+    from cotdata import registry as reg
+
+    fields = {f.name for f in dataclasses.fields(symbol("ES"))}
+    assert fields == {"internal", "asset_class", "is_equity", "report_type",
+                      "cftc_code", "hist_codes"}
+    for gone in ("PRICE_SOURCES", "resolve_source", "default_price_source", "_can_serve"):
+        assert not hasattr(reg, gone), gone
 
 
 def test_symbol_with_simple_hist_codes():
@@ -94,84 +100,6 @@ def test_is_equity_derived_from_asset_class():
 
 
 # ── price-source selection: capability + deployment default + override ────────
-def test_databento_mapping_defaults_to_internal_root():
-    # Norgate-covered CME/CBOT/NYMEX/COMEX markets default databento to the root.
-    assert symbol("ES").databento == "ES"
-    assert symbol("CL").databento == "CL"
-    assert symbol("GC").databento == "GC"
-
-
-def test_databento_null_for_non_glbx_markets():
-    # ICE softs + lumber (not on GLBX Globex) and MSCI intl are databento: null.
-    for s in ("SB", "CT", "CC", "KC", "OJ", "LBR", "MME", "MFS"):
-        assert symbol(s).databento is None, s
-
-
-def test_resolve_source_uses_deployment_default_when_capable():
-    assert resolve_source(symbol("ES"), "norgate") == "norgate"
-    assert resolve_source(symbol("ES"), "databento") == "databento"
-    assert resolve_source(symbol("CL"), "databento") == "databento"
-
-
-def test_resolve_source_falls_back_to_yfinance_when_default_cannot_serve():
-    # MME/MFS have neither a norgate nor a databento series, but do have a yahoo
-    # ETF proxy — so either deployment default resolves to yfinance.
-    assert resolve_source(symbol("MME"), "norgate") == "yfinance"
-    assert resolve_source(symbol("MME"), "databento") == "yfinance"
-
-
-def test_softs_have_yahoo_fallback_and_resolve_to_yfinance_on_databento():
-    # ICE softs aren't on GLBX but carry a Yahoo continuous fallback, so a databento
-    # deployment resolves them to yfinance; Norgate still covers them locally.
-    for s in ("SB", "CT", "CC", "KC", "OJ", "LBR"):
-        assert symbol(s).yahoo, s
-        assert resolve_source(symbol(s), "databento") == "yfinance", s
-        assert resolve_source(symbol(s), "norgate") == "norgate", s
-
-
-def test_resolve_source_none_when_no_vendor_can_serve(tmp_path):
-    # A synthetic market with no vendor mapping at all → nothing can price it.
-    reg = load_registry(_write(tmp_path, textwrap.dedent("""
-        Metals:
-          XX:
-            cftc_code: "000000"
-            norgate: null
-            databento: null
-    """)))
-    assert resolve_source(reg["XX"], "databento") is None
-    assert resolve_source(reg["XX"], "norgate") is None
-
-
-def test_price_source_override_wins(tmp_path):
-    reg = load_registry(_write(tmp_path, textwrap.dedent("""
-        Metals:
-          GC:
-            cftc_code: "088691"
-            price_source: yfinance
-            yahoo: "GLD"
-    """)))
-    assert reg["GC"].price_source == "yfinance"
-    # Override beats the deployment default even though Norgate could serve GC.
-    assert resolve_source(reg["GC"], "norgate") == "yfinance"
-
-
-def test_invalid_price_source_override_raises(tmp_path):
-    with pytest.raises(ValueError, match="price_source"):
-        load_registry(_write(
-            tmp_path, 'Metals:\n  GC:\n    cftc_code: "1"\n    price_source: bloomberg\n'))
-
-
-def test_default_price_source_env(monkeypatch):
-    monkeypatch.delenv("COTDATA_PRICE_SOURCE", raising=False)
-    assert default_price_source() == "norgate"
-    monkeypatch.setenv("COTDATA_PRICE_SOURCE", "databento")
-    assert default_price_source() == "databento"
-    monkeypatch.setenv("COTDATA_PRICE_SOURCE", "nope")
-    with pytest.raises(ValueError, match="COTDATA_PRICE_SOURCE"):
-        default_price_source()
-
-
-# ── $COTDATA_REGISTRY / explicit-path override (the point of the refactor) ────
 _MINI_YAML = textwrap.dedent("""
     Metals:
       GC:
@@ -230,7 +158,7 @@ def test_duplicate_symbol_raises(tmp_path):
 
 def test_missing_cftc_code_raises(tmp_path):
     with pytest.raises(ValueError, match="missing cftc_code"):
-        load_registry(_write(tmp_path, "Metals:\n  GC:\n    norgate: \"&GC\"\n"))
+        load_registry(_write(tmp_path, "Metals:\n  GC:\n    is_equity: false\n"))
 
 
 def test_scalar_attrs_raises(tmp_path):

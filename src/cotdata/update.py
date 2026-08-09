@@ -1,74 +1,20 @@
 """Producer CLI:  cotdata-update --cot-all
-                  cotdata-update --build-databento --symbols ES NQ
                   cotdata-update --check        # read-only store status
                   cotdata-update --reconcile    # prune stale manifest ghosts
 Writes to $COTDATA_STORE. Schedule COT weekly (Friday, after the CFTC release).
 
-ADR-0007 moved bar production out of this package: the Norgate and Yahoo price
-producers, and the consumer bar API, now live in `marketdata` — run
-`marketdata-update --bars` on the nightly job. What remains on the price side is
-databento, which has no marketdata equivalent yet (ADR-0006: an independently
-built alternative to Norgate, and the source for the intraday work)."""
+ADR-0007 is complete: every price producer left this package. Norgate, Yahoo and
+databento all live in `marketdata` now, against `$MARKETDATA_STORE` — run
+`marketdata-update --bars` (or `--ingest-databento` / `--build-databento`) there.
+This CLI fetches CFTC positioning and nothing else."""
 import argparse
 import datetime as _dt
 
 from . import config
 
-# Which producer half each action belongs to. `cotdata-cot` and `cotdata-prices` refuse
-# the other half's actions, so a host can be given exactly one job. That matters most on
-# a second producer machine: a Windows price box that could also run --cot-all would
-# become a second COT producer racing the first, which is the failure the split manifests
-# exist to contain. Read-only actions (--check, --reconcile) belong to both.
-_HALF_ACTIONS = {
-    "cot": ("cot_legacy", "cot_disagg", "cot_tff", "cot_supplemental", "cot_all"),
-    "prices": ("ingest_databento", "build_databento"),
-}
-
-
-def _reject_other_half(parser, args, half: str) -> None:
-    other = "prices" if half == "cot" else "cot"
-    used = [a for a in _HALF_ACTIONS[other] if getattr(args, a, False)]
-    if used:
-        flags = ", ".join("--" + a.replace("_", "-") for a in used)
-        parser.error(
-            f"{flags} belong(s) to the {other} half. This entry point runs the {half} "
-            f"half only, so one host does one job. Use cotdata-{other} for those, or "
-            f"cotdata-update to run both from one machine.")
-
-
-# Parser dests that are NOT producer actions: read-only or one-shot maintenance, and
-# modifiers on another flag. Everything else must be classified into a half above —
-# test_every_action_flag_is_assigned_to_a_half reads both lists to enforce it, so a new
-# action flag fails the suite until someone decides which side of the seam it is on.
-_NON_ACTIONS = frozenset({
-    "help", "symbols", "check", "migrate_manifests", "reconcile",
-    "reconcile_databento", "windowed_n1_stats", "batch",
-})
-
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="cotdata producer — fetch sources into the store.")
-    p.add_argument("--ingest-databento", action="store_true",
-                   help="Databento Stage 1 (paid API, cross-platform): fetch raw .n.0/.n.1 "
-                        "ohlcv-1d + statistics into the append-only raw store ($COTDATA_DATABENTO_RAW). "
-                        "The statistics schema is paged in yearly windows so a from-inception "
-                        "pull can't time out in one request. Resumable — re-runs (and a mid-pull "
-                        "failure) only pull the missing dates. Needs DATABENTO_API_KEY.")
-    p.add_argument("--build-databento", action="store_true",
-                   help="Databento Stage 2 (free, no API): build back-adjusted prices from the "
-                        "raw store into the cotdata store. Run after --ingest-databento.")
-    p.add_argument("--windowed-n1-stats", nargs="?", type=int, const=3, default=None, metavar="DAYS",
-                   help="With --ingest-databento: fetch the n.1 statistics schema only in "
-                        "±DAYS windows around roll dates (default 3) instead of full history. "
-                        "n.1 settlement is only needed at rolls, so this cuts the biggest "
-                        "avoidable download with no accuracy loss. Recommended for the backfill.")
-    p.add_argument("--batch", action="store_true",
-                   help="With --ingest-databento: use the databento BATCH API (prepare + "
-                        "download files) instead of the (default) paged streaming ingest. "
-                        "NOTE: submitting a single from-inception continuous job can 504 at "
-                        "databento's gateway (heavy server-side cost/resolution over 16y), so "
-                        "the paged streaming default is preferred for cold-start backfills; "
-                        "reach for --batch only for a bounded catch-up.")
     p.add_argument("--cot-legacy", action="store_true", help="Update CFTC COT Legacy (cross-platform).")
     p.add_argument("--cot-disagg", action="store_true", help="Update CFTC COT Disaggregated Futures-Only (cross-platform).")
     p.add_argument("--cot-tff", action="store_true", help="Update Traders in Financial Futures (TFF) COT (cross-platform).")
@@ -89,21 +35,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--reconcile", action="store_true",
                    help="Prune manifest entries whose parquet file is missing (ghosts "
                         "from old naming), refresh status.json, and exit. Never touches data.")
-    p.add_argument("--reconcile-databento", action="store_true",
-                   help="Make the databento ingest manifest match the parquet files on disk, "
-                        "in BOTH directions: record tables an interrupted run left "
-                        "unrecorded (so a restart does not re-download them), and prune "
-                        "entries whose file is missing (so a restart does not skip them as "
-                        "'already current' and leave a silent hole). Local files only, no "
-                        "API. Exit.")
     return p
 
 
-def main(argv=None, half=None) -> None:
+def main(argv=None) -> None:
     p = _parser()
     args = p.parse_args(argv)
-    if half:
-        _reject_other_half(p, args, half)
 
     config.store_root()  # fail fast if COTDATA_STORE unset
 
@@ -143,52 +80,15 @@ def main(argv=None, half=None) -> None:
                                                "at": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"})
         return
 
-    if args.reconcile_databento:
-        from .providers import databento
-        res = databento.reconcile_manifest()
-        recorded, pruned = res["recorded"], res["pruned"]
-        if not recorded and not pruned:
-            print("databento reconcile: manifest already matches the raw store.")
-        if recorded:
-            syms = sorted({k.split(".n.")[0] for k in recorded})
-            print(f"databento reconcile: recorded {len(recorded)} raw table(s) across "
-                  f"{len(syms)} symbol(s) into the ingest manifest.")
-            print("  symbols: " + ", ".join(syms))
-        if pruned:
-            syms = sorted({k.split(".n.")[0] for k in pruned})
-            print(f"databento reconcile: PRUNED {len(pruned)} manifest entr"
-                  f"{'y' if len(pruned) == 1 else 'ies'} with no parquet on disk, across "
-                  f"{len(syms)} symbol(s). The next --ingest-databento will re-fetch these; "
-                  f"without the prune it would have skipped them as 'already current'.")
-            print("  symbols: " + ", ".join(syms))
-        return
-
-    if not (args.ingest_databento or args.build_databento or args.cot_legacy
-            or args.cot_disagg or args.cot_tff or args.cot_supplemental or args.cot_all):
-        p.error("nothing to do — pass --check, --ingest-databento, --build-databento, "
-                "--cot-legacy, --cot-disagg, --cot-tff, --cot-supplemental, or "
-                "--cot-all. Norgate/Yahoo bars moved to marketdata (ADR-0007): use "
-                "'marketdata-update --bars'.")
+    if not (args.cot_legacy or args.cot_disagg or args.cot_tff
+            or args.cot_supplemental or args.cot_all):
+        p.error("nothing to do — pass --check, --cot-legacy, --cot-disagg, --cot-tff, "
+                "--cot-supplemental or --cot-all. Every price producer moved to "
+                "marketdata (ADR-0007): use 'marketdata-update --bars', or "
+                "'--ingest-databento'/'--build-databento' there.")
 
     kinds = []
     failed_kinds = []  # domains that hard-failed → non-zero exit so a scheduler retries
-    if args.ingest_databento:
-        from .providers import databento
-        if args.batch:
-            r = databento.ingest_batch(symbols=args.symbols)
-        else:
-            r = databento.ingest(symbols=args.symbols, n1_stats_window=args.windowed_n1_stats)
-        kinds.append("ingest_databento")
-        if not (r or {}).get("ok", True):
-            failed_kinds.append("ingest_databento")
-
-    if args.build_databento:
-        from .providers import databento
-        r = databento.build(symbols=args.symbols)
-        kinds.append("build_databento")
-        if not (r or {}).get("ok", True):
-            failed_kinds.append("build_databento")
-
     if args.cot_legacy or args.cot_all:
         from .providers import cftc
         r = cftc.update()
@@ -228,10 +128,9 @@ def main(argv=None, half=None) -> None:
     # Structured heartbeat for downstream tools: rebuild status.json from the now-
     # updated manifest. Pollers detect new data via newest_data[<domain>].
     from . import status
-    # `deferred` is gone with the Norgate finals gate: no source left here has a
-    # "not published yet" state — the CFTC zips and the databento raw store are
-    # either reachable or they are not. The gate itself moved to
-    # `marketdata-update --bars --require-final`.
+    # No `deferred` state: the CFTC zips are either reachable or they are not.
+    # "Not published yet" belongs to the bar producers, and the gate that expresses
+    # it moved with them (`marketdata-update --bars --require-final`).
     run = {"kinds": kinds, "failed": failed_kinds,
            "at": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"}
     path = status.write_status_file(last_run=run)
@@ -247,11 +146,11 @@ if __name__ == "__main__":
 
 
 def main_cot(argv=None) -> None:
-    """`cotdata-cot`: the CFTC half. Free, cross-platform, no Norgate."""
-    main(argv, half="cot")
+    """`cotdata-cot`: an alias for `cotdata-update`, kept because the scheduled jobs
+    call it by name (see docs/examples/*/run-cot.*).
 
-
-def main_prices(argv=None) -> None:
-    """`cotdata-prices`: the price half, now databento only (ADR-0007 moved Norgate
-    and Yahoo to `marketdata`). Cross-platform; needs DATABENTO_API_KEY to ingest."""
-    main(argv, half="prices")
+    It used to be half of a pair. `cotdata-prices` was the other, and each refused the
+    other's flags so a price box could not quietly become a second COT producer racing
+    the first. With every price producer moved to marketdata there is no other half to
+    refuse, so the machinery is gone and only the name survives."""
+    main(argv)

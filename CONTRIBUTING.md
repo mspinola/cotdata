@@ -79,10 +79,9 @@ There is none here any more. ADR-0007 moved the Norgate integration to
 [`crucible-marketdata`](https://github.com/mspinola/marketdata), so Norgate changes and
 their Windows-only constraints belong in that repo's CONTRIBUTING.
 
-Everything in this repo runs cross-platform with no vendor SDK: the CFTC parsers hit
-cftc.gov, and the databento provider's tests drive a synthetic raw store rather than the
-API. If a test needs a network or a paid key to pass, it does not belong in `tests/` —
-put it in `scripts/` and say so in its docstring, as the databento parity harnesses do.
+Everything in this repo runs cross-platform with no vendor SDK and no optional extra:
+the only source is cftc.gov over plain HTTP. If a test needs a network or a paid key to
+pass, it does not belong in `tests/`.
 
 ## Code Style
 

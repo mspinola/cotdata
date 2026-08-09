@@ -10,7 +10,8 @@ the right moment against the live feed.
 `marketdata-update --bars --domain futures --require-final`), because ADR-0007 step 2 moved
 bar production out of `cotdata` — §7.1 ported the code and §7.5 deleted the copy here. The
 design is unchanged and the reasoning below still holds; only the package and the CLI moved.
-Two details this document states are now out of date on their face: `--final-cutoff` no
+Three details this document states are now out of date on their face: `cotdata-prices`
+no longer exists (the entry point went with the last price producer), `--final-cutoff` no
 longer exists in either package (§107 kept it as an accepted-but-ignored fallback; §7.5
 removed it with the rest of the flags), and the file path in the Problem section is
 `cotdata`'s, which is gone. Left as written, per the doc lifecycle: this is a point-in-time

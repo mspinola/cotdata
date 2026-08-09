@@ -362,3 +362,40 @@ purpose; §8.2 already voided the `crowdmon` repoint on the same grounds.
 now has a second decision to record — that databento remains in `cotdata` with no
 marketdata equivalent, which is a live exception to the ADR's own boundary rather than a
 step still to do.
+
+### 8.6 §7.5 finished: databento ported, 2026-08-09
+
+§8.5 recorded databento as the one thing §7.5 left, and framed it as "outstanding work,
+not a settled boundary". It is done. `crucible-stack` ADR-0007 is fully implemented and
+`cotdata` is CFTC positioning with no price surface of any kind.
+
+**What moved:** the live two-stage producer (paid resumable ingest, the batch variant,
+the both-directions reconcile of the resume ledger, the free offline build), both parity
+harnesses and their tests.
+
+**What did not:** the dormant per-symbol EOD path (`fetch_daily_ohlc`,
+`run_batch_backfill`, `update_all_daily_prices`). Its docstring kept it for "the intraday
+news-failure work" and the code does not support that claim — it fetches `ohlcv-1d`, so
+it is a DAILY path duplicating the two-stage producer, with a parallel cache and a
+yfinance fallback. A fleet sweep found no caller; npf's same-named function is its own
+shim over `get_bars`. Left in git history.
+
+**One rule had to change rather than move.** cotdata defaults a symbol's `databento` root
+to its internal symbol unconditionally, which is safe with ONE domain. marketdata has
+two, and that default would hand every equity a GLBX root and let `resolve_source` route
+SPY to a vendor that cannot serve it. So the default is futures-only there. This is the
+third time this port has turned up a rule that was correct in a single-domain package and
+wrong in a two-domain one; the first two were the store's tier axis (one frame per symbol
+cannot hold `backadj` and `unadj`) and the manifest's vendor key.
+
+**A claim in §7.5 was wrong and is corrected in the code.** A comment left in
+`registry.py` justified keeping the vendor columns on the grounds that a deployment might
+SHARE one registry file between the two packages via `$COTDATA_REGISTRY`. It cannot:
+cotdata's loader hard-requires `cftc_code` and marketdata's equities have none. The
+columns are gone.
+
+**What this removes from the fleet's surface:** cotdata now has no optional data
+dependency, no vendor SDK, no API key, and no producer-half machinery — `cotdata-prices`
+is gone and `cotdata-cot` is a bare alias kept because the scheduled jobs call it by
+name. `prices`, `metadata` and `_raw/` survive in real stores as history that
+`--migrate-manifests` and `--reconcile` still handle, and nothing writes.

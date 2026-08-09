@@ -16,25 +16,24 @@ cotdata separates *fetching* data (a "producer" that talks to vendors) from *usi
 - **New-data signal.** Every run writes a structured `status.json` so downstream tools can poll one file to detect fresh data.
 
 > [!IMPORTANT]
-> **Price bars moved out of this package.** Under [ADR-0007](#ecosystem), cotdata is CFTC
-> positioning only, and every daily bar — Norgate futures, Yahoo equities/ETFs, the
-> `backadj`/`unadj`/`propadj` tiers, contract specifications — now lives in
+> **Price bars are not in this package.** Under [ADR-0007](#ecosystem), cotdata is CFTC
+> positioning only, and every daily bar — Norgate futures, databento futures, Yahoo
+> equities/ETFs, the `backadj`/`unadj`/`propadj` tiers, contract specifications — lives in
 > [**crucible-marketdata**](https://pypi.org/project/crucible-marketdata/). Replace
 > `cotdata.get_prices(sym, adjustment)` with `marketdata.get_bars(sym, tier)` and point
 > `MARKETDATA_STORE` at that store. The two packages keep separate stores and separate
 > producers; nothing about `get_cot()` changed.
->
-> The one price producer still here is **databento**, which has no marketdata equivalent
-> yet (see [Cross-platform prices without Norgate](#cross-platform-prices-without-norgate-databento)).
 
 ## Data sources at a glance
 
 | Data | Source | Cost | Runs on |
 |------|--------|------|---------|
 | CFTC COT — legacy / disaggregated / TFF / supplemental | [cftc.gov](https://www.cftc.gov/) | **Free** | any OS |
-| Futures prices, back-adjusted | [Databento](https://databento.com/) GLBX.MDP3 | Paid per query | any OS |
 | *Reading the store* | — | Free | any OS |
 | Daily bars + contract specs | → [crucible-marketdata](https://pypi.org/project/crucible-marketdata/) | — | — |
+
+No paid dependency, and no optional data extra: this package downloads public CFTC
+files over HTTP and reads its own store.
 
 ## Contents
 
@@ -69,14 +68,13 @@ The **store is the API boundary** — not Python imports. Producers write Parque
 
 ```
         PRODUCER  —  runs where each source is reachable
-           CFTC COT download (any OS)    databento ingest/build (any OS, paid)
-                       │                              │
-                       └──────────────┬───────────────┘
+           CFTC COT download — free, any OS, no vendor SDK
+                                      │
                                       ▼   write parquet + manifest
         ┌────────────────────────────────────────────────────────────┐
         │ CANONICAL STORE   ($COTDATA_STORE)                         │
         │   cot_legacy/   cot_disagg/   cot_tff/                     │
-        │   cot_supplemental/   prices/  (databento only)            │
+        │   cot_supplemental/                                        │
         │   manifests/   status.json                                 │
         └────────────────────────────────────────────────────────────┘
                                       │   read  (offline, any OS)
@@ -96,7 +94,6 @@ The store layout:
 - `cot_disagg/{symbol}_{code}.parquet` — weekly CFTC Disaggregated positioning.
 - `cot_tff/{symbol}_{code}.parquet` — weekly CFTC Traders in Financial Futures positioning.
 - `cot_supplemental/{symbol}_{code}.parquet` — weekly CFTC Supplemental (Commodity Index Trader) positioning, 13 agricultural markets. **Futures-and-options combined**, unlike the three above.
-- `prices/{symbol}_{adjustment}.parquet` — **databento-built bars only**, `adjustment` ∈ {`backadj`, `unadj`}. This is the ADR-0006 alternative producer's output, not a general bar store: read Norgate/Yahoo bars from `marketdata` instead.
 - `manifests/{cot,prices}.json` — per-table `last_date`, `n_rows`, `source`, `updated_at`, `schema_version`, one file per producer half.
 - `status.json` — machine-readable new-data signal for downstream tools (see [Operations](#operations)).
 - `vintage/` — optional as-published (vintage) capture: retained raw CFTC downloads plus
@@ -149,7 +146,7 @@ longer fills, and stale data is harder to notice than an `AttributeError`.
 
 ## Producing data (producer)
 
-Run on the machine that can reach the source. CFTC COT runs anywhere; the optional Databento price build also runs anywhere (see [Cross-platform prices without Norgate](#cross-platform-prices-without-norgate-databento)). Norgate and Yahoo bars are produced by `marketdata-update --bars`, in the [sibling package](https://pypi.org/project/crucible-marketdata/).
+Runs anywhere — the CFTC files are a public HTTP download. Bars of every vendor are produced by `marketdata-update` in the [sibling package](https://pypi.org/project/crucible-marketdata/).
 
 ```bash
 COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (any OS)
@@ -162,57 +159,17 @@ COTDATA_STORE=/store  cotdata-vintage fetch                      # optional: cap
 
 Each run prints a per-domain line and a summary footer. A run **exits non-zero** if a fetch hard-fails (CFTC or Databento unreachable), so a scheduler can retry — see [Scheduling on Linux](docs/LINUX_SCHEDULING.md).
 
-### Cross-platform prices without Norgate (databento)
+### One producer, and the manifest split it left behind
 
-A server that cannot run Norgate (for example the public dashboard host) can build a price store from Databento instead. One provider owns each symbol end to end, so this is a full replacement, not a blend. Install the extra and set the environment:
+`cotdata` used to have two producers — the CFTC downloader and a price producer — and two
+entry points that scoped a host to one of them, so a price box could not quietly become a
+second COT producer racing the first. Every price producer moved to `marketdata`, so there
+is one producer here now and nothing to scope. `cotdata-cot` survives as an alias of
+`cotdata-update` because the scheduled jobs call it by name; `cotdata-prices` is gone.
 
-```bash
-pip install "cotdata[databento]"
-
-export COTDATA_STORE=/path/to/store         # the store the dashboard reads
-export DATABENTO_API_KEY=db-...             # for the paid ingest step only
-# optional: export COTDATA_DATABENTO_RAW=/path/to/raw   # defaults to $COTDATA_STORE/_raw/databento
-```
-
-Then build the store in order (ingest before build):
-
-```bash
-cotdata-update --ingest-databento     # Stage 1 (PAID): raw .n.0/.n.1 ohlcv-1d + statistics -> raw store
-cotdata-update --build-databento      # Stage 2 (FREE): additive back-adjustment -> $COTDATA_STORE/prices
-cotdata-update --cot-all              # CFTC COT, the dashboard needs it too
-cotdata-update --check                # coverage, newest dates, staleness
-```
-
-- **Two stages, one paid.** Stage 1 is the only step that hits the API. It writes an append-only raw store and resumes from the last fetched date, so re-runs pull only new days. Stage 2 reads that raw store with no API cost, so the back-adjustment can be iterated offline. The raw store is producer-internal, so keep it out of any sync to consumers.
-- **History starts 2010-06-06** (the GLBX floor), shallower than Norgate. Markets not on CME Globex (ICE softs, lumber, MSCI intl) are not covered — take those from `marketdata`, which prices them off Yahoo.
-- **First-run check.** A healthy symbol prints `built unadj+backadj (N bars, K rolls)`. If it prints `no rolls detected`, back-adjustment is a no-op for that symbol, so investigate before trusting it.
-- **Read it back** with `cotdata.store.read_prices(symbol, adjustment)`. There is no consumer bar API here — this store is the alternative producer's output, and the general one is `marketdata.get_bars`.
-- **Validate against Norgate** (optional gate) with `scripts/validate_databento_vs_norgate.py`, pointing `--norgate-store` at a `$MARKETDATA_STORE`.
-- **Schedule** the two price commands nightly and `--cot-all` weekly — see [Scheduling on Linux](docs/LINUX_SCHEDULING.md).
-
-> [!NOTE]
-> Databento staying here is a deliberate exception to ADR-0007, not an oversight. It has
-> no marketdata equivalent yet, and deleting it would destroy a validated alternative
-> producer (ADR-0006) plus the only intraday-capable source in the fleet. When it is
-> ported, `prices/`, `store.write_prices`/`read_prices` and the `prices` manifest half
-> go with it and this package becomes COT-only in full.
-
-### Producer halves: one host, one job
-
-`cotdata` has two producers by design: the CFTC downloader and the databento price
-builder. Two entry points scope a host to one of them:
-
-```bash
-cotdata-cot     --cot-all                              # CFTC half
-cotdata-prices  --ingest-databento --build-databento   # price half
-cotdata-update  ...                                    # both, for a single-machine deployment
-```
-
-Each scoped entry point refuses the other half's flags, so a price box cannot quietly
-become a second COT producer racing the first. `--check` and `--reconcile` are read-only
-and work from either.
-
-Each half also owns its own manifest (`manifests/cot.json`, `manifests/prices.json`).
+The manifest is still split per half (`manifests/cot.json`, `manifests/prices.json`), and
+the `prices` half is now **read-only history**: a store built before the move still carries
+those entries, and they have to keep migrating and reconciling rather than being stranded.
 The legacy top-level `manifest.json` held both halves in ONE file, which was unsafe two
 ways: the update is a read-modify-write, so two producers lose each other's entries, and
 a file-level sync between two stores resolves it last-writer-wins and silently discards
@@ -238,9 +195,9 @@ The Windows box is also where the **Norgate bar** job runs, but that is now `mar
 
 ### Scheduling on Linux (cron)
 
-Full setup, including wrapper scripts, the crontab entries (nightly databento prices, daily COT catch-up, Friday release-window poller), `flock` overlap protection, and troubleshooting (cron's bare environment, timezone conversion, `DATABENTO_API_KEY` not being picked up), is in **[docs/LINUX_SCHEDULING.md](docs/LINUX_SCHEDULING.md)**.
+Full setup, including the wrapper script, the crontab entries (daily COT catch-up plus a Friday release-window poller), `flock` overlap protection, and troubleshooting (cron's bare environment, timezone conversion), is in **[docs/LINUX_SCHEDULING.md](docs/LINUX_SCHEDULING.md)**.
 
-The short version: a databento server schedules prices nightly, and COT gets a daily morning catch-up plus a tight Friday-afternoon poll around its ~3:30pm ET release, all idempotent and safe to over-run.
+The short version: COT gets a daily morning catch-up plus a tight Friday-afternoon poll around its ~3:30pm ET release, all idempotent and safe to over-run.
 
 ### Syncing the store between machines
 
@@ -249,9 +206,11 @@ produced elsewhere. Prefer one producer writing everything and a strictly
 one-directional sync. (The bar store syncs the same way, separately — it is a different
 directory with a different producer.)
 
-Two directories must be **excluded** for size: `_cache/` (cotdata's cache of downloaded
-CFTC source zips) and `_raw/` (the **paid** databento raw store) are producer-internal
-and together are ~70% of the bytes. The legacy `manifest.json` should be excluded too.
+One directory must be **excluded** for size: `_cache/`, cotdata's cache of downloaded
+CFTC source zips, is producer-internal and free to rebuild. The legacy `manifest.json`
+should be excluded too. (A store built before ADR-0007 also has `_raw/` — databento's
+paid bronze store — and `prices/`; both belong to `marketdata` now and neither is
+written here any more.)
 
 Anything a consumer put in the store by hand is a **correctness** issue rather than a
 saving. No producer creates it, so a mirroring sync deletes it. Exclude it, but the real
@@ -315,29 +274,14 @@ COT tables are stored per code as **`{symbol}_{code}`** (e.g. `RTY_23977A`), so 
 
 ## Concepts & design
 
-### Back-adjusted vs unadjusted prices
+### Price adjustment tiers
 
-Futures contracts expire, forcing traders to "roll" into the next contract, which usually trades at a slightly different price. Simply stitching contracts together creates artificial price gaps, so two series are stored and a third is derived:
-
-- **`backadj` (signals & stops).** Gap-free *arithmetic* (additive) rolls shift historical prices to align with the new contract, preserving *absolute* daily point moves. Use this for indicators, signals, and stop-losses to avoid false triggers on rollover gaps.
-- **`unadj` (position sizing).** Back-adjustment shifts historical prices (sometimes negative), so you can't use it for dollar values. Use `unadj` (raw, real-life prices) for that day to compute true dollar risk and contract counts.
-- **`propadj` (proportional / ratio adjustment).** Derived on read from `unadj` + `backadj`; preserves daily *percentage* returns. Use it for **low-priced, long-history contracts where additive back-adjustment accumulates roll gaps below zero** and breaks price-based stops and R-multiples — see *Class III Milk (DC)* below.
-
-The databento builder here writes `backadj` and `unadj`. The tier *reader*, including the
-derived `propadj`, is `marketdata.get_bars(symbol, tier)` — see that package's README for
-the full treatment. Kept here because it is what the databento build produces and how to
-judge whether it produced it correctly.
-
-#### Why `propadj` exists — Class III Milk (DC)
-
-Norgate publishes continuous futures in only two forms: unadjusted and **additive** back-adjusted (`_CCB`) — there is no native ratio-adjusted series. Additive adjustment subtracts each roll's calendar spread from all prior history, and for a low-priced, seasonal, ~29-year contract like **DC (Class III Milk, ~$15–20/cwt)** those gaps accumulate past zero: **46.7% of `DC_backadj` closes are ≤ 0** (range −9.83 to 23.09). A price-based stop, an R-multiple, or a percentage return is meaningless on a non-positive series, so CMR cannot use DC's `backadj` at all — even though DC is the flagship *new-asset-class* (Dairy) held-out generalization market.
-
-`propadj` salvages it. Because the additive series `B` and unadjusted series `U` differ by an offset `O = B − U` that steps only at rolls, each roll's calendar spread is recoverable (`s = O[r−1] − O[r]`) and convertible to a multiplicative roll ratio `k = (U[r−1] + s)/U[r−1]`. Scaling each historical segment by the cumulative product of `k` (most-recent segment anchored to actual prices) preserves within-segment percentage returns exactly and is sign-identical to `backadj` on every day including rolls. Note it is **not** strictly positive, as this section once claimed: ratio adjustment scales by a positive factor, so it preserves the underlying's sign — CL's `propadj` close on 2020-04-20 is −24.11 because WTI really settled at −37.63. That is one bar in the whole store, against `backadj`'s 46.7% for DC. Recommendation: **read DC (and any similarly low-priced contract) with `marketdata.get_bars(sym, "propadj")`.**
-
-### Providers & authentication
-
-- **Databento (paid, cross-platform).** A two-stage producer for a server that cannot run Norgate. Stage 1 (`cotdata-update --ingest-databento`) pulls raw `.n.0` / `.n.1` `ohlcv-1d` and `statistics` into an append-only raw store (`$COTDATA_DATABENTO_RAW`, else `_raw/databento` under the store). This is the only paid step, and it is resumable, so re-runs fetch only new dates. Stage 2 (`cotdata-update --build-databento`) derives the back-adjusted prices from the raw store with no API cost, so the build logic can be iterated offline. Set `DATABENTO_API_KEY`. History starts 2010-06-06, and markets not on CME Globex (ICE softs, lumber, MSCI intl) are not covered. The raw store is producer-internal, so exclude it from any consumer sync.
-- **Norgate Data / Yahoo Finance** — moved to [crucible-marketdata](https://pypi.org/project/crucible-marketdata/) with the rest of the bar production (ADR-0007), along with the `[norgate]` and `[yahoo]` extras and the `COTDATA_PRICE_SOURCE` resolution that chose between vendors. That per-symbol resolution now lives in marketdata's registry.
+Not here. Futures roll, and stitching contracts creates artificial gaps, so bars come in
+three tiers — `backadj` for signals and stops, `unadj` for position sizing, `propadj` for
+anything measuring percent returns. All three, and the reasoning behind them (including
+why `propadj` is not optional: additive back-adjustment drives 46.7% of Class III Milk's
+closes below zero), live in
+[crucible-marketdata's README](https://github.com/mspinola/marketdata).
 
 ### The symbol registry
 
@@ -452,35 +396,18 @@ export COTDATA_STORE=/path/to/synced/store  # the shared store
 uv run pytest                               # run the tests
 ```
 
-For the databento producer, add the extra with `uv pip install -e ".[databento]"`. Use `uv run <cmd>`, or activate with `source .venv/bin/activate` (Mac/Linux) / `.venv\Scripts\activate` (Windows).
+There are no optional data extras — every vendor SDK moved out with the producers. Use `uv run <cmd>`, or activate with `source .venv/bin/activate` (Mac/Linux) / `.venv\Scripts\activate` (Windows).
 
 ## Reference: Data schemas
 
 The canonical store uses standard Parquet files. Loaded with `pd.read_parquet()`, they conform to the following schemas.
 
-### Price Data (`prices/{symbol}_{adjustment}.parquet`)
+### Price Data
 
-> [!NOTE]
-> **Databento output only.** Norgate/Yahoo bars and the general bar schema (including the
-> reconstructed-volume columns and how to read them) moved to
-> [crucible-marketdata](https://pypi.org/project/crucible-marketdata/) under ADR-0007.
-> What is documented here is what `--build-databento` writes into this store, read back
-> with `cotdata.store.read_prices(symbol, adjustment)`.
-
-Indexed by tz-naive `Date`. The build writes both the back-adjusted (`backadj`) series for signals/stops and the unadjusted (`unadj`) series for true transaction-cost modeling.
-
-**Schema versioning:** `schema_version` in the manifest records the on-disk data version. Consumers key cache invalidation on `cotdata.schema_version()` and can guard with `cotdata.require_schema(min_version)`.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `Date` | DatetimeIndex | Trading day (tz-naive, normalized to midnight). |
-| `Open` | float | Opening price. |
-| `High` | float | High price. |
-| `Low` | float | Low price. |
-| `Close` | float | Settlement Close price. |
-| `Volume` | float | Continuous contract trading volume (front-month only). |
-| `Open Interest` | float | Continuous contract open interest, from the `statistics` schema (stat_type 9). |
-| `Delivery Month` | float | Expiration month of the active contract (e.g. `202609`). Used to detect contract rolls. |
+Not in this store. Every bar, and the schema describing it, moved to
+[crucible-marketdata](https://pypi.org/project/crucible-marketdata/) under ADR-0007.
+A store built before that move still has a `prices/` directory: it is history, nothing
+here reads or writes it, and `--reconcile` will keep its manifest entries honest.
 
 ### Contract Specifications
 
@@ -586,7 +513,7 @@ COT/futures research — crucible is just the most common thing to point at it n
 Want to contribute or work on cotdata locally? See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 - Virtual environment setup with `uv` or standard `pip`
 - Running the test suite
-- Platform-specific notes (CFTC parsing and the databento build run anywhere)
+- Platform-specific notes (everything here runs anywhere — no vendor SDK)
 - Code style guidelines
 
 ## Contributing

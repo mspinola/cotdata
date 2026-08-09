@@ -142,10 +142,10 @@ Should print a version number. Confirm the CLI resolves too:
 ```cmd
 cotdata-update --help
 ```
-If `--cot-all` and `--build-databento` appear, you are set. If `import` errors instead, your
-venv isn't activated (look for `(.venv)`/`(cotdata)` in the prompt). If you see `--prices` or
-`--metadata`, you are on a pre-0.4.0 build from before the ADR-0007 split — those flags are
-gone, and Norgate bars come from `marketdata-update --bars`.
+If `--cot-all` appears, you are set. If `import` errors instead, your venv isn't activated
+(look for `(.venv)`/`(cotdata)` in the prompt). If you see `--prices`, `--metadata` or any
+`--*-databento` flag, you are on a pre-0.5.0 build from before the ADR-0007 split — every
+price producer moved to `marketdata`.
 
 ## Step 4: Set Environment Variables
 
@@ -321,7 +321,7 @@ If you'd rather keep the `pip`-installed copy, add its `Scripts` directory to `P
 ### The install succeeded but a console script is missing
 
 Symptom: `pip install -e .` printed success and exited 0, but
-`.venv\Scripts\cotdata-prices.exe` (or `cotdata-cot.exe`, or `cotdata-update.exe`
+`.venv\Scripts\cotdata-cot.exe` (or `cotdata-update.exe`
 after a fresh setup) is not there.
 
 **Cause: a `uv venv` has no `pip` of its own.** So a bare `pip install` inside an

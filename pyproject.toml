@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cotdata"
-version = "0.4.0"
+version = "0.5.0"
 description = "Canonical CFTC positioning (COT) data layer — a producer/consumer split over a file-based store."
 readme = "README.md"
 authors = [
@@ -31,18 +31,17 @@ Repository = "https://github.com/mspinola/cotdata"
 Issues = "https://github.com/mspinola/cotdata/issues"
 
 [project.optional-dependencies]
-# Cross-platform price producer: two-stage ingest/build back-adjustment (see the
-# Providers section of the README and ADR-0006). Also serves the intraday work.
-# The `norgate` and `yahoo` extras moved to crucible-marketdata with the bar
-# producers they installed for (ADR-0007).
-databento = ["databento>=0.30"]
-
+# No vendor extras. `norgate`, `yahoo` and `databento` all moved to
+# crucible-marketdata with the producers they installed for (ADR-0007), so this
+# package has no optional data dependency at all: CFTC positioning is a plain HTTP
+# download of public files.
 dev = ["pytest>=7", "ruff==0.15.22"]
 
 [project.scripts]
 cotdata-update = "cotdata.update:main"
+# An alias for cotdata-update, kept because scheduled jobs call it by name. There is
+# no `cotdata-prices` any more: it ran the price half, and there is no price half.
 cotdata-cot = "cotdata.update:main_cot"
-cotdata-prices = "cotdata.update:main_prices"
 cotdata-vintage = "cotdata.vintage_cli:main"
 cotdata-schedule = "cotdata.vintage_cli:main_schedule"
 

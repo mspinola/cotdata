@@ -15,7 +15,8 @@ setlocal
 
 REM /MIR mirrors (copies new + deletes removed). /XD excludes directories:
 REM   _cache, _raw  producer-internal, ~70%% of the bytes. _cache is cotdata's
-REM                 cache of downloaded CFTC zips; _raw is the PAID databento store.
+REM                 cache of downloaded CFTC zips. _raw is a pre-ADR-0007 leftover
+REM                 (databento's paid bronze store, now marketdata's) — still excluded.
 REM   citpy         consumer-owned, not written by any producer, so /MIR removes it
 REM                 and no producer run brings it back. Kept as a backstop: such
 REM                 files belong outside the store. See docs/SYNCING.md.

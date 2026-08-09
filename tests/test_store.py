@@ -20,24 +20,28 @@ def _sample():
     }, index=idx)
 
 
-def test_prices_roundtrip_and_manifest(store_env):
-    """The store-level price pair, which the databento producer still writes through.
+def _cot_sample():
+    idx = pd.date_range("2020-01-07", periods=3, freq="W-TUE", name="Report_Date")
+    return pd.DataFrame({"Open_Interest_All": [100, 110, 120],
+                         "NonComm_Positions_Long_All": [10, 12, 14]}, index=idx)
 
-    The CONSUMER bar API (get_prices/roll_dates/propadj, the volume views) left with
-    ADR-0007 and is tested in marketdata now — see test_consumer_bar_api_is_gone.
-    """
+
+def test_cot_roundtrip_and_manifest(store_env):
+    """A write lands its parquet AND its manifest entry, with the provenance a consumer
+    reads. The price equivalent of this test is in marketdata now: every bar producer,
+    and the store-level pair they wrote through, left with ADR-0007."""
     from cotdata import load_manifest, store
-    store.write_prices("ES", "backadj", _sample(), source="test")
+    store.write_cot_legacy("ES_13874A", _cot_sample(), source="test")
 
-    df = store.read_prices("ES", "backadj")
-    assert list(df.columns)[:6] == ["Open", "High", "Low", "Close", "Volume", "Open Interest"]
-    assert len(df) == 5
-    assert store.read_prices("ZZ", "backadj").empty      # absent symbol -> empty
+    df = store.read_cot_legacy("ES_13874A")
+    assert list(df.columns) == ["Open_Interest_All", "NonComm_Positions_Long_All"]
+    assert len(df) == 3
+    assert store.read_cot_legacy("ZZ_000000").empty      # absent table -> empty
 
     m = load_manifest()
-    assert m["prices"]["ES_backadj"]["n_rows"] == 5
-    assert m["prices"]["ES_backadj"]["source"] == "test"
-    assert m["prices"]["ES_backadj"]["last_date"] == "2020-01-05"
+    assert m["cot_legacy"]["ES_13874A"]["n_rows"] == 3
+    assert m["cot_legacy"]["ES_13874A"]["source"] == "test"
+    assert m["cot_legacy"]["ES_13874A"]["last_date"] == "2020-01-21"
 
 
 def test_reconcile_prunes_ghosts_keeps_real(store_env):
@@ -84,22 +88,25 @@ def test_consumer_bar_api_is_gone(store_env):
     for name in ("get_prices", "roll_dates"):
         assert not hasattr(cotdata, name)
         assert name not in cotdata.__all__
-    for mod in ("cotdata.prices", "cotdata.providers.norgate", "cotdata.providers.yfinance"):
+    for mod in ("cotdata.prices", "cotdata.providers.norgate",
+                "cotdata.providers.yfinance", "cotdata.providers.databento"):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(mod)
 
 
-def test_contract_specs_are_no_longer_written_here(store_env):
-    """Contract specs moved to marketdata with the bars they describe (§7.2).
-
-    The domain stays DECLARED so pre-ADR-0007 stores still migrate and reconcile
-    their `metadata` entries instead of stranding them — but there is no writer.
+def test_no_price_surface_of_any_kind_survives(store_env):
+    """Contract specs went with the bars (§7.2), and the databento producer that was
+    the last writer of `prices/` followed them. Both domains stay DECLARED so a
+    pre-ADR-0007 store still migrates and reconciles its entries instead of stranding
+    them — but there is no writer, and no reader, for either.
     """
     from cotdata import store
 
-    assert store.half_for("metadata") == "prices"     # still mapped, for old stores
-    for name in ("write_metadata", "upsert_metadata", "read_metadata"):
-        assert not hasattr(store, name)
+    for domain in ("prices", "metadata"):
+        assert store.half_for(domain) == "prices"     # still mapped, for old stores
+    for name in ("write_prices", "read_prices",
+                 "write_metadata", "upsert_metadata", "read_metadata"):
+        assert not hasattr(store, name), name
 
 
 def test_schema_version_and_require_schema(store_env):
@@ -109,7 +116,7 @@ def test_schema_version_and_require_schema(store_env):
     # Empty store → no manifest yet → load_manifest defaults to config.SCHEMA_VERSION
     assert schema_version() == cfg.SCHEMA_VERSION
 
-    store.write_prices("ES", "backadj", _sample(), source="test")
+    store.write_cot_legacy("ES_13874A", _cot_sample(), source="test")
     assert schema_version() == cfg.SCHEMA_VERSION      # stamped by the write
     require_schema(cfg.SCHEMA_VERSION)                 # satisfied → no raise
     with pytest.raises(RuntimeError):

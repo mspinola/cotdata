@@ -8,6 +8,52 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed — BREAKING
 
+- **The databento provider is gone, and with it every remaining trace of price data.**
+  ADR-0007 is now fully implemented: `cotdata` is CFTC positioning and nothing else.
+  databento moved to [`crucible-marketdata`](https://pypi.org/project/crucible-marketdata/)
+  alongside Norgate and Yahoo, where it writes `bars/futures/databento/` in that
+  package's store.
+
+  | gone from cotdata | use instead |
+  |---|---|
+  | `cotdata-update --ingest-databento` / `--build-databento` / `--reconcile-databento` | the same flags on `marketdata-update` |
+  | `cotdata-prices` | *(nothing — there is no price half)* |
+  | `cotdata[databento]` extra | `crucible-marketdata[databento]` |
+  | `$COTDATA_DATABENTO_RAW` | `$MARKETDATA_DATABENTO_RAW` |
+  | `store.write_prices` / `read_prices`, `config.prices_dir()` | `marketdata.store.write_bars` / `read_bars` |
+  | `registry.resolve_source`, `default_price_source`, `PRICE_SOURCES` | marketdata's registry |
+  | `Symbol.norgate` / `.yahoo` / `.databento` / `.price_source` | marketdata's registry |
+  | `$COTDATA_PRICE_SOURCE` | `$MARKETDATA_PRICE_SOURCE` |
+  | `scripts/validate_databento_vs_norgate.py`, `scripts/investigate_databento_roll_rule.py` | same paths in marketdata |
+
+  **This package now has no optional data dependency at all.** CFTC positioning is a
+  plain HTTP download of public files, so the `databento` extra was the last one and it
+  left with its provider.
+
+  **The registry lost its vendor columns.** `Symbol` is down to `internal`,
+  `asset_class`, `is_equity`, `report_type`, `cftc_code` and `hist_codes`. An earlier
+  note claimed the vendor mappings had to stay because a deployment might share one
+  registry file between the two packages via `$COTDATA_REGISTRY` — that was wrong, and
+  is corrected here: this loader hard-requires `cftc_code` and marketdata's equities do
+  not have one, so the two files can never be the same file.
+
+  **The producer-half machinery is gone**, because there is one producer. `cotdata-cot`
+  survives as an alias of `cotdata-update` — the scheduled jobs call it by name — but it
+  no longer scopes anything, and `_HALF_ACTIONS` / `_reject_other_half` are removed.
+  The manifest is still split (`manifests/cot.json`, `manifests/prices.json`) and the
+  `prices` and `metadata` domains are still DECLARED: a store built before the move
+  carries entries there, and an undeclared domain is skipped by `--migrate-manifests`,
+  which would strand them in the legacy aggregate forever. Read-only history, no writer.
+
+  **What did NOT come across:** databento's dormant per-symbol EOD path
+  (`fetch_daily_ohlc`, `run_batch_backfill`, `update_all_daily_prices`). It had no
+  caller anywhere in the fleet, it duplicated the two-stage producer, and the intraday
+  work it was nominally kept for would need an intraday schema rather than the
+  `ohlcv-1d` it actually fetched. It remains in this repo's git history.
+
+
+### Removed — BREAKING
+
 - **Price bars, and the Norgate and Yahoo producers, are gone from this package**
   (crucible-stack ADR-0007 step 2 §7.5). cotdata is now CFTC positioning only. Every bar,
   tier and contract spec lives in
