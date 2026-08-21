@@ -90,7 +90,8 @@ REM presenting as two. Each pass reports its own code and the exit is the worst.
 REM robocopy uses exit codes 0-7 for SUCCESS (1 = files copied, 2 = extras present,
 REM 3 = both, and so on) and 8+ for failure. Task Scheduler treats any non-zero as a
 REM failure, so without this normalisation every successful sync would be reported
-REM as an error and "restart on failure" would loop.
+REM as an error -- and when this script is chained onto a producer wrapper, that
+REM bogus code becomes the wrapper's exit code and the task's Last Result.
 if %COT_RC% GEQ 8 goto :cot_failed
 if %BAR_RC% GEQ 8 goto :bar_failed
 echo sync ok ^(cot robocopy %COT_RC%, bars robocopy %BAR_RC%^)
