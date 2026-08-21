@@ -6,19 +6,37 @@ the producer and the consumers are different machines, something has to move the
 This page is about **what** to move and what to leave behind. The transport is the easy
 part and comes last.
 
-> [!NOTE]
-> **Two stores since ADR-0007.** Every bar — Norgate, databento and Yahoo alike — moved to
+> [!IMPORTANT]
+> **Two stores since ADR-0007, and they do not share an exclusion list.** Every bar —
+> Norgate, databento and Yahoo alike — moved to
 > [`crucible-marketdata`](https://pypi.org/project/crucible-marketdata/) and its own
-> `$MARKETDATA_STORE`. The Windows box still produces both and still pushes both to the same
-> replicas, so the topology, exclusions, auth gotchas and preflight advice below apply
-> unchanged — there are now **two source directories to mirror instead of one**, and the
-> `bars/`, `metadata/` and `_raw/` rows describe the bar store rather than this one. Where a
-> command names `cotdata-prices --prices`, read
+> `$MARKETDATA_STORE`. The Windows box produces both and pushes both to the same replicas,
+> so the topology, transports and auth gotchas below are unchanged. What is **not**
+> unchanged is what you exclude:
+>
+> | | COT store | bar store |
+> |---|---|---|
+> | live bookkeeping | `manifests/<half>.json` | `manifest.json` (root) |
+> | root `manifest.json` | dead legacy aggregate — **exclude** | the only index — **must be carried** |
+> | `_cache/` | cotdata's CFTC zip cache — exclude | does not exist |
+> | `citpy/` | consumer-owned — exclude | does not exist |
+> | `_raw/` | pre-ADR-0007 leftover — exclude | databento's PAID bronze — exclude |
+> | `vintage/` | irreplaceable, carry to the Mac | does not exist |
+>
+> The `manifest.json` row is the trap. Both `robocopy /XF` and `rsync --exclude` match by
+> **name at any depth**, so carrying the COT store's exclusion list over to the bar store
+> strips the bar store's whole index in transit and delivers a replica full of parquet it
+> cannot enumerate. That is the same failure this page already documents for
+> `vintage/snapshots.json`, one directory over. Mirror the two stores in **separate passes**;
+> do not point one `robocopy /MIR` at a shared parent folder.
+>
+> Where a command names `cotdata-prices --prices`, read
 > `marketdata-update --bars --domain futures --require-final`.
 >
 > A cotdata store built before the move still has `prices/`, `metadata/` and `_raw/` sitting
 > in it. Nothing writes them any more; leaving them is harmless and deleting them is safe
 > once the bar store is confirmed synced.
+
 ## This deployment: one Norgate producer, two replicas
 
 A single Windows server is the only producer (Norgate prices, CFTC COT). It feeds two
@@ -37,10 +55,13 @@ folder was deliberately not carried over, so a real network sync replaced it.
 
 - **Producer:** the Windows server (Norgate prices, CFTC COT), one-directional.
 - **Consumer:** the Mac, read-only.
-- **Transport:** `robocopy /MIR` ([`examples/windows/sync-store.cmd`](examples/windows/sync-store.cmd))
-  pushing to an SMB share the Mac exports for `~/code/cotdata_store`, reached from the
-  server as `\\<mac>\cotdata_store` (use the Mac's LAN IP if its name will not resolve
-  from a headless server).
+- **Transport:** two `robocopy /MIR` passes, one per store
+  ([`examples/windows/sync-store.cmd`](examples/windows/sync-store.cmd)), pushing to SMB
+  shares the Mac exports for `~/code/cotdata_store` and `~/code/marketdata_store`, reached
+  from the server as `\\<mac>\cotdata_store` and `\\<mac>\marketdata_store` (use the Mac's
+  LAN IP if its name will not resolve from a headless server). The second pass runs even
+  when the first fails: the stores are independent, so aborting early would let a COT
+  hiccup silently stop bars reaching the Mac for as long as it lasted.
 - **Trigger:** chained onto the end of the producer task behind an `errorlevel` guard, so
   it fires only after a successful run rather than on a timer (a deferred
   `--require-final` bar run exits non-zero and is skipped).
@@ -63,10 +84,12 @@ maintenance than a per-symbol roll-rule table.
 - **Transport:** an `rsync` push over SSH, chained onto the producer task, using a packaged
   rsync on Windows (cwRsync or WSL). robocopy cannot speak SSH, and SMB must never be
   exposed over the internet, so the Mac's SMB path does not carry here. See
-  [`examples/windows/push-to-server.cmd`](examples/windows/push-to-server.cmd). The
-  exclusions match the Mac push (`_cache/`, `_raw/`, `citpy/`, `manifest.json`, plus
-  `*.tmp` for partial-write temps), so the producer-internal databento bronze under
-  `_raw/databento/` never leaves the Windows box.
+  [`examples/windows/push-to-server.cmd`](examples/windows/push-to-server.cmd), which
+  pushes both stores to two remote paths. Per store the exclusions match the Mac push —
+  `_cache/`, `_raw/`, `citpy/`, `manifest.json`, `*.tmp` for the COT store; `_raw/` and
+  `*.tmp` only for the bar store, whose root `manifest.json` is pushed last on its own
+  line rather than excluded. Either way the PAID databento bronze under `_raw/databento/`
+  never leaves the Windows box.
 - **Auth:** key-based SSH only. A scheduled task cannot type a passphrase, so use a
   dedicated key with `ssh -o BatchMode=yes`, never a password prompt.
 - **cwRsync gotcha:** a Cygwin rsync (what `choco install rsync` gives you) must drive the
@@ -121,31 +144,42 @@ about two producers writing the *same* files.
 
 This is the part that matters, and on a real store it is most of the bytes.
 
-Per store, since there are now two. `bars/`, `metadata/` and `_raw/` live in
-`$MARKETDATA_STORE`; everything else here is `$COTDATA_STORE`.
+**One table per store.** They are not interchangeable — see the `manifest.json` rows.
 
-| Directory | Sync? | Why |
+`$COTDATA_STORE`:
+
+| Entry | Sync? | Why |
 |---|---|---|
-| `bars/` (marketdata) | **yes** | the data |
-| `metadata/` (marketdata) | **yes** | contract specs |
 | `cot_legacy/`, `cot_disagg/`, `cot_tff/` | **yes** | the data |
-| `prices/` | **NO** (legacy) | pre-ADR-0007 leftover; bars live in the marketdata store now |
-| `manifests/` | **yes** | per-half bookkeeping |
-| `status.json` | yes | the producer's own view, useful on the replica |
-| `_cache/` | **NO** | cotdata's own download cache of CFTC source zips, producer-internal, free to rebuild |
-| `_raw/` | **NO** | databento's append-only PAID raw store, producer-internal (marketdata's now) |
-| anything a consumer added by hand | **NO** | no producer creates it, so a mirror deletes it (see below) |
+| `manifests/` | **yes** | per-half bookkeeping, disjoint and mergeable |
+| `vintage/` | **yes**, to the Mac | irreplaceable; see below for why the dash skips it |
+| `status.json` | yes | the producer's own view, and the freshness signal a replica check reads |
 | `manifest.json` | **NO** | legacy aggregate, nothing writes it (see below) |
+| `_cache/` | **NO** | cotdata's own download cache of CFTC source zips, producer-internal, free to rebuild |
+| `prices/`, `metadata/` | **NO** (legacy) | pre-ADR-0007 leftovers; bars and specs live in the bar store now |
+| `_raw/` | **NO** (legacy) | pre-ADR-0007 leftover, databento's PAID raw store (marketdata's now) |
+| anything a consumer added by hand | **NO** | no producer creates it, so a mirror deletes it (see below) |
+
+`$MARKETDATA_STORE`:
+
+| Entry | Sync? | Why |
+|---|---|---|
+| `bars/` | **yes** | the data — `bars/<domain>/<source>/<symbol>_<tier>.parquet` |
+| `metadata/` | **yes** | contract specs |
+| `manifest.json` | **YES** | the bar store's ONLY index. Not the COT store's legacy file — carry it, and carry it LAST |
+| `_raw/` | **NO** | databento's append-only PAID raw store, producer-internal |
+| `_cache/`, `citpy/`, `vintage/` | n/a | the bar store has none of these |
 
 On one real store the `_cache/` and `_raw/` exclusions dropped the payload from 270 MB to
-about 82 MB. The other two are correctness issues rather than savings.
+about 82 MB. The `manifest.json` rows are correctness rather than savings, and they point
+opposite ways: excluding it is right for one store and destroys the other.
 
 ### `_cache/` holds source archives, not derived data
 
 cotdata's own CFTC providers write it: `_cache/cot_legacy`, `_cache/cot_disagg` and
 `_cache/cot_tff` hold the downloaded year zips (`dea_fut_xls_2004.zip` and so on) that
-`--cot-*` HEAD-checks to decide whether anything changed. `_cache/databento` is the
-equivalent for that provider.
+`--cot-*` HEAD-checks to decide whether anything changed. (A store built before ADR-0007
+also has a `_cache/databento` from when that provider lived here; nothing writes it now.)
 
 It is producer-internal and **free** to rebuild, since the CFTC download costs nothing.
 Do not confuse it with `_raw/`, which is the *paid* databento raw store. Both are
@@ -173,14 +207,22 @@ directory left the store.
 If you have anything similar, exclude it today and move it out of the store. Then no
 future transport, and no colleague configuring one, can reach it.
 
-### `manifest.json` is legacy
+### `manifest.json` is legacy — **in the COT store only**
 
-Nothing writes it any more (see ADR-0007). It held both producer halves in one file,
-which is exactly the shape a file sync resolves last-writer-wins: a producer pushing an
-aggregate containing only its own half would silently drop the other half's entries on
-arrival. The per-half files under `manifests/` are disjoint and merge correctly.
+Nothing writes cotdata's aggregate any more (see ADR-0007). It held both producer halves
+in one file, which is exactly the shape a file sync resolves last-writer-wins: a producer
+pushing an aggregate containing only its own half would silently drop the other half's
+entries on arrival. The per-half files under `manifests/` are disjoint and merge correctly.
 
 Run `cotdata-update --migrate-manifests` once per store, then delete `manifest.json`.
+
+**The bar store's `manifest.json` is the opposite of legacy.** marketdata keeps one live
+manifest at its root and has no `manifests/` directory at all. Excluding it — by copying
+the COT store's exclusion list, which is the obvious thing to do — delivers a replica
+holding every parquet and no index. It is a quiet failure: the files are all there, so
+disk usage and a directory listing both look right, and only a read notices. Both
+transports match exclusions by **name at any depth**, so there is no `/manifests/` prefix
+to make the rule safe. Two stores, two passes, two lists.
 
 ### `vintage/` is irreplaceable, so where it is WRITTEN matters
 
@@ -203,7 +245,7 @@ Per replica in this deployment:
 | Target | Carries `vintage/`? | Why |
 |---|---|---|
 | Mac (research) | **Yes, in full** | Natural second copy of irreplaceable bytes, ~1 GB/yr, and research may query revisions |
-| Linux dash VPS | **No** | cot-analyzer reads prices and COT only; it would carry ~1 GB/yr of archives it never opens |
+| Linux dash VPS | **No** | cot-analyzer reads bars and COT only; it would carry ~1 GB/yr of archives it never opens |
 
 **Naming gotcha, already handled:** the vintage provenance index is `snapshots.json`, not
 `manifest.json`. Both sync scripts exclude `manifest.json` *unanchored* (robocopy `/XF`
@@ -225,11 +267,20 @@ python docs/examples/sync_preflight.py SRC_STORE DEST_STORE
 Exit 0 means DEST holds nothing SRC does not produce. Exit 1 lists what a mirror would
 remove and refuses. It reads only.
 
+Run it **once per pair** — `$COTDATA_STORE` against its target, then `$MARKETDATA_STORE`
+against its own. It detects which layout each store is (a bar store has `bars/` and a live
+root `manifest.json`; a COT store has `manifests/`) and prints the verdict. Handing it one
+of each exits 2 with `CANNOT JUDGE` rather than guessing: that pairing is far more likely
+to be two paths swapped than an intention, and the mirror it would otherwise green-light
+deletes the entire destination.
+
 It checks two things the eye does not. **Entries only on DEST**, which a mirror deletes.
-And **the same key produced by different sources on each side**: cotdata's price path is
+And **the same key produced by different sources on each side**: cotdata's price path was
 `prices/<SYM>_<adj>.parquet` with no source component, so a Norgate `ES_backadj` and a
-databento `ES_backadj` are the same file, and a sync resolves them last-writer-wins with
-nothing in the output to say so.
+databento `ES_backadj` were the same file, and a sync resolved them last-writer-wins with
+nothing in the output to say so. In the bar store that particular collision cannot happen
+— the vendor is a directory — but the single-table domains (`metadata/contract_specs`)
+still carry no source in their path, so the check runs there too.
 
 On a real pair on 2026-07-26 that second check found **94 collisions** between a
 Norgate-sourced research store and a databento-sourced server store. Neither store was
@@ -257,6 +308,11 @@ The presence of `manifests/` is not the test. A store can be part migrated, and
 If a manifest arrives before the parquet it describes, a consumer briefly sees an entry
 pointing at data that has not landed. The other order is harmless: data present but not
 yet announced.
+
+Both example transports do this per store: the COT push holds back `manifests/`, and the
+bar push holds back the root `manifest.json`, each sent on a final pass **without**
+`--delete` so the mirror cannot remove the replica's copy in the window before the new one
+lands.
 
 In practice this is a nicety rather than a hazard, because `get_cot`
 read parquet directly and the manifest is status only. But if your transport lets you
@@ -312,10 +368,11 @@ unattended, at the cost of a daemon on both machines.
 
 ## Verifying a sync worked
 
-On the replica:
+On the replica, once per store:
 
 ```bash
-cotdata-update --check
+cotdata-update --check         # reads $COTDATA_STORE
+marketdata-update --check      # reads $MARKETDATA_STORE; exits 1 on an empty store
 ```
 
 Compare `newest data` and `last write (UTC)` against the producer's output. The lag
@@ -327,7 +384,24 @@ mirroring and stale files are accumulating. If it shows *fewer*, the sync has no
 completed or an exclusion is too broad.
 
 To automate this across replicas, [`examples/mac/verify-replicas.sh`](examples/mac/verify-replicas.sh)
-checks a local store and a remote one (over SSH) in one pass and exits non-zero if either
-did not receive today's push. `status.json` is rewritten on every producer push, so its
-mtime date is the "did this replica update today" signal. Wire it to launchd/cron a little
+checks a local store and a remote one (over SSH) in one pass — **four checks, two stores
+per replica** — and exits non-zero naming every laggard. Wire it to launchd/cron a little
 after the producer's run.
+
+**The two stores need two different freshness signals**, and the difference is not a
+detail you can round off:
+
+- **COT.** cotdata rewrites `status.json` on *every* run, new data or not, so "mtime is
+  today" is a clean did-this-replica-update-today test.
+- **Bars.** marketdata has no `status.json`, and it rewrites `manifest.json` only when a
+  bar or a spec is actually written. A weekend, a holiday, or a deferred `--require-final`
+  run legitimately writes nothing, so demanding "today" here fails every Saturday — and an
+  alarm that cries wolf weekly stops being read by the second month. The script uses a
+  staleness **window** instead (`BAR_MAX_AGE_DAYS`, default 4: Friday's write is still
+  fresh on Tuesday).
+
+Both transports preserve timestamps, so a replica's mtime is the *producer's* write time
+rather than the copy time — which is what makes either test mean anything, and what lets
+the script also compare the **two replicas against each other**. A matching producer run
+lands the same mtime on both; different mtimes mean one push is behind, and inside the
+staleness window neither replica looks wrong on its own.
