@@ -293,7 +293,7 @@ If a task's General tab has **"Run whether user is logged in or not"** checked, 
 
 `marketdata-update` exits non-zero on a hard fetch error, but a **deferred** `--require-final` run (NDU hasn't pulled the Finals yet) also exits non-zero — that's by design, not a bug, and the [repeating trigger](#polling-with-a-repeating-trigger) is what turns those into a working poll loop. Don't "fix" this by making the wrapper swallow the exit code: the repeats would still fire, but you would lose the only per-run signal separating a defer from a capture, and every repeat would do a full metadata fetch and replica sync instead of a cheap gate check.
 
-To confirm a run actually wrote data, check `status.json` in the store (`newest_data.prices` advancing) rather than trusting Task Scheduler's Last Run Result alone — see [Operations](../README.md#operations) in the README.
+To confirm a run actually wrote data, check the **marketdata** store rather than trusting Task Scheduler's Last Run Result alone: `marketdata-update --check`, and confirm the futures `last_date` advanced. **Not** cotdata's `status.json` — this line used to say `newest_data.prices` there, which is the retired domain ADR-0007 left behind. It is frozen at the cutover date, so it can never confirm anything about a bar run, and watching it shows a stall that is not happening (or hides one that is). See [Operations](../README.md#operations) in the README.
 
 ### Task Scheduler can't find `marketdata-update` / `cotdata-cot`
 
