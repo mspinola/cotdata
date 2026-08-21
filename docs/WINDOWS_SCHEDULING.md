@@ -130,6 +130,20 @@ schtasks /Create /TN "cotdata vintage" /TR "<DIR>\run-vintage.cmd" /SC DAILY /ST
 > ```
 > Every `Action` should be a full path to an existing `.cmd`. Fix a stray placeholder in place with `schtasks /Change /TN "cotdata COT (catch-up)" /TR "C:\real\path\run-cot.cmd"`.
 
+> [!CAUTION]
+> **Do not repoint the `cotdata prices` task at a chain wrapper on the strength of
+> crowdmon's scheduling page.** That page
+> ([`crowdmon/docs/WINDOWS_SCHEDULING.md`](https://github.com/mspinola/crowdmon/blob/main/docs/WINDOWS_SCHEDULING.md))
+> instructs `schtasks /Change /TN "cotdata prices" /TR "...\run-nightly.cmd"` so a panel
+> publish can be chained behind the bars. crowdmon was **deprecated on 2026-08-07** and the
+> chain was never installed on any box: there is no `run-nightly.cmd` and no
+> `run-publish.cmd` for it to call. Running that command would point this box's futures
+> producer at a file that does not exist, and it fails quietly — the task reports whatever
+> the missing wrapper returns and the store simply stops advancing.
+>
+> The page is still online because crowdmon's `DEPRECATED.md` §2 keeps every file for
+> citation. Treat it as a record of a design, not as instructions.
+
 > **Prices task — two settings you must check now**, before this task will work unattended. Open it in `taskschd.msc` → Properties:
 > 1. **General tab → "Run only when user is logged on"** (the default — keep it). The prices task talks to the Norgate Data Updater, which only exists in your interactive desktop session; "run whether user is logged in or not" runs where NDU is invisible and the run fails. See [Norgate Data Updater needs an interactive session](#norgate-data-updater-needs-an-interactive-session).
 > 2. **Conditions tab → uncheck "Start the task only if the computer is on AC power"** (checked by default) if this is ever on a laptop — otherwise runs are silently skipped on battery. See [Task doesn't fire at all](#task-doesnt-fire-at-all).
