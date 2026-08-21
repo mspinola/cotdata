@@ -7,7 +7,7 @@ New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDO
 > [`crucible-marketdata`](https://pypi.org/project/crucible-marketdata/), so the nightly job is
 > `marketdata-update --bars --domain futures --require-final` against `$MARKETDATA_STORE`, not
 > `cotdata-prices --prices`. It is still scheduled here, on the same box, at the same time,
-> with the same restart-on-failure trick — every operational fact below about NDU, the
+> with the same repeating-trigger poll — every operational fact below about NDU, the
 > interactive session, deferred exit codes and retry is unchanged. Only the command and the
 > store variable moved.
 >
@@ -20,7 +20,7 @@ New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDO
 **Prices daily**, and **COT caught within minutes of its Friday ~3:30pm ET release** while surviving holiday delays. Two properties make this simple:
 
 - **Idempotent.** `cotdata-update --cot-*` HEAD-checks each CFTC year zip and skips it if unchanged, so re-running is cheap. Running before the release lands is a harmless no-op; the first run *after* it lands picks it up.
-- **Fails loudly.** A run exits non-zero only on a hard fetch error (source unreachable) — *not* when there's simply no new data yet. So Task Scheduler's "restart on failure" retries real errors without firing on ordinary "nothing new" runs.
+- **Fails loudly.** A COT run exits non-zero only on a hard fetch error (source unreachable) — *not* when there's simply no new data yet, which exits 0. So a repeating trigger polls it cheaply: an ordinary "nothing new" run is indistinguishable from success, and a real error stands out. The bars task is the exception, and the difference matters — `--require-final` *defers* with a **non-zero** exit, so its exit code is a gate answer rather than a health signal. See [Polling with a repeating trigger](#polling-with-a-repeating-trigger).
 
 ## Wrapper scripts
 
@@ -47,10 +47,17 @@ exit /b %ERRORLEVEL%
 
 > **Those two `exit /b` lines are load-bearing.** A `.cmd` exits with the code of its LAST
 > command, so running `--metadata` after `--bars` with no guard lets its exit 0 overwrite a
-> deferral's exit 1. Task Scheduler then records **success**, restart-on-failure never fires,
-> and the task waits until tomorrow having fetched nothing — the gate answering correctly and
-> the wrapper discarding the answer. Skipping `--metadata` on a defer also keeps each retry a
-> cheap gate check instead of a full contract-spec fetch against NDU.
+> deferral's exit 1 — the gate answering correctly and the wrapper discarding the answer.
+> Under a repeating trigger the run still repeats, so this no longer strands the task until
+> tomorrow. What it costs you is the only per-run signal that says *this repeat did nothing*:
+> every deferred repeat would report success, and the history would stop distinguishing a
+> night that captured from a night that never did.
+>
+> Skipping `--metadata` on a defer matters for a more practical reason: the repeats run every
+> 15 minutes for five hours. Guarded, each one is a short trailing-window read and a date
+> compare. Unguarded, each is a full contract-spec fetch of every symbol against NDU — and in
+> a wrapper that chains the replica syncs, a `robocopy /MIR` and an `rsync --delete` against
+> both replicas as well, twenty times a night for no new data.
 >
 > `if errorlevel 1` tests `>= 1` and needs no variable expansion, so it is safe. `|| exit /b
 > %ERRORLEVEL%` would **not** be: cmd expands `%ERRORLEVEL%` when it parses the line, before
@@ -84,9 +91,11 @@ before enabling it:
 Create three tasks (plus an optional fourth if you enable vintage capture) — times are the **machine's local** time; convert from ET if it isn't on Eastern:
 
 ```bat
-:: 1) Bars — fire at the Continuous Futures Final (~8:55pm ET); --require-final + restart
-::    below keep retrying (cheap no-ops) until Norgate has actually pulled the Finals.
-schtasks /Create /TN "marketdata bars" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55
+:: 1) Bars — fire at the Continuous Futures Final (~8:55pm ET), then repeat every 15 min
+::    for 5 h. --require-final makes each repeat a cheap no-op until Norgate has actually
+::    pulled the Finals. /RI and /DU are what make this a poll: without them the task gets
+::    exactly one attempt per night. See "Polling with a repeating trigger" below.
+schtasks /Create /TN "marketdata bars" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55 /RI 15 /DU 0005:00
 
 :: 2) COT — daily morning catch-up for holiday-delayed releases and as a safety net
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
@@ -124,18 +133,35 @@ Register-ScheduledTask -TaskName "cotdata COT (Fri release)" -Action $act -Trigg
 
 (Or in the Task Scheduler GUI: New Task → Trigger *Weekly, Friday, 3:25pm* → check *"Repeat task every: 2 minutes for a duration of: 45 minutes."*)
 
-**Event-driven bars with `--require-final`.** The producer reads two Norgate databases: **Continuous Futures** (the `&ES` / `_CCB` series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Their **Final** prices land ~8:40pm ET (Futures) and ~8:55pm ET (Continuous Futures), but your Norgate Data Updater still has to *pull* them on its next poll. Rather than guess a fixed time, `--require-final` asks a **data** question: does Norgate hold a NEWER settled bar than the store already does, for a quorum of liquid reference symbols? That needs no wall-clock cutoff and no trading calendar, so it is immune to Norgate's publish-time drift — an early publish is caught early and a late one simply defers. (It replaced a fixed `--final-cutoff`, which broke in production on 2026-07-27 when Norgate finalized one database at 8:49pm and the check demanded 8:55pm for both. See [design/finals_ready_data_driven.md](design/finals_ready_data_driven.md).) Until it is ready the run **defers with a non-zero exit** having fetched nothing, so the restart setting below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
+**Event-driven bars with `--require-final`.** The producer reads two Norgate databases: **Continuous Futures** (the `&ES` / `_CCB` series) and **Futures** (the individual `ES-2026H` contracts used to reconstruct volume). Their **Final** prices land ~8:40pm ET (Futures) and ~8:55pm ET (Continuous Futures), but your Norgate Data Updater still has to *pull* them on its next poll. Rather than guess a fixed time, `--require-final` asks a **data** question: does Norgate hold a NEWER settled bar than the store already does, for a quorum of liquid reference symbols? That needs no wall-clock cutoff and no trading calendar, so it is immune to Norgate's publish-time drift — an early publish is caught early and a late one simply defers. (It replaced a fixed `--final-cutoff`, which broke in production on 2026-07-27 when Norgate finalized one database at 8:49pm and the check demanded 8:55pm for both. See [design/finals_ready_data_driven.md](design/finals_ready_data_driven.md).) Until it is ready the run **defers with a non-zero exit** having fetched nothing, so the repeating trigger below turns "fire at 8:55pm" into "run the moment NDU has the Finals."
 
-**Retry / wait via restart-on-failure.** Give each task a *restart on failure* — it does double duty: it retries transient fetch errors, and (for the price task) waits out the gap between 8:55pm and NDU actually pulling the Finals (each retry is a short trailing-window read and a date compare, exiting immediately until ready). On a genuine no-session day the retries simply exhaust, harmlessly. `schtasks` can't set this, so use PowerShell (applies to all three tasks):
+### Polling with a repeating trigger
 
-```powershell
-$s = New-ScheduledTaskSettingsSet -RestartInterval (New-TimeSpan -Minutes 10) -RestartCount 6
-foreach ($t in "marketdata bars","cotdata COT (Fri release)","cotdata COT (catch-up)") {
-    Set-ScheduledTask -TaskName $t -Settings $s
-}
+This is the easiest setting on the page to get wrong, because the wrong version looks right in the GUI and then fails silently for months.
+
+> [!WARNING]
+> **"If the task fails, restart every N minutes" does not fire on a non-zero exit code from your script.** It covers the scheduler failing to *launch* the action. A run whose action returns 1 is recorded as event 102, *"Task Scheduler successfully finished"*, and no restart is scheduled.
+>
+> Earlier revisions of this page recommended restart-on-failure as the retry mechanism for the bars task. That advice was wrong, and it was wrong in production. Measured on the reference box, which had `RestartCount 20` / `RestartInterval PT15M` set on that task: from 2026-08-12 to 08-15 the action returned exit 1 (a `--require-final` defer) and the task was launched **exactly once each night** — four consecutive nights, no retry, no bars captured. Events 111 and 322–324, the restart and queue events, never appeared at all. The store caught up on 08-16, when a run finally found Norgate ahead of it.
+>
+> That self-heal is why the failure stayed invisible. The data was never permanently wrong, only a day late, so `--check` a week later looked fine and nothing ever alerted.
+
+A **repetition on the trigger** fires on schedule regardless of what the previous run returned, which is exactly what a poll needs. `schtasks` sets it on a daily schedule with `/RI` (interval in minutes) and `/DU` (duration, `HHHH:MM`):
+
+```bat
+:: convert an existing task in place
+schtasks /Change /TN "marketdata bars" /RI 15 /DU 0005:00
 ```
 
-(GUI equivalent: each task → **Settings** tab → *"If the task fails, restart every: 10 minutes"*, *"Attempt to restart up to: 6 times."*)
+That produces `<Repetition><Interval>PT15M</Interval><Duration>PT5H</Duration></Repetition>` on the trigger — the same shape the Friday COT poller above already uses, and the reason that one has always worked while the bars task did not.
+
+(GUI equivalent: task → **Triggers** tab → edit the trigger → check *"Repeat task every: 15 minutes for a duration of: 5 hours."* Note that this is the **Triggers** tab. Restart-on-failure lives on the **Settings** tab, which is a different mechanism and not the one you want.)
+
+**Pick the duration from when the source could plausibly arrive**, not from how long you feel like retrying. Five hours from 8:55pm covers NDU pulling the Finals on any normal night with room for a late publish; the Friday COT poller needs only 45 minutes because the CFTC release time varies by minutes rather than hours. On a genuine no-session day every repeat defers and the window simply closes, harmlessly.
+
+**Leave `MultipleInstances` at `IgnoreNew`** (the default) so a run that overruns its interval is not joined by a second copy. Two concurrent bar runs would race on the same parquet — and in a wrapper that chains the replica syncs, on the same `robocopy /MIR` and `rsync --delete`.
+
+**The COT tasks are a separate judgement.** The Friday poller already repeats and is correct as it stands. The daily catch-up has no repetition and needs none to do its job: `cotdata-cot --cot-all` exits 0 on a pre-release no-op, so there is nothing to poll *for*. Its restart-on-failure setting only ever mattered for transient CFTC fetch errors — which, per the warning above, it never actually retried. If you want that retry, give it a short repetition (`/RI 10 /DU 0001:00`); otherwise drop the restart setting, so it stops implying a guarantee it does not provide.
 
 **View / manage the jobs** any time in the Windows **Task Scheduler** GUI — press `Win + R` and run `taskschd.msc`, or open *Task Scheduler* from the Start menu — then look under **Task Scheduler Library** for the `cotdata …` tasks.
 
@@ -163,7 +189,7 @@ Check **Last Run Time** and **Last Result**. For per-run detail, enable history 
 
 ### 3. Confirm data actually landed (the authoritative check)
 
-**Don't trust `Last Result: 0x0` alone.** A `--require-final` price run *defers with a non-zero exit* when Norgate's Finals aren't in yet — by design, so restart-on-failure turns it into a poll loop (see [Task shows success but wrote nothing](#task-shows-success-but-wrote-nothing)). So the exit code misleads in both directions. Check the store instead:
+**Don't trust `Last Result` in either direction.** A `--require-final` price run *defers with a non-zero exit* when Norgate's Finals aren't in yet — by design (see [Task shows success but wrote nothing](#task-shows-success-but-wrote-nothing)). Under a repeating trigger that is the *normal* end state for a healthy night: the repeat that captured succeeded hours ago, and every repeat after it defers, so the **last** result you see is almost always non-zero. A red `Last Result` on the bars task is therefore not evidence of anything on its own. Check the store instead:
 
 ```bat
 cotdata-update --check
@@ -233,7 +259,7 @@ If a task's General tab has **"Run whether user is logged in or not"** checked, 
 
 ### Task shows success but wrote nothing
 
-`marketdata-update` exits non-zero on a hard fetch error, but a **deferred** `--require-final` run (NDU hasn't pulled the Finals yet) also exits non-zero — that's by design, not a bug, and the restart-on-failure setting is what turns those into a working poll loop. Don't "fix" this by making the wrapper swallow the exit code; that breaks retry.
+`marketdata-update` exits non-zero on a hard fetch error, but a **deferred** `--require-final` run (NDU hasn't pulled the Finals yet) also exits non-zero — that's by design, not a bug, and the [repeating trigger](#polling-with-a-repeating-trigger) is what turns those into a working poll loop. Don't "fix" this by making the wrapper swallow the exit code: the repeats would still fire, but you would lose the only per-run signal separating a defer from a capture, and every repeat would do a full metadata fetch and replica sync instead of a cheap gate check.
 
 To confirm a run actually wrote data, check `status.json` in the store (`newest_data.prices` advancing) rather than trusting Task Scheduler's Last Run Result alone — see [Operations](../README.md#operations) in the README.
 
@@ -252,9 +278,11 @@ Always call the fully-qualified `<VENV>\Scripts\marketdata-update.exe` (or `cotd
    "<VENV>\Scripts\cotdata-cot.exe" --cot-all >> "<DIR>\cot.log" 2>&1
    ```
 
-### Restart settings not taking effect
+### "Restart on failure" is set but nothing ever retries
 
-`schtasks /Create` cannot set restart-on-failure — it's a PowerShell-only (`Set-ScheduledTask` / `New-ScheduledTaskSettingsSet`) or GUI-only setting. If the price task keeps missing the Finals window, verify the Settings tab actually shows a restart interval and count, not just the trigger time.
+Working as designed, and not the design you wanted. That setting fires when the scheduler cannot *launch* the action, not when your script exits non-zero — see [Polling with a repeating trigger](#polling-with-a-repeating-trigger) for the measurement and the fix. If the bars task keeps missing the Finals window, check the **Triggers** tab for a repetition rather than the **Settings** tab for a restart count.
+
+Worth knowing separately: `schtasks /Create` cannot set restart-on-failure at all — it is PowerShell-only (`Set-ScheduledTask` / `New-ScheduledTaskSettingsSet`) or GUI-only — so a task scripted purely with `schtasks` never had it in the first place. `schtasks` *can* set trigger repetition, with `/RI` and `/DU`.
 
 ### Reference
 

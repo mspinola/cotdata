@@ -13,16 +13,19 @@ REM not an alias for it. The COT half still runs from run-cot.cmd, so this box
 REM cannot become a second COT producer racing whatever already does that job.
 REM
 REM --require-final defers (exits non-zero, having fetched nothing) until Norgate
-REM holds a newer settled bar than the store does; pair it with Task Scheduler
-REM "restart on failure". See docs/WINDOWS_SCHEDULING.md.
+REM holds a newer settled bar than the store does. Pair it with a REPEATING TRIGGER
+REM on the task (schtasks /RI 15 /DU 0005:00), NOT with Task Scheduler's "restart on
+REM failure" -- that setting does not fire on a non-zero exit code from the action,
+REM only on a failure to launch it, so it never retried a defer. See
+REM docs/WINDOWS_SCHEDULING.md, "Polling with a repeating trigger".
 REM
 REM THE EXIT CODE IS THE WHOLE POINT, so read the two lines that carry it before
 REM editing this file. A .cmd exits with the code of its LAST command. An earlier
 REM version of this wrapper ran --metadata after --bars with no guard, so a
-REM deferral (exit 1) was overwritten by --metadata's exit 0: Task Scheduler
-REM recorded SUCCESS, restart-on-failure never fired, and the task sat until the
-REM next day having fetched nothing. The gate worked and the wrapper discarded its
-REM answer -- exactly the stale-bar failure --require-final exists to prevent.
+REM deferral (exit 1) was overwritten by --metadata's exit 0. Under a repeating
+REM trigger that no longer strands the task until tomorrow, but it destroys the
+REM only per-run signal that separates a repeat which captured from a repeat which
+REM deferred -- every one would report success.
 REM
 REM `if errorlevel 1` tests >= 1 and needs no expansion, so it is safe here.
 REM `|| exit /b %ERRORLEVEL%` would NOT be: cmd expands %ERRORLEVEL% when it parses
@@ -34,9 +37,10 @@ set "MDEXE=REPLACE_WITH_VENV_PATH\Scripts\marketdata-update.exe"
 
 "%MDEXE%" --bars --domain futures --require-final
 REM Stop here on a defer OR a failure, and keep the code. Skipping --metadata on a
-REM defer is deliberate as well as convenient: restart-on-failure turns this task
-REM into a poll loop, and each retry should be the cheap gate check rather than a
-REM full contract-spec fetch of every symbol against NDU.
+REM defer is deliberate as well as convenient: the repeating trigger turns this task
+REM into a poll loop that fires every 15 min for 5 h, and each repeat should be the
+REM cheap gate check rather than a full contract-spec fetch of every symbol against
+REM NDU -- plus, in a wrapper that chains them, both replica syncs.
 if errorlevel 1 exit /b %ERRORLEVEL%
 
 "%MDEXE%" --metadata

@@ -187,9 +187,9 @@ once every consumer of that store is on this version. See ADR-0007.
 
 ### Scheduling on Windows (Task Scheduler)
 
-The COT tasks (daily catch-up, Friday release-window poller), restart-on-failure retry settings, and Task-Scheduler troubleshooting are in **[docs/WINDOWS_SCHEDULING.md](docs/WINDOWS_SCHEDULING.md)**. Start with the [Windows Setup Guide](docs/WINDOWS_SETUP.md) first if Python/the venv/`COTDATA_STORE` aren't configured yet.
+The COT tasks (daily catch-up, Friday release-window poller), repeating-trigger poll settings, and Task-Scheduler troubleshooting are in **[docs/WINDOWS_SCHEDULING.md](docs/WINDOWS_SCHEDULING.md)**. Start with the [Windows Setup Guide](docs/WINDOWS_SETUP.md) first if Python/the venv/`COTDATA_STORE` aren't configured yet.
 
-The short version: COT gets a daily morning catch-up plus a tight Friday-afternoon poll around its ~3:30pm ET release, and every task uses restart-on-failure so idempotent, cheap re-runs absorb both transient errors and "not published yet."
+The short version: COT gets a daily morning catch-up plus a tight Friday-afternoon poll around its ~3:30pm ET release, and the polling tasks use a **repeating trigger** so idempotent, cheap re-runs absorb both transient errors and "not published yet." Note that Task Scheduler's *"if the task fails, restart every N minutes"* is **not** the mechanism for this — it does not fire on a non-zero exit code from your script, only on a failure to launch it. See [Polling with a repeating trigger](docs/WINDOWS_SCHEDULING.md#polling-with-a-repeating-trigger).
 
 The Windows box is also where the **Norgate bar** job runs, but that is now `marketdata-update --bars --domain futures --require-final` from the sibling package, on its own schedule near the Norgate Continuous Futures Final (~8:55pm ET). Both packages' docs cover their own half.
 
