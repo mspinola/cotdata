@@ -12,7 +12,11 @@ def _manifest():
             "NQ_backadj": {"last_date": "2026-07-05", "n_rows": 50,  "updated_at": "2026-07-06T10:00:00Z"},
         },
         "cot_legacy": {
-            "001602": {"last_date": "2026-07-07", "n_rows": 1488, "updated_at": "2026-07-14T04:00:00Z"},
+            "001602": {"last_date": "2026-07-07", "n_rows": 1488, "updated_at": "2026-07-15T04:00:00Z"},
+            # Skipped by the latest pass: 9 days behind its peers' write time. Lives
+            # in a LIVE domain on purpose -- `prices` is retired, and the lag check
+            # is deliberately silent there (see the retired-domain tests below).
+            "099999": {"last_date": "2026-07-01", "n_rows": 12, "updated_at": "2026-07-06T04:00:00Z"},
         },
     }
 
@@ -30,10 +34,10 @@ def test_summarize_counts_and_newest():
 
 def test_summarize_flags_lagging_entry():
     s = status.summarize(_manifest(), today=dt.date(2026, 7, 15))
-    lagging = s["domains"]["prices"]["lagging"]
-    # NQ_backadj was last WRITTEN 2026-07-06, 9 days behind the domain's newest
+    lagging = s["domains"]["cot_legacy"]["lagging"]
+    # 099999 was last WRITTEN 2026-07-06, 9 days behind the domain's newest
     # write (2026-07-15) — i.e. the producer skipped it while its peers succeeded.
-    assert [name for name, _, _ in lagging] == ["NQ_backadj"]
+    assert [name for name, _, _ in lagging] == ["099999"]
     assert lagging[0][2] == 9
 
 
@@ -100,7 +104,7 @@ def test_format_report_contains_domain_and_lag_warning():
     out = status.format_report(_manifest(), root="/store", today=dt.date(2026, 7, 15))
     assert "prices" in out and "829" not in out  # our synthetic totals, not the real store
     assert "250" in out                            # prices row total
-    assert "NQ_backadj" in out                     # lag warning lists the stale entry
+    assert "099999" in out                         # lag warning lists the stale entry
     assert "schema_version 2" in out
 
 
@@ -115,7 +119,9 @@ def test_build_status_doc_flat_map_and_domains():
     assert doc["newest_data"]["prices"] == "2026-07-14"
     assert doc["newest_data"]["cot_legacy"] == "2026-07-07"
     assert doc["domains"]["prices"]["rows"] == 250
-    assert doc["domains"]["prices"]["lagging"] == 1        # NQ is stale
+    # `prices` is retired: it still reports entries/rows/newest, but never lag.
+    assert doc["domains"]["prices"]["lagging"] == 0
+    assert doc["domains"]["cot_legacy"]["lagging"] == 1     # 099999 is stale
     assert doc["schema_version"] == 2
     assert "generated_at" in doc
 
@@ -148,3 +154,61 @@ def test_run_summary_ok_and_failed():
     assert "1,234 rows" in line
     assert "newest 2026-07-14" in line
     assert "✗ GC: boom" in line
+
+
+# ── retired domains ───────────────────────────────────────────────────────
+# ADR-0007 moved bars and contract specs to marketdata. The files stay in a
+# pre-move store, so --check keeps showing them — but it must not let them read
+# as healthy. `lagging` is measured WITHIN a domain, so a uniformly frozen tree
+# scores zero and looks exactly like a domain that ran cleanly minutes ago.
+# On 2026-08-21 a consumer read newest_data.prices from such a store, got a
+# 14-day-old date with lagging: 0, and had no signal it was reading a dead tree.
+
+def test_the_retired_domains_are_flagged_as_retired():
+    s = status.summarize(_manifest(), today=dt.date(2026, 7, 15))
+    assert s["domains"]["prices"]["retired"] is True
+    assert s["domains"]["cot_legacy"]["retired"] is False
+
+
+def test_a_retired_domain_is_never_reported_as_lagging():
+    """Not because it is healthy — because the within-domain check cannot say
+    anything true about a domain with no producer pass. NQ_backadj is 9 days behind
+    its peers and would be flagged in any live domain."""
+    s = status.summarize(_manifest(), today=dt.date(2026, 7, 15))
+    assert s["domains"]["prices"]["lagging"] == []
+
+
+def test_the_report_names_the_retired_domains_and_says_where_the_data_went():
+    out = status.format_report(_manifest(), today=dt.date(2026, 7, 15))
+    assert "RETIRED" in out
+    assert "marketdata" in out
+
+
+def test_the_all_clear_does_not_speak_for_the_retired_domains():
+    """A store whose live domains are all current still holds a frozen `prices`
+    tree. The all-clear has to say WHICH entries it is vouching for, or it vouches
+    for the dead one too -- which is how a 14-day-old tree reads as healthy."""
+    m = _manifest()
+    del m["cot_legacy"]["099999"]          # no lag left in any live domain
+    out = status.format_report(m, today=dt.date(2026, 7, 15))
+    assert "every entry in the live domains" in out
+    assert "RETIRED" in out
+
+
+def test_status_json_carries_retired_so_a_poller_can_see_it():
+    """The machine-readable contract needs the flag too: a poller keyed on
+    newest_data[<domain>] for a frozen domain waits forever without ever erroring."""
+    doc = status.build_status_doc(_manifest(), today=dt.date(2026, 7, 15))
+    assert doc["domains"]["prices"]["retired"] is True
+    assert doc["domains"]["cot_legacy"]["retired"] is False
+
+
+def test_a_live_domain_still_reports_lagging_entries():
+    """Guard against the retired suppression leaking into live domains."""
+    m = _manifest()
+    m["cot_legacy"]["999999"] = {"last_date": "2026-07-07", "n_rows": 10,
+                                 "updated_at": "2026-06-01T04:00:00Z"}
+    s = status.summarize(m, today=dt.date(2026, 7, 15))
+    assert {n for n, _, _ in s["domains"]["cot_legacy"]["lagging"]} == {"999999", "099999"}
+    # ...while the retired domain stays silent even with a stale entry of its own.
+    assert s["domains"]["prices"]["lagging"] == []

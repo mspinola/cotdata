@@ -24,7 +24,7 @@ New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDO
 
 ## Wrapper scripts
 
-Create **two** wrapper scripts — they run *different* commands from *different* packages: `marketdata-update` for the bars, `cotdata-cot` for the COT. (`cotdata-cot` is an alias of `cotdata-update`; it used to be half of a scoped pair, and the other half went with the price producers.)
+Create **three** wrapper scripts — they run *different* commands from *different* packages: `marketdata-update` for the futures bars, `marketdata-update` again for the equities bars (a separate task, for the reasons below), and `cotdata-cot` for the COT. (`cotdata-cot` is an alias of `cotdata-update`; it used to be half of a scoped pair, and the other half went with the price producers.)
 
 > **Ready-made templates:** copy [`docs/examples/windows/run-prices.cmd`](examples/windows/run-prices.cmd) and [`run-cot.cmd`](examples/windows/run-cot.cmd) out of the repo into your `<DIR>` (e.g. `C:\Users\you\cotdata\scheduler\`) rather than retyping them — then just fill in the placeholders. Keep them outside the repo so a `git pull` never clobbers your edited paths.
 
@@ -73,6 +73,16 @@ set COTDATA_STORE=REPLACE_WITH_STORE_PATH
 
 Using the full venv `\Scripts\marketdata-update.exe` / `\Scripts\cotdata-cot.exe` path (rather than relying on the command being on `PATH`) matters here: Task Scheduler runs with a different, often bare, environment than your interactive shell, so a bare command name that resolves fine in Command Prompt can fail to resolve under the scheduler.
 
+`run-equities.cmd` — the **equities/ETF** bars, from Yahoo rather than Norgate. Copy
+[`docs/examples/windows/run-equities.cmd`](examples/windows/run-equities.cmd). It is a
+separate task from the futures bars rather than a step inside `run-prices.cmd`, and the
+file's header block gives the three reasons in full. The short version: `run-prices.cmd`
+exits at its first command once the futures half has captured, so anything chained behind
+it is unreachable on the repeats; a single flaky Yahoo symbol fails the whole equities run
+and would otherwise abort the futures sync; and Yahoo needs no finals gate, so it can run
+at 17:30 and be clear of the 20:55 task. **It takes no `--require-final`** — marketdata
+refuses that flag on the equities domain rather than ignoring it.
+
 `run-vintage.cmd` — **optional**, the as-published (vintage) capture. Copy
 [`docs/examples/windows/run-vintage.cmd`](examples/windows/run-vintage.cmd); it runs
 `cotdata-vintage fetch` then `ingest --pending`, both exit-code guarded. Two things to know
@@ -88,19 +98,27 @@ before enabling it:
 
 ## Creating the tasks
 
-Create three tasks (plus an optional fourth if you enable vintage capture) — times are the **machine's local** time; convert from ET if it isn't on Eastern:
+Create four tasks (plus an optional fifth if you enable vintage capture) — times are the **machine's local** time; convert from ET if it isn't on Eastern:
+
+> **The bars task is named `cotdata prices` for historical reasons.** It was created before ADR-0007 moved bar production to `marketdata`, and renaming a live task loses its run history, so the name stayed. It runs `marketdata-update`, not anything in cotdata. Every `schtasks` line below uses the real name so you can paste it; on a fresh box `marketdata bars` is the better name and everything here still applies unchanged.
 
 ```bat
 :: 1) Bars — fire at the Continuous Futures Final (~8:55pm ET), then repeat every 15 min
 ::    for 5 h. --require-final makes each repeat a cheap no-op until Norgate has actually
 ::    pulled the Finals. /RI and /DU are what make this a poll: without them the task gets
 ::    exactly one attempt per night. See "Polling with a repeating trigger" below.
-schtasks /Create /TN "marketdata bars" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55 /RI 15 /DU 0005:00
+schtasks /Create /TN "cotdata prices" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55 /RI 15 /DU 0005:00
 
 :: 2) COT — daily morning catch-up for holiday-delayed releases and as a safety net
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
 
-:: 3) Vintage (OPTIONAL) — as-published capture, ~90 min after the 15:30 ET release.
+:: 3) Equities bars — Yahoo has the session's daily bar shortly after the 16:00 ET
+::    close, so this needs neither a finals gate nor a repetition. Weekdays only, and
+::    17:30 keeps it clear of the 20:55 futures task so the two never run their
+::    replica syncs at the same time. Its retry lives INSIDE run-equities.cmd.
+schtasks /Create /TN "marketdata equities" /TR "<DIR>\run-equities.cmd" /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 17:30
+
+:: 4) Vintage (OPTIONAL) — as-published capture, ~90 min after the 15:30 ET release.
 ::    Daily is deliberate: almost every request 304s, so it is nearly free, and it
 ::    tightens the observed release date from a 7-day bound to a 1-day one.
 schtasks /Create /TN "cotdata vintage" /TR "<DIR>\run-vintage.cmd" /SC DAILY /ST 17:00
@@ -150,7 +168,7 @@ A **repetition on the trigger** fires on schedule regardless of what the previou
 
 ```bat
 :: convert an existing task in place
-schtasks /Change /TN "marketdata bars" /RI 15 /DU 0005:00
+schtasks /Change /TN "cotdata prices" /RI 15 /DU 0005:00
 ```
 
 That produces `<Repetition><Interval>PT15M</Interval><Duration>PT5H</Duration></Repetition>` on the trigger — the same shape the Friday COT poller above already uses, and the reason that one has always worked while the bars task did not.
@@ -174,7 +192,7 @@ Test in three layers: fire the task, read the result, then confirm it actually w
 Don't wait for the trigger — run it now:
 
 ```bat
-schtasks /Run /TN "marketdata bars"
+schtasks /Run /TN "cotdata prices"
 ```
 
 (Or in `taskschd.msc`: right-click the task → **Run**.) Running the *task* rather than the `.cmd` by hand is the stronger test: it exercises the scheduler's own account, environment, and working directory, which is where scheduled runs usually differ from your interactive shell.
@@ -182,7 +200,7 @@ schtasks /Run /TN "marketdata bars"
 ### 2. Read what happened
 
 ```bat
-schtasks /Query /TN "marketdata bars" /V /FO LIST
+schtasks /Query /TN "cotdata prices" /V /FO LIST
 ```
 
 Check **Last Run Time** and **Last Result**. For per-run detail, enable history once (right-click the task or the library root → **Enable All Tasks History**) and read the task's **History** tab.
@@ -202,9 +220,9 @@ Confirm the relevant `newest data` date advanced (and `last write (UTC)` is rece
 - **A daytime bars run usually only proves the wrapper resolves** — if last night captured, the store already holds the newest settled bar, so a daytime run finds nothing newer and defers. The exception is worth knowing: if last night's run *failed or never fired*, a daytime run finds Norgate ahead of the store and captures immediately, so a missed night self-heals at the next trigger rather than waiting for the evening. To exercise the write path on demand regardless, run `marketdata-update --bars --domain futures` by hand (no `--require-final`), or fire the task after ~8:55pm ET.
 - **Test the trigger itself** by moving it a couple of minutes out, watching it fire, then setting it back:
   ```bat
-  schtasks /Change /TN "marketdata bars" /ST 14:20
+  schtasks /Change /TN "cotdata prices" /ST 14:20
   :: watch it run, then restore
-  schtasks /Change /TN "marketdata bars" /ST 20:55
+  schtasks /Change /TN "cotdata prices" /ST 20:55
   ```
   This catches the two silent killers below — a disabled task, or the default *"only if on AC power"* condition skipping runs on a laptop.
 - **Keep a permanent record** by having the wrapper redirect output to a log file (see [Diagnosing a silent failure](#diagnosing-a-silent-failure)).

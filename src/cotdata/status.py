@@ -20,6 +20,23 @@ def status_path():
 # Domains shown by --check, in report order.
 _DOMAINS = ["prices", "metadata", "cot", "cot_legacy", "cot_disagg", "cot_tff",
             "cot_supplemental"]
+
+# Domains this package no longer writes. ADR-0007 moved bars and contract specs to
+# marketdata, and `store._DOMAIN_HALF` keeps them declared so a pre-move store can
+# still migrate — but nothing advances them any more.
+#
+# They stay VISIBLE here rather than being dropped from _DOMAINS, because a store
+# written before the move still holds the files and hiding them would make an
+# operator's `--check` disagree with their own disk. What they must not do is
+# report as healthy: `lagging` is measured WITHIN a domain (each entry against its
+# domain's newest write), so a uniformly frozen tree scores a perfect zero and
+# reads exactly like a domain that ran cleanly minutes ago.
+#
+# That is not hypothetical. On 2026-08-21 a consumer read `newest_data.prices`
+# from a store whose bars had moved two weeks earlier, got 2026-08-07 with
+# `lagging: 0` beside genuinely-current COT domains, and had no signal that it was
+# reading an abandoned tree.
+_RETIRED_DOMAINS = {"prices", "metadata"}
 # An entry whose producer last touched it more than this many days behind its
 # domain's newest write probably failed while its peers succeeded (a partial run).
 _LAG_DAYS = 3
@@ -87,9 +104,13 @@ def summarize(manifest: dict, today: Optional[dt.date] = None,
         parsed = {n: _parse_write(e.get("updated_at")) for n, e in entries.items()}
         usable = [w for w in parsed.values() if w]
         newest_write = max(usable) if usable else None
+        # A retired domain has no producer pass to be behind, so the within-domain
+        # lag check cannot say anything true about it. Reporting [] here is not the
+        # same as reporting health: `retired` below is what the reader is meant to
+        # act on, and format_report/build_status_doc both surface it.
         lagging = []
         for name, e in entries.items():
-            if name in ignore_lag:
+            if domain in _RETIRED_DOMAINS or name in ignore_lag:
                 continue
             w = parsed[name]
             if w is None:
@@ -102,6 +123,7 @@ def summarize(manifest: dict, today: Optional[dt.date] = None,
             if behind > _LAG_DAYS:
                 lagging.append((name, e.get("updated_at"), behind))
         out["domains"][domain] = {
+            "retired": domain in _RETIRED_DOMAINS,
             "entries": len(entries),
             "rows": sum(int(e.get("n_rows") or 0) for e in entries.values()),
             "newest": newest.isoformat() if newest else None,
@@ -127,12 +149,27 @@ def format_report(manifest: dict, root: str = "", today: Optional[dt.date] = Non
         L.append("store is empty — no data written yet.")
         return "\n".join(L)
 
-    L.append(f"{'domain':<12}{'entries':>8}{'rows':>13}{'newest data':>14}"
+    L.append(f"{'domain':<18}{'entries':>8}{'rows':>13}{'newest data':>14}"
              f"{'last write (UTC)':>22}{'behind':>8}")
     for domain, d in s["domains"].items():
         behind = "—" if d["behind_today"] is None else f"{d['behind_today']}d"
-        L.append(f"{domain:<12}{d['entries']:>8}{d['rows']:>13,}"
-                 f"{str(d['newest']):>14}{str(d['last_write']):>22}{behind:>8}")
+        L.append(f"{domain:<18}{d['entries']:>8}{d['rows']:>13,}"
+                 f"{str(d['newest']):>14}{str(d['last_write']):>22}{behind:>8}"
+                 f"{'  ← RETIRED' if d['retired'] else ''}")
+
+    retired = [n for n, d in s["domains"].items() if d["retired"]]
+    if retired:
+        L.append("")
+        L.append(f"⚠ {', '.join(retired)}: RETIRED — this store still holds the files, but "
+                 f"cotdata stopped writing")
+        L.append(f"  {' ' * len(', '.join(retired))}  them at ADR-0007. Their dates are frozen "
+                 f"and will never advance again.")
+        L.append("  Daily bars and contract specs now live in the marketdata store "
+                 "($MARKETDATA_STORE);")
+        L.append("  read them with `marketdata-update --check`. Delete these directories once "
+                 "no")
+        L.append("  consumer reads them — see docs/SYNCING.md, \"Retiring the moved "
+                 "domains\".")
 
     for domain, d in s["domains"].items():
         if d["lagging"]:
@@ -146,7 +183,11 @@ def format_report(manifest: dict, root: str = "", today: Optional[dt.date] = Non
                 L.append(f"    … and {len(d['lagging']) - 15} more")
     if not any(d["lagging"] for d in s["domains"].values()):
         L.append("")
-        L.append("✓ every entry was written by the latest producer pass.")
+        # Scoped to the live domains on purpose. A retired domain has no
+        # producer pass, so letting the all-clear speak for it is how a frozen
+        # tree passes for a fresh one.
+        L.append("✓ every entry in the live domains was written by the "
+                 "latest producer pass.")
     return "\n".join(L)
 
 
@@ -164,7 +205,11 @@ def build_status_doc(manifest: dict, last_run: Optional[dict] = None,
     Contract for external pollers:
       * ``newest_data[<domain>]`` — the date of the newest daily data for that
         domain. Advances ONLY when genuinely new data arrives → key on this to
-        detect "there is new data" (e.g. compare prices vs your last-seen date).
+        detect "there is new data" (e.g. compare cot_legacy vs your last-seen
+        date). CHECK ``domains[<domain>]["retired"]`` FIRST: a retired domain's
+        date is frozen, so a poller keyed on it waits forever without ever
+        erroring. This example used to read ``prices``, which is exactly such a
+        domain -- see ``_RETIRED_DOMAINS``. Bars live in the marketdata store now.
       * ``generated_at`` — refreshed on every producer run (new data or not) →
         key on this only to detect "a run happened".
       * ``last_run`` — outcome of the most recent run (kinds, ok/failed counts).
@@ -177,6 +222,7 @@ def build_status_doc(manifest: dict, last_run: Optional[dict] = None,
             "entries": d["entries"],
             "rows": d["rows"],
             "lagging": len(d["lagging"]),
+            "retired": d["retired"],
         }
         for name, d in s["domains"].items()
     }
