@@ -193,9 +193,64 @@ That produces `<Repetition><Interval>PT15M</Interval><Duration>PT5H</Duration></
 
 **Leave `MultipleInstances` at `IgnoreNew`** (the default) so a run that overruns its interval is not joined by a second copy. Two concurrent bar runs would race on the same parquet — and in a wrapper that chains the replica syncs, on the same `robocopy /MIR` and `rsync --delete`.
 
-**The COT tasks are a separate judgement.** The Friday poller already repeats and is correct as it stands. The daily catch-up has no repetition and needs none to do its job: `cotdata-cot --cot-all` exits 0 on a pre-release no-op, so there is nothing to poll *for*. Its restart-on-failure setting only ever mattered for transient CFTC fetch errors — which, per the warning above, it never actually retried. If you want that retry, give it a short repetition (`/RI 10 /DU 0001:00`); otherwise drop the restart setting, so it stops implying a guarantee it does not provide.
+**The COT tasks are a separate judgement.** The Friday poller's *trigger* already repeats and is correct as it stands — but if its wrapper chains the replica syncs, the repetition multiplies those too; see [What a repetition costs a wrapper that chains replica syncs](#what-a-repetition-costs-a-wrapper-that-chains-replica-syncs). The daily catch-up has no repetition and needs none to do its job: `cotdata-cot --cot-all` exits 0 on a pre-release no-op, so there is nothing to poll *for*. Its restart-on-failure setting only ever mattered for transient CFTC fetch errors — which, per the warning above, it never actually retried. If you want that retry, give it a short repetition (`/RI 10 /DU 0001:00`); otherwise drop the restart setting, so it stops implying a guarantee it does not provide.
 
 **View / manage the jobs** any time in the Windows **Task Scheduler** GUI — press `Win + R` and run `taskschd.msc`, or open *Task Scheduler* from the Start menu — then look under **Task Scheduler Library** for the `cotdata …` tasks.
+
+### What a repetition costs a wrapper that chains replica syncs
+
+A repetition multiplies **everything the wrapper does**, not just the fetch. If your
+wrapper ends by calling [`sync-store.cmd`](examples/windows/sync-store.cmd) and
+[`push-to-server.cmd`](examples/windows/push-to-server.cmd), every repeat mirrors both
+stores again — and `sync-store.cmd` carries the full `vintage/` tree deliberately, which
+[SYNCING.md](SYNCING.md) puts at roughly 1 GB/year. The Friday COT poller fires 23 times
+in its 45-minute window, so a quiet Friday was scanning a gigabyte-plus over SMB and again
+over SSH, 23 times, for no new data.
+
+The bars task avoids this for free: `--require-final` defers with a non-zero exit, the
+wrapper carries that code out, and the chained syncs are simply never reached. **COT has no
+such signal** — `cotdata-cot --cot-all` exits 0 whether or not anything arrived — so it
+needs an explicit guard.
+
+**Guard on `newest_data`, not on a file timestamp or hash.** This is the part that is easy
+to get wrong, because the obvious signal is the broken one:
+
+> [!WARNING]
+> **A guard keyed on `manifests/cot.json` never fires.** Measured on the reference box on
+> 2026-08-21, across a real no-op repeat: that file's MD5 **changed**, while `status.json`'s
+> `newest_data` map stayed byte-identical. Every manifest entry is rewritten on every pass so
+> it carries a current `updated_at` (see `status.py`, and the lag check that depends on it),
+> so the file churns even when nothing was fetched. Such a guard is worse than no guard: it
+> looks like a fix and silently syncs every time anyway.
+>
+> `%%~tF` in a `.cmd` is wrong for a second, independent reason — it has **one-minute**
+> resolution, so a capture landing in the same minute as the "before" reading compares equal
+> and skips the sync that should have run.
+
+`newest_data` is the right signal and the documented one: it *"advances ONLY when genuinely
+new data arrives"* (see [status.json](../README.md#statusjson--new-data-signal-for-downstream-tools)).
+Snapshot it before the fetch and after, and skip the syncs only when the two agree.
+
+**Do not guard the daily catch-up as well.** This is the trap on the other side, and it costs
+you bars rather than time. Both sync scripts mirror **both** stores since ADR-0007, so the
+08:10 COT run is what carries **bar** data to the replicas on a morning after the bars task
+captured but its own sync failed. COT is weekly, so `newest_data` does not move on roughly
+four days in five — guarding the catch-up would skip the sync on exactly the days that
+safety net exists for, and the bars would sit on the producer with nothing saying so. Give
+the guard to the **poller** only, e.g. by having the Friday task pass a `--poll` argument the
+catch-up does not:
+
+```powershell
+$a = New-ScheduledTaskAction -Execute '<DIR>\run-cot.cmd' -Argument '--poll'
+Set-ScheduledTask -TaskName 'cotdata COT (Fri release)' -Action $a
+```
+
+(Use PowerShell rather than `schtasks /Change /TR` here: `schtasks` takes the whole quoted
+string as the executable path, so the argument ends up part of the filename.)
+
+**Make the guard fail toward syncing.** If `status.json` is missing or unparseable, sync
+anyway rather than skipping. A redundant mirror is merely slow; a skipped one is invisible,
+which is the failure mode this whole page exists to prevent.
 
 ## Testing your tasks
 

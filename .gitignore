@@ -23,3 +23,7 @@ dist/
 
 # roll-rule investigation cache (scripts/investigate_databento_roll_rule.py)
 .rollrule_cache/
+
+# local scheduler backups (same machine-specific paths as /scheduler/)
+/scheduler.bak*/
+/scheduler_backup*/
