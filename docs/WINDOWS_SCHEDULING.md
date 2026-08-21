@@ -24,7 +24,7 @@ New to Python and cotdata on Windows? Start with the [Windows Setup Guide](WINDO
 
 ## Wrapper scripts
 
-Create **two** wrapper scripts — they run *different* commands from *different* packages: `marketdata-update` for the bars, `cotdata-cot` for the COT. (`cotdata-cot` is an alias of `cotdata-update`; it used to be half of a scoped pair, and the other half went with the price producers.)
+Create **three** wrapper scripts — they run *different* commands from *different* packages: `marketdata-update` for the futures bars, `marketdata-update` again for the equities bars (a separate task, for the reasons below), and `cotdata-cot` for the COT. (`cotdata-cot` is an alias of `cotdata-update`; it used to be half of a scoped pair, and the other half went with the price producers.)
 
 > **Ready-made templates:** copy [`docs/examples/windows/run-prices.cmd`](examples/windows/run-prices.cmd) and [`run-cot.cmd`](examples/windows/run-cot.cmd) out of the repo into your `<DIR>` (e.g. `C:\Users\you\cotdata\scheduler\`) rather than retyping them — then just fill in the placeholders. Keep them outside the repo so a `git pull` never clobbers your edited paths.
 
@@ -73,6 +73,16 @@ set COTDATA_STORE=REPLACE_WITH_STORE_PATH
 
 Using the full venv `\Scripts\marketdata-update.exe` / `\Scripts\cotdata-cot.exe` path (rather than relying on the command being on `PATH`) matters here: Task Scheduler runs with a different, often bare, environment than your interactive shell, so a bare command name that resolves fine in Command Prompt can fail to resolve under the scheduler.
 
+`run-equities.cmd` — the **equities/ETF** bars, from Yahoo rather than Norgate. Copy
+[`docs/examples/windows/run-equities.cmd`](examples/windows/run-equities.cmd). It is a
+separate task from the futures bars rather than a step inside `run-prices.cmd`, and the
+file's header block gives the three reasons in full. The short version: `run-prices.cmd`
+exits at its first command once the futures half has captured, so anything chained behind
+it is unreachable on the repeats; a single flaky Yahoo symbol fails the whole equities run
+and would otherwise abort the futures sync; and Yahoo needs no finals gate, so it can run
+at 17:30 and be clear of the 20:55 task. **It takes no `--require-final`** — marketdata
+refuses that flag on the equities domain rather than ignoring it.
+
 `run-vintage.cmd` — **optional**, the as-published (vintage) capture. Copy
 [`docs/examples/windows/run-vintage.cmd`](examples/windows/run-vintage.cmd); it runs
 `cotdata-vintage fetch` then `ingest --pending`, both exit-code guarded. Two things to know
@@ -88,19 +98,27 @@ before enabling it:
 
 ## Creating the tasks
 
-Create three tasks (plus an optional fourth if you enable vintage capture) — times are the **machine's local** time; convert from ET if it isn't on Eastern:
+Create four tasks (plus an optional fifth if you enable vintage capture) — times are the **machine's local** time; convert from ET if it isn't on Eastern:
+
+> **The bars task is named `cotdata prices` for historical reasons.** It was created before ADR-0007 moved bar production to `marketdata`, and renaming a live task loses its run history, so the name stayed. It runs `marketdata-update`, not anything in cotdata. Every `schtasks` line below uses the real name so you can paste it; on a fresh box `marketdata bars` is the better name and everything here still applies unchanged.
 
 ```bat
 :: 1) Bars — fire at the Continuous Futures Final (~8:55pm ET), then repeat every 15 min
 ::    for 5 h. --require-final makes each repeat a cheap no-op until Norgate has actually
 ::    pulled the Finals. /RI and /DU are what make this a poll: without them the task gets
 ::    exactly one attempt per night. See "Polling with a repeating trigger" below.
-schtasks /Create /TN "marketdata bars" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55 /RI 15 /DU 0005:00
+schtasks /Create /TN "cotdata prices" /TR "<DIR>\run-prices.cmd" /SC DAILY /ST 20:55 /RI 15 /DU 0005:00
 
 :: 2) COT — daily morning catch-up for holiday-delayed releases and as a safety net
 schtasks /Create /TN "cotdata COT (catch-up)" /TR "<DIR>\run-cot.cmd" /SC DAILY /ST 08:10
 
-:: 3) Vintage (OPTIONAL) — as-published capture, ~90 min after the 15:30 ET release.
+:: 3) Equities bars — Yahoo has the session's daily bar shortly after the 16:00 ET
+::    close, so this needs neither a finals gate nor a repetition. Weekdays only, and
+::    17:30 keeps it clear of the 20:55 futures task so the two never run their
+::    replica syncs at the same time. Its retry lives INSIDE run-equities.cmd.
+schtasks /Create /TN "marketdata equities" /TR "<DIR>\run-equities.cmd" /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 17:30
+
+:: 4) Vintage (OPTIONAL) — as-published capture, ~90 min after the 15:30 ET release.
 ::    Daily is deliberate: almost every request 304s, so it is nearly free, and it
 ::    tightens the observed release date from a 7-day bound to a 1-day one.
 schtasks /Create /TN "cotdata vintage" /TR "<DIR>\run-vintage.cmd" /SC DAILY /ST 17:00
@@ -111,6 +129,20 @@ schtasks /Create /TN "cotdata vintage" /TR "<DIR>\run-vintage.cmd" /SC DAILY /ST
 > Get-ScheduledTask -TaskName "cotdata*" | Select-Object TaskName, @{n='Action';e={$_.Actions.Execute}}
 > ```
 > Every `Action` should be a full path to an existing `.cmd`. Fix a stray placeholder in place with `schtasks /Change /TN "cotdata COT (catch-up)" /TR "C:\real\path\run-cot.cmd"`.
+
+> [!CAUTION]
+> **Do not repoint the `cotdata prices` task at a chain wrapper on the strength of
+> crowdmon's scheduling page.** That page
+> ([`crowdmon/docs/WINDOWS_SCHEDULING.md`](https://github.com/mspinola/crowdmon/blob/main/docs/WINDOWS_SCHEDULING.md))
+> instructs `schtasks /Change /TN "cotdata prices" /TR "...\run-nightly.cmd"` so a panel
+> publish can be chained behind the bars. crowdmon was **deprecated on 2026-08-07** and the
+> chain was never installed on any box: there is no `run-nightly.cmd` and no
+> `run-publish.cmd` for it to call. Running that command would point this box's futures
+> producer at a file that does not exist, and it fails quietly — the task reports whatever
+> the missing wrapper returns and the store simply stops advancing.
+>
+> The page is still online because crowdmon's `DEPRECATED.md` §2 keeps every file for
+> citation. Treat it as a record of a design, not as instructions.
 
 > **Prices task — two settings you must check now**, before this task will work unattended. Open it in `taskschd.msc` → Properties:
 > 1. **General tab → "Run only when user is logged on"** (the default — keep it). The prices task talks to the Norgate Data Updater, which only exists in your interactive desktop session; "run whether user is logged in or not" runs where NDU is invisible and the run fails. See [Norgate Data Updater needs an interactive session](#norgate-data-updater-needs-an-interactive-session).
@@ -150,7 +182,7 @@ A **repetition on the trigger** fires on schedule regardless of what the previou
 
 ```bat
 :: convert an existing task in place
-schtasks /Change /TN "marketdata bars" /RI 15 /DU 0005:00
+schtasks /Change /TN "cotdata prices" /RI 15 /DU 0005:00
 ```
 
 That produces `<Repetition><Interval>PT15M</Interval><Duration>PT5H</Duration></Repetition>` on the trigger — the same shape the Friday COT poller above already uses, and the reason that one has always worked while the bars task did not.
@@ -161,9 +193,64 @@ That produces `<Repetition><Interval>PT15M</Interval><Duration>PT5H</Duration></
 
 **Leave `MultipleInstances` at `IgnoreNew`** (the default) so a run that overruns its interval is not joined by a second copy. Two concurrent bar runs would race on the same parquet — and in a wrapper that chains the replica syncs, on the same `robocopy /MIR` and `rsync --delete`.
 
-**The COT tasks are a separate judgement.** The Friday poller already repeats and is correct as it stands. The daily catch-up has no repetition and needs none to do its job: `cotdata-cot --cot-all` exits 0 on a pre-release no-op, so there is nothing to poll *for*. Its restart-on-failure setting only ever mattered for transient CFTC fetch errors — which, per the warning above, it never actually retried. If you want that retry, give it a short repetition (`/RI 10 /DU 0001:00`); otherwise drop the restart setting, so it stops implying a guarantee it does not provide.
+**The COT tasks are a separate judgement.** The Friday poller's *trigger* already repeats and is correct as it stands — but if its wrapper chains the replica syncs, the repetition multiplies those too; see [What a repetition costs a wrapper that chains replica syncs](#what-a-repetition-costs-a-wrapper-that-chains-replica-syncs). The daily catch-up has no repetition and needs none to do its job: `cotdata-cot --cot-all` exits 0 on a pre-release no-op, so there is nothing to poll *for*. Its restart-on-failure setting only ever mattered for transient CFTC fetch errors — which, per the warning above, it never actually retried. If you want that retry, give it a short repetition (`/RI 10 /DU 0001:00`); otherwise drop the restart setting, so it stops implying a guarantee it does not provide.
 
 **View / manage the jobs** any time in the Windows **Task Scheduler** GUI — press `Win + R` and run `taskschd.msc`, or open *Task Scheduler* from the Start menu — then look under **Task Scheduler Library** for the `cotdata …` tasks.
+
+### What a repetition costs a wrapper that chains replica syncs
+
+A repetition multiplies **everything the wrapper does**, not just the fetch. If your
+wrapper ends by calling [`sync-store.cmd`](examples/windows/sync-store.cmd) and
+[`push-to-server.cmd`](examples/windows/push-to-server.cmd), every repeat mirrors both
+stores again — and `sync-store.cmd` carries the full `vintage/` tree deliberately, which
+[SYNCING.md](SYNCING.md) puts at roughly 1 GB/year. The Friday COT poller fires 23 times
+in its 45-minute window, so a quiet Friday was scanning a gigabyte-plus over SMB and again
+over SSH, 23 times, for no new data.
+
+The bars task avoids this for free: `--require-final` defers with a non-zero exit, the
+wrapper carries that code out, and the chained syncs are simply never reached. **COT has no
+such signal** — `cotdata-cot --cot-all` exits 0 whether or not anything arrived — so it
+needs an explicit guard.
+
+**Guard on `newest_data`, not on a file timestamp or hash.** This is the part that is easy
+to get wrong, because the obvious signal is the broken one:
+
+> [!WARNING]
+> **A guard keyed on `manifests/cot.json` never fires.** Measured on the reference box on
+> 2026-08-21, across a real no-op repeat: that file's MD5 **changed**, while `status.json`'s
+> `newest_data` map stayed byte-identical. Every manifest entry is rewritten on every pass so
+> it carries a current `updated_at` (see `status.py`, and the lag check that depends on it),
+> so the file churns even when nothing was fetched. Such a guard is worse than no guard: it
+> looks like a fix and silently syncs every time anyway.
+>
+> `%%~tF` in a `.cmd` is wrong for a second, independent reason — it has **one-minute**
+> resolution, so a capture landing in the same minute as the "before" reading compares equal
+> and skips the sync that should have run.
+
+`newest_data` is the right signal and the documented one: it *"advances ONLY when genuinely
+new data arrives"* (see [status.json](../README.md#statusjson--new-data-signal-for-downstream-tools)).
+Snapshot it before the fetch and after, and skip the syncs only when the two agree.
+
+**Do not guard the daily catch-up as well.** This is the trap on the other side, and it costs
+you bars rather than time. Both sync scripts mirror **both** stores since ADR-0007, so the
+08:10 COT run is what carries **bar** data to the replicas on a morning after the bars task
+captured but its own sync failed. COT is weekly, so `newest_data` does not move on roughly
+four days in five — guarding the catch-up would skip the sync on exactly the days that
+safety net exists for, and the bars would sit on the producer with nothing saying so. Give
+the guard to the **poller** only, e.g. by having the Friday task pass a `--poll` argument the
+catch-up does not:
+
+```powershell
+$a = New-ScheduledTaskAction -Execute '<DIR>\run-cot.cmd' -Argument '--poll'
+Set-ScheduledTask -TaskName 'cotdata COT (Fri release)' -Action $a
+```
+
+(Use PowerShell rather than `schtasks /Change /TR` here: `schtasks` takes the whole quoted
+string as the executable path, so the argument ends up part of the filename.)
+
+**Make the guard fail toward syncing.** If `status.json` is missing or unparseable, sync
+anyway rather than skipping. A redundant mirror is merely slow; a skipped one is invisible,
+which is the failure mode this whole page exists to prevent.
 
 ## Testing your tasks
 
@@ -174,7 +261,7 @@ Test in three layers: fire the task, read the result, then confirm it actually w
 Don't wait for the trigger — run it now:
 
 ```bat
-schtasks /Run /TN "marketdata bars"
+schtasks /Run /TN "cotdata prices"
 ```
 
 (Or in `taskschd.msc`: right-click the task → **Run**.) Running the *task* rather than the `.cmd` by hand is the stronger test: it exercises the scheduler's own account, environment, and working directory, which is where scheduled runs usually differ from your interactive shell.
@@ -182,7 +269,7 @@ schtasks /Run /TN "marketdata bars"
 ### 2. Read what happened
 
 ```bat
-schtasks /Query /TN "marketdata bars" /V /FO LIST
+schtasks /Query /TN "cotdata prices" /V /FO LIST
 ```
 
 Check **Last Run Time** and **Last Result**. For per-run detail, enable history once (right-click the task or the library root → **Enable All Tasks History**) and read the task's **History** tab.
@@ -202,9 +289,9 @@ Confirm the relevant `newest data` date advanced (and `last write (UTC)` is rece
 - **A daytime bars run usually only proves the wrapper resolves** — if last night captured, the store already holds the newest settled bar, so a daytime run finds nothing newer and defers. The exception is worth knowing: if last night's run *failed or never fired*, a daytime run finds Norgate ahead of the store and captures immediately, so a missed night self-heals at the next trigger rather than waiting for the evening. To exercise the write path on demand regardless, run `marketdata-update --bars --domain futures` by hand (no `--require-final`), or fire the task after ~8:55pm ET.
 - **Test the trigger itself** by moving it a couple of minutes out, watching it fire, then setting it back:
   ```bat
-  schtasks /Change /TN "marketdata bars" /ST 14:20
+  schtasks /Change /TN "cotdata prices" /ST 14:20
   :: watch it run, then restore
-  schtasks /Change /TN "marketdata bars" /ST 20:55
+  schtasks /Change /TN "cotdata prices" /ST 20:55
   ```
   This catches the two silent killers below — a disabled task, or the default *"only if on AC power"* condition skipping runs on a laptop.
 - **Keep a permanent record** by having the wrapper redirect output to a log file (see [Diagnosing a silent failure](#diagnosing-a-silent-failure)).
@@ -261,7 +348,7 @@ If a task's General tab has **"Run whether user is logged in or not"** checked, 
 
 `marketdata-update` exits non-zero on a hard fetch error, but a **deferred** `--require-final` run (NDU hasn't pulled the Finals yet) also exits non-zero — that's by design, not a bug, and the [repeating trigger](#polling-with-a-repeating-trigger) is what turns those into a working poll loop. Don't "fix" this by making the wrapper swallow the exit code: the repeats would still fire, but you would lose the only per-run signal separating a defer from a capture, and every repeat would do a full metadata fetch and replica sync instead of a cheap gate check.
 
-To confirm a run actually wrote data, check `status.json` in the store (`newest_data.prices` advancing) rather than trusting Task Scheduler's Last Run Result alone — see [Operations](../README.md#operations) in the README.
+To confirm a run actually wrote data, check the **marketdata** store rather than trusting Task Scheduler's Last Run Result alone: `marketdata-update --check`, and confirm the futures `last_date` advanced. **Not** cotdata's `status.json` — this line used to say `newest_data.prices` there, which is the retired domain ADR-0007 left behind. It is frozen at the cutover date, so it can never confirm anything about a bar run, and watching it shows a stall that is not happening (or hides one that is). See [Operations](../README.md#operations) in the README.
 
 ### Task Scheduler can't find `marketdata-update` / `cotdata-cot`
 

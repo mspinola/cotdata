@@ -240,12 +240,26 @@ cotdata-update --reconcile   # prune stale manifest entries (see below)
 `--check` reports per-domain row counts, newest data date, last write, and any entries lagging behind their peers (a partial-run signal):
 
 ```
-domain       entries         rows   newest data      last write (UTC)  behind
-prices            84      829,096    2026-07-14  2026-07-15T10:15:24Z      1d
-cot_legacy        44       70,201    2026-07-07  2026-07-14T04:26:55Z      8d
+domain             entries         rows   newest data      last write (UTC)  behind
+prices                  98      954,524    2026-08-07  2026-08-08T15:40:20Z     14d  ← RETIRED
+cot_legacy              53       81,821    2026-08-11  2026-08-21T12:10:42Z     10d
+cot_disagg              29       29,187    2026-08-11  2026-08-21T12:10:51Z     10d
 ...
-✓ all entries current (none lag behind their domain's newest).
+
+⚠ prices, metadata: RETIRED — this store still holds the files, but cotdata stopped writing
+                    them at ADR-0007. Their dates are frozen and will never advance again.
+  Daily bars and contract specs now live in the marketdata store ($MARKETDATA_STORE);
+  read them with `marketdata-update --check`.
+
+✓ every entry in the live domains was written by the latest producer pass.
 ```
+
+**A `RETIRED` domain is not a warning you can wave away.** ADR-0007 moved bars and contract
+specs to marketdata; a store created before that move still holds `prices/` and `metadata/`,
+and nothing advances them. They earn a label rather than silence because lag is measured
+*within* a domain — a uniformly frozen tree is perfectly self-consistent, so it scores
+`lagging: 0` and reads exactly like a domain that ran cleanly minutes ago. See
+[SYNCING.md](docs/SYNCING.md#retiring-the-moved-domains-prices-and-metadata) for removing them.
 
 ### `status.json` — new-data signal for downstream tools
 
@@ -255,14 +269,16 @@ Every producer run writes `$COTDATA_STORE/status.json` (atomically, beside the d
 {
   "generated_at": "2026-07-15T10:15:24Z",
   "schema_version": 2,
-  "newest_data": { "prices": "2026-07-14", "cot_legacy": "2026-07-07", "cot_disagg": "2026-07-07", "cot_tff": "2026-07-07", "cot_supplemental": "2026-07-07" },
-  "domains":     { "prices": { "newest_data": "2026-07-14", "last_write": "2026-07-15T10:15:24Z", "entries": 84, "rows": 829096, "lagging": 0 }, "...": {} },
-  "last_run":    { "kinds": ["prices"], "ok": ["ES", "..."], "symbols_failed": [], "rows": 1658000, "seconds": 88, "at": "2026-07-15T10:15:24Z" }
+  "newest_data": { "cot_legacy": "2026-08-11", "cot_disagg": "2026-08-11", "cot_tff": "2026-08-11", "cot_supplemental": "2026-08-11", "prices": "2026-08-07" },
+  "domains":     { "cot_legacy": { "newest_data": "2026-08-11", "last_write": "2026-08-21T12:10:42Z", "entries": 53, "rows": 81821, "lagging": 0, "retired": false },
+                   "prices":     { "newest_data": "2026-08-07", "last_write": "2026-08-08T15:40:20Z", "entries": 98, "rows": 954524, "lagging": 0, "retired": true  }, "...": {} },
+  "last_run":    { "kinds": ["cot_legacy", "cot_disagg"], "ok": ["001602", "..."], "symbols_failed": [], "rows": 111008, "seconds": 22, "at": "2026-08-21T12:10:58Z" }
 }
 ```
 
 **Polling contract:**
-- To detect **new data**, compare `newest_data.<domain>` (e.g. `newest_data.prices`, `newest_data.cot_legacy`) against your last-seen value. It advances **only when genuinely new daily data arrives** — a no-op run leaves it unchanged.
+- To detect **new data**, compare `newest_data.<domain>` (e.g. `newest_data.cot_legacy`) against your last-seen value. It advances **only when genuinely new daily data arrives** — a no-op run leaves it unchanged.
+- **Check `domains.<domain>.retired` first.** A retired domain's date is frozen, so a poller keyed on it waits forever and never errors — it just quietly reports data that stopped moving. This bullet used to give `newest_data.prices` as its example, and on 2026-08-21 a consumer following it read a two-week-old date from a store whose bars had moved to marketdata. **Bars are not in this store; poll `marketdata-update --check` instead.**
 - To detect that **a run happened at all** (new data or not), use `generated_at`.
 - `last_run` carries the most recent run's outcome (which domains, per-symbol failures) for alerting.
 

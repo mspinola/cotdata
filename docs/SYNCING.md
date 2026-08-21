@@ -224,6 +224,43 @@ disk usage and a directory listing both look right, and only a read notices. Bot
 transports match exclusions by **name at any depth**, so there is no `/manifests/` prefix
 to make the rule safe. Two stores, two passes, two lists.
 
+### Retiring the moved domains: `prices/` and `metadata/`
+
+ADR-0007 moved daily bars and contract specs to marketdata. On a store created before that
+move the old directories are still on disk, still full, and **still mirrored** — the pass-1
+exclusion list covers `_cache`, `_raw` and `citpy`, not these. So every sync faithfully
+carries a frozen tree to every replica, indefinitely.
+
+**Why that is worse than it sounds.** `cotdata-update --check` measures lag *within* a
+domain: each entry against its own domain's newest write. A tree where nothing has been
+written since the cutover is perfectly self-consistent, so it scores `lagging: 0` and sits
+in the report beside genuinely-current COT domains looking exactly as healthy. `status.json`
+carried the same claim to machine consumers through `newest_data.prices`.
+
+On 2026-08-21 that is precisely what happened: a consumer read `newest_data.prices`, got
+`2026-08-07` from a store whose bars had moved two weeks earlier, and had no signal it was
+reading an abandoned tree. The bar store was current the whole time and its replica was
+current too — nothing was broken except which directory the reader was pointed at.
+
+`--check` now labels both domains `RETIRED` and names the store the data moved to, so the
+report no longer implies health it cannot verify. The files themselves still need removing:
+
+1. **Repoint the consumers first.** Bars come from `$MARKETDATA_STORE` via
+   `marketdata-update --check`. Deleting before repointing turns a silently-wrong reader
+   into a hard-failing one, which is better but still an outage.
+2. **Delete on the producer, then let the mirror propagate.** `robocopy /MIR` and
+   `rsync --delete` both remove what the source no longer has, so one producer-side
+   deletion clears every replica on the next sync. Deleting on a replica instead
+   accomplishes nothing: the next sync restores it from the producer.
+3. **Do not add `prices` to the pass-1 `/XD` list as a substitute.** Excluded directories
+   are neither copied *nor deleted*, so an exclusion freezes the stale copy on every
+   replica permanently instead of clearing it — the opposite of what you want. Exclude it
+   only *after* the deletion has propagated, and only if you want belt and braces.
+
+`metadata/` is small enough that leaving it costs nothing; `prices/` is typically ~46 MB per
+replica. Neither is recoverable from cotdata once deleted, but both are fully reproducible
+from marketdata, which is where they now live.
+
 ### `vintage/` is irreplaceable, so where it is WRITTEN matters
 
 The vintage tree (`vintage/raw/`, `observations/`, `revisions/`, `snapshots.json`) records
