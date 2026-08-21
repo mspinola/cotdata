@@ -34,10 +34,27 @@ Create **two** wrapper scripts — they run *different* commands from *different
 
 ```bat
 @echo off
-set MARKETDATA_STORE=REPLACE_WITH_MARKETDATA_STORE_PATH
-"REPLACE_WITH_VENV_PATH\Scripts\marketdata-update.exe" --bars --domain futures --require-final
-"REPLACE_WITH_VENV_PATH\Scripts\marketdata-update.exe" --metadata
+setlocal
+set "MARKETDATA_STORE=REPLACE_WITH_MARKETDATA_STORE_PATH"
+set "MDEXE=REPLACE_WITH_VENV_PATH\Scripts\marketdata-update.exe"
+
+"%MDEXE%" --bars --domain futures --require-final
+if errorlevel 1 exit /b %ERRORLEVEL%
+
+"%MDEXE%" --metadata
+exit /b %ERRORLEVEL%
 ```
+
+> **Those two `exit /b` lines are load-bearing.** A `.cmd` exits with the code of its LAST
+> command, so running `--metadata` after `--bars` with no guard lets its exit 0 overwrite a
+> deferral's exit 1. Task Scheduler then records **success**, restart-on-failure never fires,
+> and the task waits until tomorrow having fetched nothing — the gate answering correctly and
+> the wrapper discarding the answer. Skipping `--metadata` on a defer also keeps each retry a
+> cheap gate check instead of a full contract-spec fetch against NDU.
+>
+> `if errorlevel 1` tests `>= 1` and needs no variable expansion, so it is safe. `|| exit /b
+> %ERRORLEVEL%` would **not** be: cmd expands `%ERRORLEVEL%` when it parses the line, before
+> the command on that line has run, so it returns the *previous* command's code.
 
 `run-cot.cmd` — COT (note the **different** command, `--cot-all`):
 
