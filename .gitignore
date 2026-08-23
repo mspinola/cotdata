@@ -27,3 +27,5 @@ dist/
 # local scheduler backups (same machine-specific paths as /scheduler/)
 /scheduler.bak*/
 /scheduler_backup*/
+# download cache of the offside-capitulation check
+scripts/occ_cache/
