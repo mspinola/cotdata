@@ -19,10 +19,14 @@ No claim is made that a reader of the Friday release could have acted; this
 is an event study on report-date-aligned data (the FFM test's §3.2 scope
 refusal is inherited).
 
-Data: CFTC Legacy futures-only annual zips (same URLs as
-src/cotdata/providers/cftc.py) and daily continuous-futures closes from
-stooq.com, sampled at each report date.  If no price source is reachable the
-script degrades to COT-only descriptives and says so; it never fabricates.
+Data, store first: on a machine with the real stores, COT comes from
+$COTDATA_STORE via the repo's own `cotdata.get_cot` (code stitching included)
+and daily closes from $MARKETDATA_STORE via `marketdata.get_bars` (propadj,
+falling back to backadj) — no network needed.  Where the stores are absent
+(cloud sessions), it falls back to downloading the CFTC Legacy annual zips
+(same URLs as src/cotdata/providers/cftc.py) and stooq.com continuous
+closes.  If no price source resolves the script degrades to COT-only
+descriptives and says so; it never fabricates.
 
 Usage:
   python offside_capitulation_check.py             # full run (needs network)
@@ -34,6 +38,7 @@ Deps: pandas numpy requests xlrd
 
 import argparse
 import io
+import os
 import sys
 import warnings
 import zipfile
@@ -46,16 +51,17 @@ warnings.filterwarnings("ignore")
 
 CACHE = Path(__file__).resolve().parent / "occ_cache"
 
-# Legacy futures-only market codes -> (name, stooq symbol candidates, tried in order)
+# Legacy futures-only market codes ->
+#   (name, stooq symbol candidates tried in order, pipeline symbol per registry.yaml)
 MARKETS = {
-    "088691": ("Gold", ["gc.f"]),
-    "084691": ("Silver", ["si.f"]),
-    "067651": ("Crude WTI", ["cl.f"]),
-    "023651": ("Nat gas", ["ng.f"]),
-    "002602": ("Corn", ["c.f", "zc.f"]),
-    "099741": ("EUR FX", ["6e.f", "eurusd"]),
-    "043602": ("10Y Note", ["zn.f", "ty.f"]),
-    "13874A": ("E-mini S&P", ["es.f", "sp.f", "^spx"]),
+    "088691": ("Gold", ["gc.f"], "GC"),
+    "084691": ("Silver", ["si.f"], "SI"),
+    "067651": ("Crude WTI", ["cl.f"], "CL"),
+    "023651": ("Nat gas", ["ng.f"], "NG"),
+    "002602": ("Corn", ["c.f", "zc.f"], "ZC"),
+    "099741": ("EUR FX", ["6e.f", "eurusd"], "6E"),
+    "043602": ("10Y Note", ["zn.f", "ty.f"], "ZN"),
+    "13874A": ("E-mini S&P", ["es.f", "sp.f", "^spx"], "ES"),
 }
 
 COLS = ["Market_and_Exchange_Names", "Report_Date_as_MM_DD_YYYY",
@@ -81,6 +87,70 @@ START_YEAR, END_YEAR = 1990, 2026
 
 
 # ---------------------------------------------------------------- data layer
+def load_cot_store():
+    """COT from $COTDATA_STORE via the repo's own consumer API. Returns the
+    same long frame as the download path, or None if the store is not set."""
+    if not os.environ.get("COTDATA_STORE", "").strip():
+        return None, []
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from cotdata.cot import get_cot
+    frames, log = [], []
+    for code, (name, _, sym) in MARKETS.items():
+        try:
+            df = get_cot(sym, report="legacy")
+            if df.empty:
+                raise ValueError("empty frame")
+        except Exception as e:  # noqa: BLE001
+            log.append(f"  {name}: store cot {sym} FAILED ({e!r})")
+            continue
+        sub = df.reset_index()
+        sub = sub.rename(columns={sub.columns[0]: "Report_Date_as_MM_DD_YYYY"})
+        sub["Report_Date_as_MM_DD_YYYY"] = pd.to_datetime(
+            sub["Report_Date_as_MM_DD_YYYY"])
+        sub = sub[sub["Report_Date_as_MM_DD_YYYY"] >= f"{START_YEAR}-01-01"]
+        sub["CFTC_Contract_Market_Code"] = code
+        sub["Market_and_Exchange_Names"] = name
+        frames.append(sub[COLS])
+        log.append(f"  {name}: store cot {sym}, {len(sub)} weeks "
+                   f"{sub['Report_Date_as_MM_DD_YYYY'].min().date()} .. "
+                   f"{sub['Report_Date_as_MM_DD_YYYY'].max().date()}")
+    if not frames:
+        return None, log
+    return pd.concat(frames, ignore_index=True), log
+
+
+def load_prices_marketdata():
+    """Daily closes from $MARKETDATA_STORE via marketdata.get_bars.
+    propadj first (correct for log returns), backadj as a logged fallback."""
+    if not os.environ.get("MARKETDATA_STORE", "").strip():
+        return None, []
+    try:
+        import marketdata
+    except ImportError:
+        return None, ["  MARKETDATA_STORE set but crucible-marketdata not "
+                      "installed; falling through"]
+    out, log = {}, []
+    for code, (name, _, sym) in MARKETS.items():
+        got = None
+        for adj in ("propadj", "backadj"):
+            try:
+                bars = marketdata.get_bars(sym, adj)
+                close_col = next(c for c in ("Close", "close") if c in bars.columns)
+                s = bars[close_col].astype(float).sort_index().dropna()
+                s = s[s > 0]           # log returns need positive prices
+                if len(s) < 500:
+                    raise ValueError(f"unusable series ({len(s)} rows)")
+                s.index = pd.to_datetime(s.index)
+                got = s
+                log.append(f"  {name}: marketdata {sym} {adj}, {len(s)} bars "
+                           f"{s.index[0].date()} .. {s.index[-1].date()}")
+                break
+            except Exception as e:  # noqa: BLE001
+                log.append(f"  {name}: marketdata {sym} {adj} FAILED ({e!r})")
+        out[code] = got
+    return out, log
+
+
 def cot_year_frame(year, requests):
     if year < 2004:
         url = f"https://www.cftc.gov/files/dea/history/deafut_xls_{year}.zip"
@@ -119,7 +189,7 @@ def load_cot(requests):
 def load_prices_stooq(requests):
     """Daily closes per market from stooq; returns dict code -> Series, and a log."""
     out, log = {}, []
-    for code, (name, syms) in MARKETS.items():
+    for code, (name, syms, _) in MARKETS.items():
         got = None
         for sym in syms:
             url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
@@ -285,7 +355,7 @@ def run(cot, prices, price_log):
     pooled.update({("short", g): [] for g in ("event", "off_nocap", "cap_nooff")})
     per_market_sign = []
 
-    for code, (name, _) in MARKETS.items():
+    for code, (name, *_rest) in MARKETS.items():
         cot_sub = cot[cot["CFTC_Contract_Market_Code"] == code]
         if cot_sub.empty:
             print(f"\n{name}: no COT rows, skipped")
@@ -393,7 +463,7 @@ def selftest():
                 "NonComm_Positions_Short_All": max(-net[t], 0) + 10000,
             })
     cot = pd.DataFrame(cot_rows)
-    MARKETS = {c: (f"SYN-{c}", []) for c in codes}
+    MARKETS = {c: (f"SYN-{c}", [], c) for c in codes}
     run(cot, prices, ["  synthetic data, selftest mode"])
     print("\nSELFTEST COMPLETE - pipeline ran end to end on synthetic data.")
 
@@ -408,22 +478,32 @@ def main():
         selftest()
         return
 
-    import requests
-    CACHE.mkdir(exist_ok=True)
-    cot = load_cot(requests)
+    cot, cot_log = load_cot_store()
     if cot is None:
-        print("FATAL: no COT data reachable. This environment cannot run the "
-              "evaluation; report the block rather than fabricating results.",
-              file=sys.stderr)
+        import requests
+        CACHE.mkdir(exist_ok=True)
+        cot = load_cot(requests)
+        cot_log = cot_log + ["  COT via cftc.gov download (no COTDATA_STORE)"]
+    if cot is None:
+        print("FATAL: no COT source. COTDATA_STORE is unset (or unreadable) "
+              "and cftc.gov is unreachable; report the block rather than "
+              "fabricating results.", file=sys.stderr)
         sys.exit(2)
+    print("COT source:")
+    for line in cot_log:
+        print(line)
 
     prices, price_log = (None, [])
     if not args.cot_only:
-        prices = load_prices_local()
-        if prices is not None:
-            price_log = ["  local occ_prices_daily.csv"]
-        else:
-            prices, price_log = load_prices_stooq(requests)
+        prices, price_log = load_prices_marketdata()
+        if prices is None:
+            prices = load_prices_local()
+            price_log = price_log + (
+                ["  local occ_prices_daily.csv"] if prices is not None else [])
+        if prices is None:
+            import requests
+            prices, stooq_log = load_prices_stooq(requests)
+            price_log = price_log + stooq_log
     run(cot, prices, price_log)
 
 

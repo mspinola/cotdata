@@ -125,14 +125,30 @@ publication lag deliberately).
 
 ## 5. Execution constraints, measured
 
-This session's sandbox **cannot run the evaluation**: the proxy answers 403 to
-CONNECT for `www.cftc.gov`, and `stooq.com`, `query1.finance.yahoo.com`,
-`fred.stlouisfed.org` and `publicreporting.cftc.gov` are all unreachable
-(probed 2026-08-23). This is the same block the NPF variance check hit, and
-the same remedy is used: execution handed to a trusted-network session via a
-one-shot trigger, per the CLAUDE.md precedent.
+> **Amended 2026-08-23, pre-execution, at the author's direction, before any
+> live number existed.** The first draft sourced data by download only. The
+> author pointed out the obvious: the data already lives in the stores this
+> repo produces. The script is now **store-first** — COT from
+> `$COTDATA_STORE` via `cotdata.get_cot` (code stitching included), daily
+> closes from `$MARKETDATA_STORE` via `marketdata.get_bars` (propadj, then
+> backadj, logged) — and downloads only where the stores are absent. §4 is
+> untouched; this changes where bytes come from, not what is computed. On a
+> store machine (the Mac, the Windows producer) the run needs no network at
+> all, and store prices are Norgate back-adjusted series, which retires the
+> stooq splicing caveat below for those runs.
 
-Price caveats the executor must carry into the results file:
+The git repo carries no data (the store is external and gitignored), so a
+cloud session holds only code. This session's sandbox additionally **cannot
+download**: the proxy answers 403 to CONNECT for `www.cftc.gov`, and
+`stooq.com`, `query1.finance.yahoo.com`, `fred.stlouisfed.org` and
+`publicreporting.cftc.gov` are all unreachable (probed 2026-08-23). That is
+the same block the NPF variance check hit, and the same remedy applies where
+no store is mounted: execution handed to a trusted-network session via a
+one-shot trigger, per the CLAUDE.md precedent. **A machine with the stores is
+the better executor.**
+
+Price caveats the executor must carry into the results file (download-path
+runs only; store-path runs replace them with the Norgate series' own terms):
 
 - stooq continuous futures are spliced, not back-adjusted; roll carry
   inflates adverse-move and forward-return magnitudes in high-carry markets
@@ -146,9 +162,12 @@ Price caveats the executor must carry into the results file:
 ## 6. Instructions to the executing session
 
 1. Check out this branch (`claude/offside-capitulation-evaluation-b55iv9`).
-2. `pip install pandas numpy requests xlrd`, then
-   `python scripts/offside_capitulation_check.py` (optionally `--selftest`
-   first; it must pass before a live run is attempted).
+2. `pip install pandas numpy requests xlrd` (plus `pyyaml python-dateutil`
+   and `crucible-marketdata` for the store path), then run
+   `python scripts/offside_capitulation_check.py` with `COTDATA_STORE` and
+   `MARKETDATA_STORE` exported if this machine has the stores (preferred —
+   no network needed); without them the script downloads. Run `--selftest`
+   first; it must pass before a live run is attempted.
 3. Commit the full stdout as `docs/analysis/2026-08-23-offside-capitulation-run.txt`
    and write `docs/analysis/2026-08-23-offside-capitulation-results.md`:
    the tables, the §4 pre-committed reading applied literally, per-market
