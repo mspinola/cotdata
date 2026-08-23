@@ -35,8 +35,8 @@ Deps: pandas numpy requests xlrd
 import argparse
 import io
 import sys
-import zipfile
 import warnings
+import zipfile
 from pathlib import Path
 
 import numpy as np
