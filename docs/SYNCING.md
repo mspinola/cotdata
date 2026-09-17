@@ -167,7 +167,7 @@ This is the part that matters, and on a real store it is most of the bytes.
 | `bars/` | **yes** | the data — `bars/<domain>/<source>/<symbol>_<tier>.parquet` |
 | `metadata/` | **yes** | contract specs |
 | `manifest.json` | **YES** | the bar store's ONLY index. Not the COT store's legacy file — carry it, and carry it LAST |
-| `_raw/` | **NO** | databento's append-only PAID raw store, producer-internal |
+| `_raw/` | **NO** | databento's append-only PAID raw store, and the TradingView routine's raw JSON (`_raw/tradingview/`), both producer-internal |
 | `_cache/`, `citpy/`, `vintage/` | n/a | the bar store has none of these |
 
 On one real store the `_cache/` and `_raw/` exclusions dropped the payload from 270 MB to
