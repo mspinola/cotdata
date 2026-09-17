@@ -6,6 +6,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Windows templates for the marketdata `series` domain**: `docs/examples/windows/run-series.cmd`
+  (the `--build-tradingview` wrapper, chained syncs, no in-file retry) and
+  `series-routine.md` (the instructions a Claude Code Desktop local routine on the producer
+  box runs, with its allow rules and the backfill). `WINDOWS_SCHEDULING.md` gains the
+  section; `SYNCING.md` notes that `_raw/tradingview/` rides under the existing `_raw`
+  exclusion. Docs only; the producer itself is in marketdata 0.3.0.
+
 ### Removed — BREAKING
 
 - **The databento provider is gone, and with it every remaining trace of price data.**

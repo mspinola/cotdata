@@ -94,6 +94,26 @@ before enabling it:
 - **Schedule it daily, not weekly.** Nearly every request returns 304, so a daily run costs
   almost nothing while catching holiday-shifted and backlog releases with no schedule logic.
 
+`run-series.cmd` — the **series** domain (marketdata 0.3.0: the FOMO share, new 52-week
+highs and lows, the Cboe put/call ratios, from TradingView). Copy
+[`docs/examples/windows/run-series.cmd`](examples/windows/run-series.cmd). **This one is not
+a Task Scheduler task.** TradingView has no data API; the series reach the box through a
+claude.ai connector, which only a Claude session can call, so the producer is a Claude Code
+Desktop **local routine** whose instructions are the template
+[`series-routine.md`](examples/windows/series-routine.md), also copied into `<DIR>` (fill its
+markers, then set the allow rules it lists in your code folder's `.claude\\settings.json`). The
+routine pulls each symbol through the connector, writes the results verbatim under
+`MARKETDATA_STORE\_raw\tradingview\`, and runs this wrapper, which is
+`marketdata-update --build-tradingview` (local files only, every guard in code, refuses
+stale or disagreeing input with nothing written) followed by the two replica syncs. Two
+routines a night, weekdays, about 18:30 and 19:45 ET: after the equities task and its
+retries, before the 20:55 futures window, because this wrapper and that task both end by
+mirroring the same two replicas. The second routine is the retry. The verifier cannot see a
+Desktop routine, so it checks the store instead (a freshness row on `series/tradingview/`)
+and says in its GUARD PROOFS list what it cannot check. Full design: marketdata
+`docs/design/breadth-domain-scoping.md` and cot-analyzer
+`docs/design/tradingview-breadth-scoping.md`.
+
 
 
 ## Creating the tasks
