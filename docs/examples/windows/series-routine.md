@@ -110,12 +110,35 @@ which. Next morning `verify-scheduling.ps1` reports the series freshness row gre
 
 ## Backfill, once, and not through the routine
 
-A first fill of history is not a `count=5000` pull through the routine: writing five thousand
-bars verbatim through the model is slow, expensive and, with no stored bars to overlap, has
-nothing to catch a slip. Use TradingView's own chart export instead: open each symbol on a 1D
-chart, Export chart data, CSV. That file is exact and needs no transcription. Convert it with
-marketdata's CSV import (`marketdata-update --tradingview-csv <file> --symbols <INTERNAL>`,
-which writes a raw file in the connector's shape so the same build and the same guards apply),
-then run `marketdata-update --build-tradingview --expect-session none` once, then let the
-evening routine take over. The registry anchors are checked on that build: for
-`NASDAQ_FOMO_5D` the 2026-07-29 close must read 48.05.
+A first fill of history is not a job for the routine: the routine writes what the model
+returns, and with no stored bars for the overlap guard to check against, nothing would catch
+a slip in a five-thousand-bar transcription. Two exact paths exist, and both feed the same
+build and the same guards. Done 2026-09-17 by the first.
+
+**Persisted tool results, from any Claude session.** A `get_ohlcv` call with `count` `5000`
+returns more than the harness's tool-result limit, so the harness saves the connector's
+response VERBATIM to a file under the session's `tool-results` directory before the model
+sees it. That file is the raw file: copy it, unchanged, to
+`REPLACE_WITH_MARKETDATA_STORE_PATH\_raw\tradingview\<INTERNAL>\<YYYY-MM-DD>-backfill.json`
+(over the share from a Mac, or locally on the box). No transcription and no export. Validate
+each file with the build's own parser before placing it if you can (`parse_raw` and
+`check_anchors` in `marketdata.providers.tradingview`); the build will refuse it anyway if
+not. The `count` cap is 5000 bars, which reaches 2006 on the older series and is the whole
+published history on the newer ones.
+
+**TradingView's chart export, when a session is not to hand.** Open each symbol on a 1D
+chart, scroll all the way back so the whole history has loaded (the export contains only
+loaded bars), then Export chart data, CSV. Convert it with
+`marketdata-update --tradingview-csv <file> --symbols <INTERNAL>`, one file per call, which
+writes a raw file in the connector's shape.
+
+Then, either way, one build with the gate off, since a backfill is a snapshot rather than
+tonight's pull:
+
+    marketdata-update --build-tradingview --expect-session none
+
+The registry anchors are checked on that build: for `NASDAQ_FOMO_5D` the 2026-07-29 close must
+read 48.05. Two vendor conventions the build handles on its own, seen on that first fill: a
+count of zero is printed as 0.01 and is stored as 0, and a put/call ratio bar with a zero
+close is a vendor hole, dropped and named in the output. Then let the evening routines take
+over; from the next night on they only ever add today's bar.
