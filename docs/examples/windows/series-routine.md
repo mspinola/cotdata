@@ -94,7 +94,7 @@ routine's to fix).
 ## The symbols
 
 For the reader, not the routine: the routine reads the registry (step 2), and this table is
-what the registry held on 2026-09-17. If it and the registry differ, the registry is right and
+what the registry held on the evening of 2026-09-17, fifteen series. If it and the registry differ, the registry is right and
 this table is out of date.
 
 | internal (folder name) | `symbol` for the call |
@@ -108,6 +108,10 @@ this table is out of date.
 | `NASDAQ_NL52W` | `INDEX:LOWQ` |
 | `NYSE_NH52W` | `INDEX:HIGN` |
 | `NYSE_NL52W` | `INDEX:LOWN` |
+| `NASDAQ_ADV` | `USI:ADVQ` |
+| `NASDAQ_DEC` | `USI:DECLQ` |
+| `NYSE_ADV` | `USI:ADV` |
+| `NYSE_DEC` | `USI:DECL` |
 | `CBOE_PCC` | `USI:PCC` |
 | `CBOE_PCCE` | `USI:PCCE` |
 
