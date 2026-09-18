@@ -40,7 +40,7 @@ while sessions have printed `mcp__<connector-id>__<tool>`; an unmatched rule is 
       "mcp__claude_ai_TradingView__mcp-tv-get-ohlcv",
       "Edit(marketdata_store/_raw/tradingview/**)",
       "Edit(/c/Users/you/code/marketdata_store/_raw/tradingview/**)",
-      "Bash(cmd /c \"C:/Users/you/code/cotdata/scheduler/run-series.cmd\")"
+      "Bash(cmd //c \"C:/Users/you/code/cotdata/scheduler/run-series.cmd\")"
     ]
   }
 }
@@ -66,8 +66,12 @@ Do these in order, and nothing else.
    exactly as the tool returned it: no reformatting, no summary, no added or dropped keys, no
    rounding. Create the folders if they do not exist. Do not print the result back.
 4. **Run the wrapper**, exactly this command and nothing else:
-   `cmd /c "REPLACE_WITH_SCHEDULER_DIR_FORWARD/run-series.cmd"`
-   (forward slashes; the allow rule matches this text).
+   `cmd //c "REPLACE_WITH_SCHEDULER_DIR_FORWARD/run-series.cmd"`
+   (forward slashes, and the DOUBLED slash before `c` is load-bearing: the Bash tool is
+   Git Bash, which rewrites a lone `/c` into a Windows path before cmd sees it, so
+   `cmd /c` arrives mangled and fails with a message like "'ode' is not recognized".
+   Measured on the first supervised run, 2026-09-17. The allow rule matches this exact
+   text.)
 5. **Report** the wrapper's exit code and the lines the build printed, one per symbol. Then
    stop.
 
