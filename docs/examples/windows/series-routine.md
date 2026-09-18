@@ -57,9 +57,21 @@ Do these in order, and nothing else.
 1. **Load the TradingView tool schema.** The connector's tools are deferred; one schema-load
    call for `get_ohlcv` (the tool named `mcp-tv-get-ohlcv`) is required before it can be
    called.
-2. **One bars call per symbol** in the table below: `symbol` as listed, `interval` `1D`,
-   `count` `10`. If a call fails, skip that symbol and continue; the build will refuse it by
-   name and the later routine will retry.
+2. **Read the symbol list from the registry**, never from memory and never from the table
+   at the bottom of this file. The registry is
+   `REPLACE_WITH_CODE_ROOT\marketdata\src\marketdata\registry.yaml`. Every symbol entry
+   in it that carries a `tradingview:` key is one to pull: the entry's own name (the mapping
+   key, such as `NASDAQ_FOMO_5D`) is the folder name in step 4, and the `tradingview:` value
+   (such as `INDEX:NCFD`) is the `symbol` for the call. Ignore every entry without that key.
+   Then make **one bars call per symbol** found: `interval` `1D`, `count` `10`. If a call
+   fails, skip that symbol and continue; the build will refuse it by name and the later
+   routine will retry.
+
+   Why the registry and not the table: the build refuses any registry series symbol that has
+   no raw files, as a missed pull, and a symbol added to the registry is pulled by nothing
+   else. A routine working from a stale table would fail every build from the night the
+   registry grew until someone edited the table. Reading the registry makes a registry change
+   the only step.
 3. **Write each tool result verbatim** to
    `REPLACE_WITH_MARKETDATA_STORE_PATH\_raw\tradingview\<INTERNAL>\<YYYY-MM-DD>.json`, where
    `YYYY-MM-DD` is today's date in US Eastern time. Verbatim means the complete JSON object
@@ -81,9 +93,9 @@ routine's to fix).
 
 ## The symbols
 
-From marketdata's `registry.yaml`, classes `Market Breadth` and `Options Sentiment`. The
-registry is the authority; if it and this table differ, the registry wins, and this table is
-due an edit.
+For the reader, not the routine: the routine reads the registry (step 2), and this table is
+what the registry held on 2026-09-17. If it and the registry differ, the registry is right and
+this table is out of date.
 
 | internal (folder name) | `symbol` for the call |
 |---|---|

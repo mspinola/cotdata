@@ -18,6 +18,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Bash tool is Git Bash, which rewrites a lone `/c` into a Windows path before cmd sees
   it. Found on the first supervised run, which wrote all eleven raw files correctly and
   then failed at the wrapper with `'ode' is not recognized`.
+- **`series-routine.md`'s routine reads the symbol list from marketdata's `registry.yaml`**
+  (every entry with a `tradingview:` key), not from the file's own table, which is now for
+  the reader only. The build refuses any registry series symbol with no raw files, so a
+  routine on a fixed table failed every build from the night the registry grew; now a
+  registry change is the only step. Found the day marketdata #33 added two series.
 - **`series-routine.md`'s backfill section records the path actually used**: a `count=5000`
   connector pull is persisted verbatim by the harness before the model sees it, so the file
   is copied into the raw directory with no transcription and no chart export. The CSV export
