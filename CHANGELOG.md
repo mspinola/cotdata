@@ -14,6 +14,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   box runs, with its allow rules and the backfill). `WINDOWS_SCHEDULING.md` gains the
   section; `SYNCING.md` notes that `_raw/tradingview/` rides under the existing `_raw`
   exclusion. Docs only; the producer itself is in marketdata 0.3.0.
+- **`series-routine.md` invokes the wrapper as `cmd //c`**, doubled slash: the routine's
+  Bash tool is Git Bash, which rewrites a lone `/c` into a Windows path before cmd sees
+  it. Found on the first supervised run, which wrote all eleven raw files correctly and
+  then failed at the wrapper with `'ode' is not recognized`.
 
 ### Removed — BREAKING
 
