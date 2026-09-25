@@ -22,9 +22,15 @@ REM Stage 2 is the one command below. marketdata-update --build-tradingview read
 REM ONLY those local files: it validates them (the connector's JSON shape, the
 REM registry range per kind, strictly increasing stamps, the registry anchors),
 REM refuses any bar that disagrees with a bar the store already holds (the store
-REM is never rewritten by a build), appends only what the store lacks, and
-REM refuses as STALE, exit 1 and nothing written, when the newest bar is older
-REM than the latest weekday whose 16:30 ET close has passed.
+REM is never rewritten by a build), appends only what the store lacks, and gates
+REM the newest bar on BOTH sides of the expected session, which is the latest
+REM weekday whose 16:30 ET close has passed. Older is refused as STALE and the
+REM later routine is the retry. Newer is refused as UNSETTLED: fired before the
+REM close, the connector serves the day in progress, and on the put/call ratios it
+REM serves it a bar ahead of the breadth counts. That Close still moves, and since
+REM a stored bar is never rewritten, storing it once would refuse every later
+REM build of the same session until someone cleaned the store by hand. Neither
+REM side writes anything.
 REM
 REM WHY THERE IS NO RETRY LOOP IN HERE
 REM ------------------------------------------------------------------------
