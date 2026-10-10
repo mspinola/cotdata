@@ -52,16 +52,29 @@ Energies:
     cftc_code: "067411"
 
 Grains:
+  # The five CBOT/KCBT grains below re-coded at the 1997/1998 year boundary. The old
+  # codes are the same contracts reported in THOUSANDS OF BUSHELS rather than contracts
+  # (5,000 bu each): every position column in the old files is divisible by 5 on 99.3 to
+  # 100% of rows, none are after the switch, open interest drops 5x at the seam and the
+  # trader counts do not move. Scale 0.2 converts to contracts. No overlap week: the old
+  # code ends 1997-12-30, the new one starts 1998-01-06. Measured 2026-10-10 against the
+  # CFTC deacot1986_2016 bundle; see CHANGELOG.
   ZC:
     cftc_code: "002602"
+    hist_codes:
+      - ["002601", 0.2]
   ZS:
     cftc_code: "005602"
+    hist_codes:
+      - ["005601", 0.2]
   ZM:
     cftc_code: "026603"
   ZL:
     cftc_code: "007601"
   ZW:
     cftc_code: "001602"
+    hist_codes:
+      - ["001601", 0.2]
   # Added 2026-08-04 for crowdmon's contract-spec backlog: the smallest market of the ten
   # candidates and the strongest on the criterion that decides, Managed Money share 0.433
   # against a covered median of 0.137 (crowdmon docs/design/amendments-2026-08-03.md §C17,
@@ -71,8 +84,12 @@ Grains:
   # Held-out generalization grains (new symbols, never in the deploy selection).
   ZO:                       # Oats (CBOT)
     cftc_code: "004603"
+    hist_codes:
+      - ["004601", 0.2]
   KE:                       # KC HRW Wheat (Kansas City, CME)
     cftc_code: "001612"
+    hist_codes:
+      - ["001611", 0.2]
 
 # Dairy — a genuinely new asset class for the held-out generalization test: real
 # commercial hedgers, never touched CMR selection. Collected here; cot-analyzer

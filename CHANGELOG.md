@@ -6,6 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Twelve more years of grain positioning: ZC, ZS, ZW, ZO and KE now stitch their
+  pre-1998 codes.** The five CBOT/KCBT grains re-coded at the 1997/1998 year boundary
+  (`002601` to `002602`, `005601` to `005602`, `001601` to `001602`, `004601` to `004603`,
+  `001611` to `001612`), and the registry only carried the new codes, so the store's grain
+  history began 1998-01-06 although the CFTC publishes it from 1986-01-15. The old codes are
+  the same contracts reported in **thousands of bushels** rather than contracts: every
+  position column is divisible by 5 on 99.3 to 100% of pre-1998 rows and on none after,
+  open interest drops 5.0 to 5.7x at the seam (oats 3.8x, a real move), and the trader
+  counts do not move (corn 366 to 345, wheat 164 to 169). Each predecessor carries scale
+  `0.2`, the first use of a scale below 1 (lumber's 4.0 is the other). No overlap week.
+  The producer writes the five new per-code files on its next `--cot` run; until then
+  `get_cot` returns the post-1998 series exactly as before.
+
 ### Changed
 
 - **`get_cot` overlap weeks go to the larger scaled open interest, not the primary code.**

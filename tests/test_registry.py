@@ -181,3 +181,12 @@ def test_golden_identity_checksum():
     # symbols.
     assert digest == "3dd3df8eb26d850654107e16568cddb6", (
         "registry identity facts changed; update the expected checksum if intended")
+
+
+# ── the 1998 grain re-code: five predecessors at scale 0.2 (thousand bushels → contracts) ─
+def test_grain_predecessors_scaled_to_contracts():
+    expected = {"ZC": "002601", "ZS": "005601", "ZW": "001601", "ZO": "004601", "KE": "001611"}
+    for sym, old in expected.items():
+        assert hist_code_scales(symbol(sym).hist_codes) == [(old, 0.2)], sym
+    for sym in ("ZM", "ZL", "ZR"):         # single-code since 1986, nothing to stitch
+        assert symbol(sym).hist_codes == (), sym
