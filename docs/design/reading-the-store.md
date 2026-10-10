@@ -80,6 +80,18 @@ contracts standing in for ICE's 545k to 567k. The retiring venue's last weeks ar
 (its remaining holders are whoever has not migrated yet), so a window that straddles a
 hand-off is measuring two populations whichever rule picks the row.
 
+**Cause one, other shape: a parallel listing, where a sibling code holds most of the
+market.** The equity index futures each traded a full-size contract beside the mini for
+years (S&P 500 `138741` to 2021-09, Nasdaq-100 `209741` to 2015, DJIA `124601` to 2014,
+MidCap `338741` to 2008), and in notional terms the big contract held 99% of S&P 500 open
+interest in 1997 to 1999 and still 54% in 2008. These are not complementary like the Russell
+codes, they are concurrent, so `get_cot` ADDS them (`sum_codes` in the registry, scaled into
+mini units) rather than picking one. Two things the sum cannot recover: non-commercial
+spreading, which the CFTC computes per trader across both listings, and weeks a listing fell
+under the 20-trader publication threshold, which are absent from the file but present in the
+CFTC's own Consolidated row (`13874+` etc., 2010-06 on). Against that row, open interest and
+the commercial columns agree to rounding on 99.8% of NQ and YM weeks and 93% of ES weeks.
+
 **Cause two: a thin market falling out of the report.** Oats (`004603`) has a **294-day
 interval ending 2025-09-09** and five more over 50 days. A market below the reporting
 threshold disappears and returns when it recovers. No sibling fills these, because nothing is

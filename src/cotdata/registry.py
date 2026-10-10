@@ -50,6 +50,15 @@ class Symbol:
     # entry is a bare code string (scale 1.0) or a (code, scale) tuple. Kept as a
     # tuple of hashable entries so Symbol (frozen) stays hashable.
     hist_codes: tuple = ()
+    # PARALLEL listings of the SAME index that traded alongside cftc_code (the
+    # full-size S&P 500 beside the E-mini, 1997 to 2021), ADDED to it week by week
+    # by get_cot in cftc_code's contract units. Each entry is (code, scale) or
+    # (code, scale, from_date): the scale converts one listed contract into
+    # cftc_code contracts, and a dated entry takes over from that report date (the
+    # big S&P halved from $500 to $250 x index on 1997-11-04, so it is 10 E-minis
+    # before and 5 after). Where hist_codes picks one row per week, sum_codes adds
+    # rows, and weeks only the listing reports extend the series on their own.
+    sum_codes: tuple = ()
 
 
 def hist_code_scales(hist_codes) -> List[tuple]:
@@ -58,6 +67,31 @@ def hist_code_scales(hist_codes) -> List[tuple]:
     for h in hist_codes:
         out.append((h[0], float(h[1])) if isinstance(h, (list, tuple)) else (h, 1.0))
     return out
+
+
+def sum_code_scales(sum_codes) -> List[tuple]:
+    """Normalize sum_codes entries → list of (code, scale, from_date-or-None).
+
+    Entries are (code, scale) or (code, scale, "YYYY-MM-DD"). A bare code string is
+    accepted at scale 1.0 for symmetry with hist_codes.
+    """
+    out = []
+    for e in sum_codes:
+        if isinstance(e, (list, tuple)):
+            code, scale = e[0], float(e[1])
+            start = str(e[2]) if len(e) > 2 and e[2] is not None else None
+        else:
+            code, scale, start = e, 1.0, None
+        out.append((code, scale, start))
+    return out
+
+
+def codes_for(sym: "Symbol") -> List[str]:
+    """Every CFTC code a producer must fetch for `sym`: primary, predecessors, listings."""
+    codes = [sym.cftc_code] if sym.cftc_code else []
+    codes += [hc for hc, _ in hist_code_scales(sym.hist_codes)]
+    codes += [sc for sc, _, _ in sum_code_scales(sym.sum_codes)]
+    return list(dict.fromkeys(codes))     # dedupe (a listing may carry several dated scales)
 
 
 def _coerce_hist_codes(raw) -> tuple:
@@ -120,6 +154,7 @@ def load_registry(yaml_path=None) -> Dict[str, Symbol]:
                 report_type=attrs.get("report_type", "tff" if asset_class in ("Equities", "FX", "Rates") else "disagg"),
                 cftc_code=attrs["cftc_code"],
                 hist_codes=_coerce_hist_codes(attrs.get("hist_codes")),
+                sum_codes=_coerce_hist_codes(attrs.get("sum_codes")),
             )
     return registry
 

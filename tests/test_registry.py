@@ -43,7 +43,7 @@ def test_the_registry_carries_no_vendor_mappings():
 
     fields = {f.name for f in dataclasses.fields(symbol("ES"))}
     assert fields == {"internal", "asset_class", "is_equity", "report_type",
-                      "cftc_code", "hist_codes"}
+                      "cftc_code", "hist_codes", "sum_codes"}
     for gone in ("PRICE_SOURCES", "resolve_source", "default_price_source", "_can_serve"):
         assert not hasattr(reg, gone), gone
 
