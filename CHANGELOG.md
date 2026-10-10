@@ -6,6 +6,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`get_cot` overlap weeks go to the larger scaled open interest, not the primary code.**
+  Where a predecessor `hist_codes` entry and the primary both report the same week (a
+  hand-off between listings), the row kept is the one with the larger `Open_Interest_All`
+  after the predecessor's scale is applied. Primary still wins ties, and a frame with no
+  OI column keeps the old primary-wins behaviour exactly. Measured reason: at the 2017
+  Russell 2000 hand-off from ICE (`23977A`) back to CME (`239742`), CME's first four weeks
+  (2017-08-15 to 2017-09-05) reported 13k to 37k contracts against ICE's 545k to 567k,
+  and primary-wins printed that slice as the market, including a +22% commercial net on
+  2017-08-15 that the 567k pool did not show. `RTY` now switches to CME on 2017-09-12
+  (the week CME's OI reached 810k); `LBR` now stays on the random-length contract until
+  it stops reporting on 2023-04-18 instead of switching on 2023-02-21 at 1,029 contracts.
+  **Consumers re-reading RTY or LBR see those weeks change**; no other symbol has
+  `hist_codes`. Tests: `tests/test_cot_stitch.py`.
+
 ### Added
 
 - **Windows templates for the marketdata `series` domain**: `docs/examples/windows/run-series.cmd`

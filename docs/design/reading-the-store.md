@@ -73,6 +73,13 @@ venue against a much shorter reference series than its peers.
 Lumber is the clean contrast: `058643` hands off to `058644` in 2023 with a two-month overlap
 and no holes on either side.
 
+On the overlap weeks themselves, `get_cot` keeps the code with the larger open interest after
+the predecessor's scale is applied, primary on ties. It used to keep the primary code
+unconditionally, and at the 2017 Russell hand-off that meant four weeks of CME's 13k to 37k
+contracts standing in for ICE's 545k to 567k. The retiring venue's last weeks are still noisy
+(its remaining holders are whoever has not migrated yet), so a window that straddles a
+hand-off is measuring two populations whichever rule picks the row.
+
 **Cause two: a thin market falling out of the report.** Oats (`004603`) has a **294-day
 interval ending 2025-09-09** and five more over 50 days. A market below the reporting
 threshold disappears and returns when it recovers. No sibling fills these, because nothing is
