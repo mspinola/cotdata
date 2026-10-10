@@ -6,6 +6,7 @@ import pytest
 from cotdata.registry import (
     all_symbols,
     by_asset_class,
+    codes_for,
     hist_code_scales,
     load_registry,
     symbol,
@@ -190,3 +191,16 @@ def test_grain_predecessors_scaled_to_contracts():
         assert hist_code_scales(symbol(sym).hist_codes) == [(old, 0.2)], sym
     for sym in ("ZM", "ZL", "ZR"):         # single-code since 1986, nothing to stitch
         assert symbol(sym).hist_codes == (), sym
+
+
+# ── equity index listings added to the mini: full-size contracts and micros ─────
+def test_equity_sum_codes():
+    from cotdata.registry import sum_code_scales
+    assert sum_code_scales(symbol("ES").sum_codes) == [
+        ("138741", 10.0, None), ("138741", 5.0, "1997-11-04"), ("13874U", 0.1, None)]
+    assert sum_code_scales(symbol("NQ").sum_codes) == [("209741", 5.0, None), ("209747", 0.1, None)]
+    assert sum_code_scales(symbol("YM").sum_codes) == [("124601", 2.0, None), ("124608", 0.1, None)]
+    assert sum_code_scales(symbol("RTY").sum_codes) == [("239747", 0.1, None)]
+    assert sum_code_scales(symbol("EMD").sum_codes) == [("338741", 5.0, None)]
+    assert codes_for(symbol("ES")) == ["13874A", "138741", "13874U"]       # deduped
+    assert codes_for(symbol("RTY")) == ["239742", "23977A", "239747"]      # hist + sum
