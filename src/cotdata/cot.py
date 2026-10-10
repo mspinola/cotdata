@@ -65,8 +65,8 @@ def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
             h[_CODE_COL] = sym.cftc_code
         frames.append(h)
     frames = [f for f in frames if not f.empty]
-    if not frames:
-        return primary
+    if len(frames) < 2:                   # nothing to stitch (predecessor files absent,
+        return primary                    # e.g. before the producer's next run): primary as-is
     combined = pd.concat(frames)
     # Overlap weeks (a hand-off between codes) keep the row with the larger SCALED
     # open interest, not the primary code. At the 2017 Russell hand-off the primary
