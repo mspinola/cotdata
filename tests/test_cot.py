@@ -51,18 +51,20 @@ def test_lookup_by_primary_cftc_code_resolves_symbol():
     m.assert_called_once_with(f"ES_{REGISTRY['ES'].cftc_code}")
 
 
-def test_hist_code_stitching_scales_and_dedups_keeping_primary():
+def test_hist_code_stitching_scales_and_dedups_by_larger_oi():
     """LBR splices predecessor 058643 (scale 4.0) behind primary 058644:
       - predecessor numeric columns are scaled by 4.0 (a contract-size bridge),
       - predecessor rows are re-stamped with the primary code,
-      - overlapping dates keep the PRIMARY row (concat primary-first, dedup first),
+      - overlapping dates keep the row with the larger SCALED open interest,
+        whichever code it came from (tests/test_cot_stitch.py covers ties and
+        the no-OI fallback),
       - the result is sorted ascending."""
     lbr = REGISTRY["LBR"]
     primary_key = f"LBR_{lbr.cftc_code}"            # LBR_058644
     hist_key = "LBR_058643"
 
-    primary = _df(["2020-01-08", "2020-01-15"], [100, 200], lbr.cftc_code)
-    hist = _df(["2020-01-01", "2020-01-08"], [10, 999], "058643")   # overlaps 01-08
+    primary = _df(["2020-01-08", "2020-01-15", "2020-01-22"], [100, 200, 300], lbr.cftc_code)
+    hist = _df(["2020-01-01", "2020-01-08", "2020-01-15"], [10, 999, 20], "058643")
 
     def reader(key):
         return {primary_key: primary, hist_key: hist}.get(key, pd.DataFrame())
@@ -70,7 +72,10 @@ def test_hist_code_stitching_scales_and_dedups_keeping_primary():
     with mock.patch("cotdata.cot.store.read_cot_legacy", side_effect=reader):
         out = cot.get_cot("LBR")
 
-    assert list(out.index) == list(pd.DatetimeIndex(["2020-01-01", "2020-01-08", "2020-01-15"]))
+    assert list(out.index) == list(pd.DatetimeIndex(
+        ["2020-01-01", "2020-01-08", "2020-01-15", "2020-01-22"]))
     assert out.loc["2020-01-01", "Open_Interest_All"] == 40      # 10 * 4.0 (scaled predecessor)
-    assert out.loc["2020-01-08", "Open_Interest_All"] == 100     # primary wins the overlap (not 999*4)
+    assert out.loc["2020-01-08", "Open_Interest_All"] == 3996    # 999*4 > 100: predecessor wins
+    assert out.loc["2020-01-15", "Open_Interest_All"] == 200     # 200 > 20*4: primary wins
+    assert out.loc["2020-01-22", "Open_Interest_All"] == 300
     assert (out[_CODE_COL] == lbr.cftc_code).all()               # predecessor re-stamped to primary code

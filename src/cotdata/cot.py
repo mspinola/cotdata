@@ -10,6 +10,7 @@ from . import store
 from .registry import REGISTRY, hist_code_scales
 
 _CODE_COL = "CFTC_Contract_Market_Code"   # Legacy schema contract-code column
+_OI_COL = "Open_Interest_All"             # present in all four report schemas
 
 
 def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
@@ -51,7 +52,7 @@ def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
     primary = read_fn(f"{sym.internal}_{sym.cftc_code}")
     if not sym.hist_codes:
         return primary
-    frames = [primary]                    # primary first → wins de-duplication on overlaps
+    frames = [primary]                    # primary first → wins ties on overlap weeks
     for hc, scale in hist_code_scales(sym.hist_codes):
         h = read_fn(f"{sym.internal}_{hc}")
         if h.empty:
@@ -67,5 +68,14 @@ def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
     if not frames:
         return primary
     combined = pd.concat(frames)
+    # Overlap weeks (a hand-off between codes) keep the row with the larger SCALED
+    # open interest, not the primary code. At the 2017 Russell hand-off the primary
+    # (CME) reported 13k contracts against ICE's 567k for four weeks, and "primary
+    # wins" printed that 2% slice of the market as the market. A stable sort keeps
+    # concat order (primary first) as the tie-break, and frames without an OI column
+    # degrade to exactly the old primary-wins behaviour.
+    if _OI_COL in combined.columns:
+        combined = combined.sort_values(_OI_COL, ascending=False, kind="stable",
+                                        na_position="last")
     combined = combined[~combined.index.duplicated(keep="first")].sort_index()
     return combined
