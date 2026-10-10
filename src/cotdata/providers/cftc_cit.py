@@ -33,7 +33,7 @@ import pandas as pd
 import requests
 
 from .. import config, store
-from ..registry import all_symbols, hist_code_scales
+from ..registry import all_symbols, codes_for
 
 URL_PREFIX = "https://www.cftc.gov/files/dea/history/dea_cit_txt_"
 FIRST_YEAR = 2006  # Supplemental history start (January 2006)
@@ -143,10 +143,8 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> dict:
     """
     code_to_sym = {}
     for s in all_symbols():
-        if s.cftc_code:
-            code_to_sym[s.cftc_code] = s.internal
-        for hc, _ in hist_code_scales(s.hist_codes):
-            code_to_sym[hc] = s.internal
+        for c in codes_for(s):            # primary + hist_codes + sum_codes
+            code_to_sym[c] = s.internal
 
     last_year = last_year or dt.date.today().year
     want = set(codes) if codes else set(code_to_sym.keys())

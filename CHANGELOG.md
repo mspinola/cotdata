@@ -8,6 +8,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`sum_codes`: parallel listings of the same index, added to the primary week by week.
+  ES, NQ, YM and EMD now include their full-size contracts.** Each traded a big contract
+  beside the mini for years (S&P 500 `138741` 1986 to 2021-09, Nasdaq-100 `209741` 1996 to
+  2015, DJIA `124601` 1997 to 2014, MidCap `338741` 1992 to 2008) and the registry read only
+  the mini. In notional terms the big contract held 99% of S&P 500 open interest in 1997 to
+  1999, 82% in 2004 and 54% in 2008 (NQ 97% in 1999, YM 84% in 2002), so the stored
+  positioning before roughly 2008 was a minority, retail-skewed slice of each market.
+  `get_cot` now scales each listing into the primary's contract units (ES 5, and 10 before
+  the 1997-11-04 report when the big contract was $500 x index; NQ 5; YM 2; EMD 5), sums
+  open interest and every `*_Positions_*` column, takes the max of `Traders_*` across
+  listings (a lower bound on distinct traders), recomputes `Pct_of_OI_*` and `Change_in_*`
+  from the sums as floats, and keeps the concentration ratios and text metadata from the
+  primary. Weeks only the big contract reports extend the series: ES now starts 1986-01-15
+  (was 1997-09-16), NQ 1996-04-16 (was 1999-06-22), YM 1997-10-07 (was 2002-05-21).
+  Verified against the CFTC's own Consolidated rows (`13874+`, `20974+`, `12460+`, which are
+  big + mini/5 in big units from 2010-06 to 2021-09): open interest and both commercial
+  columns agree to rounding on 99.8% of weeks for NQ and YM and 93% for ES, the remainder
+  being weeks the dying big contract fell under the CFTC's 20-trader publication threshold
+  (absent from the file, still inside Consolidated; up to 6% of ES OI in mid-2021).
+  Non-commercial long and short do NOT reconcile to Consolidated, because the CFTC computes
+  spreading per trader across both listings and a sum of per-listing rows cannot. Micro
+  contracts are not included. The producers fetch the four new per-code files on their next
+  run; until then the four symbols read exactly as before. Registry comments carry the
+  evidence; tests in `tests/test_cot_sum.py`.
+- **`registry.codes_for(sym)`**: every code a producer must fetch for a symbol (primary,
+  `hist_codes`, `sum_codes`). All four producers use it.
+
+### Fixed
+
+- **The `hist_codes` scale no longer multiplies trader counts.** It applied to every
+  numeric column, so legacy `Traders_*` (numeric in that schema) were scaled by lumber's
+  4.0 and, since the previous entry, the grains' 0.2: corn showed 72 reportable traders on
+  1997-12-30 against 349 a week later. The scale now applies to `Open_Interest_All`,
+  `*_Positions_*` and numeric `Change_in_*` only.
+
 - **Twelve more years of grain positioning: ZC, ZS, ZW, ZO and KE now stitch their
   pre-1998 codes.** The five CBOT/KCBT grains re-coded at the 1997/1998 year boundary
   (`002601` to `002602`, `005601` to `005602`, `001601` to `001602`, `004601` to `004603`,

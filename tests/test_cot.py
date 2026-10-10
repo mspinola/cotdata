@@ -25,12 +25,12 @@ def test_unknown_report_raises():
 
 
 def test_simple_symbol_returns_primary_by_symbol_code_key():
-    """A symbol with no hist_codes (ES) reads exactly `<internal>_<cftc_code>` from
-    the requested report and returns it unchanged."""
-    primary = _df(["2020-01-01"], [10], REGISTRY["ES"].cftc_code)
+    """A symbol with no hist_codes or sum_codes (GC) reads exactly `<internal>_<cftc_code>`
+    from the requested report and returns it unchanged."""
+    primary = _df(["2020-01-01"], [10], REGISTRY["GC"].cftc_code)
     with mock.patch("cotdata.cot.store.read_cot_legacy", return_value=primary) as m:
-        out = cot.get_cot("ES")
-    m.assert_called_once_with(f"ES_{REGISTRY['ES'].cftc_code}")
+        out = cot.get_cot("GC")
+    m.assert_called_once_with(f"GC_{REGISTRY['GC'].cftc_code}")
     pd.testing.assert_frame_equal(out, primary)
 
 
@@ -45,10 +45,10 @@ def test_report_dispatch_uses_matching_store_reader():
 def test_lookup_by_primary_cftc_code_resolves_symbol():
     """Passing the CFTC code instead of the internal symbol resolves to the symbol
     and reads the same `<internal>_<code>` key."""
-    primary = _df(["2020-01-01"], [10], REGISTRY["ES"].cftc_code)
+    primary = _df(["2020-01-01"], [10], REGISTRY["GC"].cftc_code)
     with mock.patch("cotdata.cot.store.read_cot_legacy", return_value=primary) as m:
-        cot.get_cot(REGISTRY["ES"].cftc_code)          # "13874A"
-    m.assert_called_once_with(f"ES_{REGISTRY['ES'].cftc_code}")
+        cot.get_cot(REGISTRY["GC"].cftc_code)          # "088691"
+    m.assert_called_once_with(f"GC_{REGISTRY['GC'].cftc_code}")
 
 
 def test_hist_code_stitching_scales_and_dedups_by_larger_oi():

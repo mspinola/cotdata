@@ -1,10 +1,30 @@
 Equities:
+  # The four index futures below traded a full-size contract beside the mini for years,
+  # and the registry read only the mini. In notional terms the big contract held 99% of
+  # S&P 500 open interest in 1997 to 1999, 82% in 2004 and 54% in 2008 (NQ 97% in 1999,
+  # YM 84% in 2002), so the stored mini-only positioning before roughly 2008 was a minority
+  # slice of each market, and the earlier the week the smaller and more retail-skewed the
+  # slice. sum_codes ADDS the big contract week by week in mini units (and extends the
+  # series back to the big contract's own start where the mini did not exist yet).
+  # Scales are multiplier ratios: ES $250 / $50 = 5 (and $500 / $50 = 10 before the
+  # 1997-11-04 report, the first after CME halved the contract; OI doubles that week,
+  # 206k to 402k), NQ $100 / $20 = 5, YM $10 / $5 = 2, EMD $500 / $100 = 5. Verified
+  # against the CFTC's own Consolidated rows (13874+, 20974+, 12460+), which are
+  # big + mini/5 in big units from 2010-06 to 2021-09. Micro contracts are NOT included.
+  # Measured 2026-10-10 against the CFTC deacot1986_2016 bundle plus annual files.
   ES:
     cftc_code: "13874A"
+    sum_codes:
+      - ["138741", 10.0]                 # S&P 500 full-size, $500 x index
+      - ["138741", 5.0, "1997-11-04"]    # $250 x index from this report on
   NQ:
     cftc_code: "209742"
+    sum_codes:
+      - ["209741", 5.0]                  # Nasdaq-100 full-size, $100 x index, to 2015
   YM:
     cftc_code: "124603"
+    sum_codes:
+      - ["124601", 2.0]                  # DJIA $10 x index, to 2014
   RTY:
     cftc_code: "239742"
     hist_codes:
@@ -13,6 +33,8 @@ Equities:
   # so the strategy can be scored on them; cot-analyzer flags them role: heldout.
   EMD:                      # E-mini S&P MidCap 400 (CME)
     cftc_code: "33874A"
+    sum_codes:
+      - ["338741", 5.0]                  # S&P MidCap 400 full-size, $500 x index, to 2008
   NKD:                      # Nikkei 225 ($-denominated, CME)
     cftc_code: "240741"
   # MSCI international indices — the liquid out-of-selection held-out markets. COT is
