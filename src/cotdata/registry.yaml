@@ -10,25 +10,36 @@ Equities:
   # 1997-11-04 report, the first after CME halved the contract; OI doubles that week,
   # 206k to 402k), NQ $100 / $20 = 5, YM $10 / $5 = 2, EMD $500 / $100 = 5. Verified
   # against the CFTC's own Consolidated rows (13874+, 20974+, 12460+), which are
-  # big + mini/5 in big units from 2010-06 to 2021-09. Micro contracts are NOT included.
+  # big + mini/5 in big units from 2010-06 to 2021-09, then (mini + micro/10) still in big
+  # units until 2023-04-25, then mini + micro/10 in mini units from 2023-05-02; against
+  # that last stretch the sum here matches within 5 contracts on 100% of ES and NQ weeks
+  # and 99.4% of YM. Micros (scale 0.1) are included for the same reason: one definition of "the
+  # whole market" across the series. They are 1% (ES, RTY) to 6% (NQ) of notional OI and
+  # retail-heavy (non-reportable 40 to 44% of gross against 6 to 15% in the minis), and
+  # move the commercial net by 0.1 to 0.6 points of OI on average, at most 3.
   # Measured 2026-10-10 against the CFTC deacot1986_2016 bundle plus annual files.
   ES:
     cftc_code: "13874A"
     sum_codes:
       - ["138741", 10.0]                 # S&P 500 full-size, $500 x index
       - ["138741", 5.0, "1997-11-04"]    # $250 x index from this report on
+      - ["13874U", 0.1]                  # Micro E-mini S&P 500, $5 x index, from 2020-07
   NQ:
     cftc_code: "209742"
     sum_codes:
       - ["209741", 5.0]                  # Nasdaq-100 full-size, $100 x index, to 2015
+      - ["209747", 0.1]                  # Micro E-mini Nasdaq-100, $2 x index, from 2020-08
   YM:
     cftc_code: "124603"
     sum_codes:
       - ["124601", 2.0]                  # DJIA $10 x index, to 2014
+      - ["124608", 0.1]                  # Micro E-mini Dow, $0.50 x index, from 2022-07
   RTY:
     cftc_code: "239742"
     hist_codes:
       - "23977A"
+    sum_codes:
+      - ["239747", 0.1]                  # Micro E-mini Russell 2000, $5 x index, from 2021-11
   # Held-out generalization markets (never in the deploy selection) — collected here
   # so the strategy can be scored on them; cot-analyzer flags them role: heldout.
   EMD:                      # E-mini S&P MidCap 400 (CME)

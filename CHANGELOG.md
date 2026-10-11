@@ -8,6 +8,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The micro equity contracts join the sum: ES, NQ, YM and RTY add `13874U`, `209747`,
+  `124608`, `239747` at scale 0.1.** Same reason as the full-size contracts below: one
+  definition of "the whole market" across the series, and the CFTC's own Consolidated row
+  has been mini + micro/10 since the big contracts delisted. They are small, 1% of notional
+  open interest for ES and RTY and 6% for NQ in 2026, and retail-heavy (non-reportable 40
+  to 44% of gross against 6 to 15% in the minis), so the bucket they visibly change is
+  non-reportable; the commercial net moves by 0.1 to 0.6 points of OI on average, at most
+  3 (NQ). Unconditional rather than gated on a share or a date: the ES and RTY micros sit
+  at about 32 reportable traders, just above the CFTC's 20-trader publication floor, and
+  a gate would add a second on/off on top of the weeks the CFTC already drops. RTY is the
+  first symbol carrying both `hist_codes` and `sum_codes`.
+
 - **`sum_codes`: parallel listings of the same index, added to the primary week by week.
   ES, NQ, YM and EMD now include their full-size contracts.** Each traded a big contract
   beside the mini for years (S&P 500 `138741` 1986 to 2021-09, Nasdaq-100 `209741` 1996 to
