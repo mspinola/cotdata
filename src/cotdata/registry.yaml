@@ -48,6 +48,10 @@ Equities:
       - ["338741", 5.0]                  # S&P MidCap 400 full-size, $500 x index, to 2008
   NKD:                      # Nikkei 225 ($-denominated, CME)
     cftc_code: "240741"
+    # Not reported since 2026-03-03, when it had 21 reportable traders: under the CFTC's
+    # 20-trader publication floor, not delisted, so it may return. The yen contract
+    # (240743, 47 traders, still reported) cannot stand in through sum_codes because
+    # its scale to this one moves with USDJPY. Checked 2026-10-16.
   # MSCI international indices — the liquid out-of-selection held-out markets. COT is
   # the real futures positioning (ICE Futures U.S.). They have no futures bars anywhere
   # in the fleet: marketdata prices them off ETF proxies and its registry omits them.
@@ -63,6 +67,10 @@ Metals:
     cftc_code: "084691"
   HG:
     cftc_code: "085692"
+    hist_codes:
+      - "085691"                 # pre-grade-#1 copper, to 1989-12-15; same 25,000 lb. Ten-week
+                                 # overlap with OI migrating old to new, so the larger-OI rule
+                                 # switches on 1989-11-30
   PL:
     cftc_code: "076651"
   PA:
@@ -114,6 +122,9 @@ Grains:
   # decision in docs/handoffs/2026-08-03-spec-backlog-producer.md §9).
   ZR:                       # Rough Rice (CBOT)
     cftc_code: "039601"
+    hist_codes:
+      - "039781"                 # MidAmerica / Chicago Rice & Cotton Exchange, 1986-10 to
+                                 # 1994-09-27; same 2,000 cwt, OI and traders continuous
   # Held-out generalization grains (new symbols, never in the deploy selection).
   ZO:                       # Oats (CBOT)
     cftc_code: "004603"
@@ -138,6 +149,10 @@ Currencies:
     cftc_code: "232741"
   6B:
     cftc_code: "096742"
+    hist_codes:
+      - ["096741", 0.4]          # IMM pound at 25,000 GBP, to 1988-05-31. The CFTC relabels the
+                                 # successor "BRITISH POUND STERLING- NEW" (62,500 GBP), OI drops
+                                 # 2.4x at the seam against a 2.5x size ratio
   6C:
     cftc_code: "090741"
   6J:
@@ -150,6 +165,9 @@ Currencies:
     cftc_code: "112741"
   DX:
     cftc_code: "098662"
+    # NOT stitched: 098661 ("U.S. $ INDEX - OLD", 1986 to 1992-06-15) hands off over two
+    # weeks, but traders drop 46 to 20 and OI is too noisy at the seam to pin a contract
+    # size ratio. Add it as a hist_code only with the old contract's spec in hand.
 
 Fixed Income:
   ZN:

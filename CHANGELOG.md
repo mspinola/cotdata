@@ -8,6 +8,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **HG, ZR and 6B stitch their predecessor codes**, each back to 1986. `HG` adds `085691`
+  (pre-grade-#1 copper, same 25,000 lb, a ten-week migration in late 1989 that the
+  larger-OI rule hands off on 1989-11-30). `ZR` adds `039781` (MidAmerica rough rice to
+  1994-09-27, same 2,000 cwt, open interest and trader counts continuous). `6B` adds
+  `096741` at scale `0.4`: the CFTC relabels the successor "BRITISH POUND STERLING- NEW"
+  in 1988 and open interest drops 2.4x at the seam against the 25,000 to 62,500 GBP size
+  ratio of 2.5; stitched OI is 15,633 then 16,980 across the switch.
+- **DX and NKD are documented in the registry rather than stitched.** DX's `098661`
+  ("U.S. $ INDEX - OLD", to 1992) hands off too noisily to pin a size ratio. NKD's
+  `240741` has not been reported since 2026-03-03, when it had 21 reportable traders: under
+  the publication floor, not delisted. The yen contract `240743` cannot stand in because
+  its scale moves with USDJPY.
+
 - **The micro equity contracts join the sum: ES, NQ, YM and RTY add `13874U`, `209747`,
   `124608`, `239747` at scale 0.1.** Same reason as the full-size contracts below: one
   definition of "the whole market" across the series, and the CFTC's own Consolidated row
