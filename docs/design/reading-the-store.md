@@ -92,6 +92,17 @@ under the 20-trader publication threshold, which are absent from the file but pr
 CFTC's own Consolidated row (`13874+` etc., 2010-06 on). Against that row, open interest and
 the commercial columns agree to rounding on 99.8% of NQ and YM weeks and 93% of ES weeks.
 
+**What is not a code break: the 2016 to 2018 TFF regime change.** In the equity index
+futures the TFF dealer and asset manager nets change character between 2016 and 2018 (NQ
+dealers ran -50 to -78% of open interest through 2015 and near zero after 2017). This looks
+like a reclassification and was checked as one on 2026-10-16 across all 22 TFF markets in
+the store: there is no common week. The largest 13-week level shifts fall on different
+dates per market (NQ dealers 2016-02 and again 2017-Q3, RTY 2016-11, YM 2018-02), and the
+week with the most simultaneous shifts moves under a third of the series, during the early
+2016 selloff. Per-trader reclassifications and genuine repositioning cannot be told apart
+from published data, so treat 2017 as a regime boundary for calibration windows, not as a
+seam to stitch across.
+
 **Cause two: a thin market falling out of the report.** Oats (`004603`) has a **294-day
 interval ending 2025-09-09** and five more over 50 days. A market below the reporting
 threshold disappears and returns when it recovers. No sibling fills these, because nothing is

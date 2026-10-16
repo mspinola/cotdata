@@ -189,7 +189,7 @@ def test_grain_predecessors_scaled_to_contracts():
     expected = {"ZC": "002601", "ZS": "005601", "ZW": "001601", "ZO": "004601", "KE": "001611"}
     for sym, old in expected.items():
         assert hist_code_scales(symbol(sym).hist_codes) == [(old, 0.2)], sym
-    for sym in ("ZM", "ZL", "ZR"):         # single-code since 1986, nothing to stitch
+    for sym in ("ZM", "ZL"):               # single-code since 1986, nothing to stitch
         assert symbol(sym).hist_codes == (), sym
 
 
@@ -204,3 +204,12 @@ def test_equity_sum_codes():
     assert sum_code_scales(symbol("EMD").sum_codes) == [("338741", 5.0, None)]
     assert codes_for(symbol("ES")) == ["13874A", "138741", "13874U"]       # deduped
     assert codes_for(symbol("RTY")) == ["239742", "23977A", "239747"]      # hist + sum
+
+
+# ── single-predecessor stitches added 2026-10-16; DX and NKD deliberately left alone ──
+def test_hg_zr_6b_predecessors_and_dx_nkd_unstitched():
+    assert hist_code_scales(symbol("HG").hist_codes) == [("085691", 1.0)]
+    assert hist_code_scales(symbol("ZR").hist_codes) == [("039781", 1.0)]
+    assert hist_code_scales(symbol("6B").hist_codes) == [("096741", 0.4)]
+    assert symbol("DX").hist_codes == ()          # old contract size unverified
+    assert symbol("NKD").sum_codes == ()          # yen contract's scale moves with USDJPY
