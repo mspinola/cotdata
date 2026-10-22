@@ -8,6 +8,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RB stitches `111652` (NY Harbor unleaded gasoline) back to 1986.** A product change,
+  unleaded to RBOB, on the same 42,000 gal contract and the same hedger base: a 43-week
+  migration through 2006 in which combined open interest holds between 127k and 172k and
+  reportable traders move from one code to the other. The larger-OI rule switches on
+  2006-08-29. HE's 1996 live-to-lean hogs switch is deliberately not stitched, because the
+  carcass basis changes what a position means; a registry test pins that choice.
+
 - **HG, ZR and 6B stitch their predecessor codes**, each back to 1986. `HG` adds `085691`
   (pre-grade-#1 copper, same 25,000 lb, a ten-week migration in late 1989 that the
   larger-OI rule hands off on 1989-11-30). `ZR` adds `039781` (MidAmerica rough rice to

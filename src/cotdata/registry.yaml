@@ -81,6 +81,13 @@ Energies:
     cftc_code: "067651"
   RB:
     cftc_code: "111659"
+    hist_codes:
+      - "111652"                 # NY Harbor unleaded gasoline, to 2006-12-05; same 42,000 gal.
+                                 # A product change (unleaded to RBOB) with the same hedger base:
+                                 # a 43-week migration where combined OI holds 127k to 172k and
+                                 # traders move across. The larger-OI rule switches on 2006-08-29.
+                                 # HE's 1996 live-to-lean switch is deliberately NOT stitched: the
+                                 # carcass basis changes what a position means.
   HO:
     cftc_code: "022651"
   NG:
