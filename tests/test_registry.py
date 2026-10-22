@@ -213,3 +213,8 @@ def test_hg_zr_6b_predecessors_and_dx_nkd_unstitched():
     assert hist_code_scales(symbol("6B").hist_codes) == [("096741", 0.4)]
     assert symbol("DX").hist_codes == ()          # old contract size unverified
     assert symbol("NKD").sum_codes == ()          # yen contract's scale moves with USDJPY
+
+
+def test_rb_stitched_he_deliberately_not():
+    assert hist_code_scales(symbol("RB").hist_codes) == [("111652", 1.0)]
+    assert symbol("HE").hist_codes == ()          # live to lean hogs: different product basis
