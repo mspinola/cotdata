@@ -113,7 +113,21 @@ REM The guard above means these are reached only when every symbol wrote. A
 REM partial equities fetch is not mirrored: the retry loop re-runs the whole
 REM full-history fetch, and the sync goes with the run that finally succeeds.
 call "REPLACE_WITH_SCHEDULER_DIR\sync-store.cmd"
-if errorlevel 1 exit /b %ERRORLEVEL%
+set "SYNC_RC=%ERRORLEVEL%"
 
 call "REPLACE_WITH_SCHEDULER_DIR\push-to-server.cmd"
-exit /b %ERRORLEVEL%
+set "PUSH_RC=%ERRORLEVEL%"
+
+REM The push is NOT gated on the sync. An `if errorlevel 1 exit /b` used to sit
+REM between these two calls, so a failed SMB mirror to the Mac also starved the
+REM remote replica, the one with actual readers. That is the mistake sync-store.cmd
+REM already refuses to make between its own two store passes: one broken thing
+REM presenting as two. Run both deliveries, then report.
+REM
+REM The two empty-guards are not paranoia: cmd aborts the whole file on a numeric
+REM IF with an empty operand, which would skip the exit below and report success.
+if "%SYNC_RC%"=="" set "SYNC_RC=1"
+if "%PUSH_RC%"=="" set "PUSH_RC=1"
+set "WORST=%SYNC_RC%"
+if %PUSH_RC% GTR %WORST% set "WORST=%PUSH_RC%"
+exit /b %WORST%

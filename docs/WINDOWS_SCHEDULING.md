@@ -249,7 +249,27 @@ to get wrong, because the obvious signal is the broken one:
 
 `newest_data` is the right signal and the documented one: it *"advances ONLY when genuinely
 new data arrives"* (see [status.json](../README.md#statusjson--new-data-signal-for-downstream-tools)).
-Snapshot it before the fetch and after, and skip the syncs only when the two agree.
+
+**Key the guard on what was delivered, not on what arrived.** The obvious shape is to
+snapshot `newest_data` before the fetch and after and sync only on the difference. Do not:
+that fires on the single repeat which happens to watch the map move, so one failed delivery
+is final for the whole window.
+
+> [!WARNING]
+> **Measured on the reference box on 2026-10-23, and it cost a release.** CFTC published at
+> 15:28, the 15:29 repeat captured the new week and called the syncs, the SMB mirror
+> delivered nothing, and the wrapper exited. Every repeat after it read `BEFORE == AFTER`
+> and skipped the syncs as "nothing new landed". Both replicas sat on the previous week
+> until a human noticed, and the public dash only got the data because someone fetched CFTC
+> on it by hand. The fetch half of the pipeline had worked perfectly, inside 90 seconds of
+> publication.
+
+Record the fingerprint of the last run in which **every** replica took the data, in a file
+beside the wrapper, and compare the store against *that*. A failed delivery is then retried
+on the next repeat, a delivered week is still skipped for the rest of the window, and a quiet
+Friday costs exactly what it did before. It also removes the ordering trap entirely: it no
+longer matters which repeat sees the data arrive. Keep that file out of the store itself, or
+the mirror will carry one box's scheduling state to every replica.
 
 **Do not guard the daily catch-up as well.** This is the trap on the other side, and it costs
 you bars rather than time. Both sync scripts mirror **both** stores since ADR-0007, so the
@@ -269,8 +289,18 @@ Set-ScheduledTask -TaskName 'cotdata COT (Fri release)' -Action $a
 string as the executable path, so the argument ends up part of the filename.)
 
 **Make the guard fail toward syncing.** If `status.json` is missing or unparseable, sync
-anyway rather than skipping. A redundant mirror is merely slow; a skipped one is invisible,
-which is the failure mode this whole page exists to prevent.
+anyway rather than skipping. A missing or empty delivery record reads the same way: nothing
+was ever confirmed delivered, so deliver. A redundant mirror is merely slow; a skipped one is
+invisible, which is the failure mode this whole page exists to prevent.
+
+**Do not gate one replica's delivery on another's.** If your wrapper chains an SMB mirror and
+a remote push, the tempting `if errorlevel 1 exit /b` between them makes the second replica
+hostage to the first. On 2026-10-23 that is what kept the week from the internet-facing
+replica, the one with actual readers, because a laptop on the LAN was unreachable over SMB.
+[`sync-store.cmd`](examples/windows/sync-store.cmd) already refuses to make this mistake
+between its own two store passes, for the reason stated there: one broken thing should not
+present as two. Run every delivery, capture each exit code on its own following line, and
+exit the worst of them.
 
 ## Testing your tasks
 
