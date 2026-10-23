@@ -263,6 +263,12 @@ is final for the whole window.
 > until a human noticed, and the public dash only got the data because someone fetched CFTC
 > on it by hand. The fetch half of the pipeline had worked perfectly, inside 90 seconds of
 > publication.
+>
+> The mirror failure itself was transient. The destination took a new DHCP lease at
+> 15:30:19, seconds before the copy, and the identical copy ran clean 90 minutes later:
+> 156 files, nothing failed. `robocopy /R:2 /W:5` gives up in about ten seconds, so a
+> wireless re-association on the far end is enough to lose a pass. **That is the point.**
+> A ten-second blip cost a whole release only because the guard then refused to retry.
 
 Record the fingerprint of the last run in which **every** replica took the data, in a file
 beside the wrapper, and compare the store against *that*. A failed delivery is then retried
