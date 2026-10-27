@@ -20,17 +20,28 @@ REM exact instructions and the allow rules it runs under.
 REM
 REM Stage 2 is the one command below. marketdata-update --build-tradingview reads
 REM ONLY those local files: it validates them (the connector's JSON shape, the
-REM registry range per kind, strictly increasing stamps, the registry anchors),
-REM refuses any bar that disagrees with a bar the store already holds (the store
-REM is never rewritten by a build), appends only what the store lacks, and gates
-REM the newest bar on BOTH sides of the expected session, which is the latest
-REM weekday whose 16:30 ET close has passed. Older is refused as STALE and the
-REM later routine is the retry. Newer is refused as UNSETTLED: fired before the
-REM close, the connector serves the day in progress, and on the put/call ratios it
-REM serves it a bar ahead of the breadth counts. That Close still moves, and since
-REM a stored bar is never rewritten, storing it once would refuse every later
-REM build of the same session until someone cleaned the store by hand. Neither
-REM side writes anything.
+REM registry range per kind, strictly increasing stamps, the registry anchors)
+REM and stores a session only once a LATER capture confirms it. Each capture's
+REM newest bar is PROVISIONAL (marketdata 0.3.3): it counts for the session gate
+REM below and is otherwise ignored, because the vendor revises the evening value
+REM of the day's bar after the pull. Measured across every capture from
+REM 2026-09-16 to 2026-10-23: 54 of 226 newest bars were later revised, and none
+REM of about 215 bars the vendor had already served once as settled. Storing the
+REM newest bar froze 14 of 15 series from late September 2026: a stored bar is
+REM never rewritten, so every later capture disagreed with it and was refused.
+REM The cost is that the store trails the latest capture by one session, by
+REM design. Do not read that lag as a missed night.
+REM
+REM A SETTLED bar that disagrees with one the store holds is still refused, and
+REM the build still never rewrites the store on its own. That is a genuine vendor
+REM restatement, for a human to resolve with --accept-restatement SYMBOL.
+REM
+REM The session gate reads the newest bar of the pull, provisional included, on
+REM BOTH sides of the expected session, which is the latest weekday whose 16:30
+REM ET close has passed. Older is refused as STALE and the later routine is the
+REM retry. Newer is refused as UNSETTLED: fired before the close, the connector
+REM serves the day in progress, and on the put/call ratios it serves it a bar
+REM ahead of the breadth counts. Neither side writes anything.
 REM
 REM WHY THERE IS NO RETRY LOOP IN HERE
 REM ------------------------------------------------------------------------
@@ -39,6 +50,21 @@ REM nothing: a refusal is either a bad raw file, which a retry cannot fix, or a
 REM stale one, which only a later connector pull fixes. So the retry is the
 REM SECOND ROUTINE, scheduled later the same evening, and on a good night it
 REM finds the store current, writes nothing, and exits 0.
+REM
+REM WHEN NOTHING RUNS AT ALL
+REM ------------------------------------------------------------------------
+REM This file runs only as the routine's last step, so a routine that never
+REM starts leaves no trace on this box: no raw file, no exit code, no log line,
+REM no Task Scheduler result. That happened on 2026-10-26, when Claude Desktop
+REM here was signed out. The routines run only while the app is open and signed
+REM in. A missed night loses nothing, since the next capture's ten bars carry the
+REM missed sessions (up to nine of them; a longer outage needs one pull with a
+REM larger count). But nothing here notices it, and verify-scheduling.ps1's
+REM series check only fires once the store is four days old, so watch the
+REM replica's series dates from the machine that reads them. To recover, start
+REM the routine by hand: Routines, then Run now. Run in the morning, it stores
+REM through the session BEFORE the latest one, which is that capture's
+REM provisional bar, and the evening routine stores the rest.
 REM
 REM WHEN IT RUNS, AND WHY THOSE TIMES
 REM ------------------------------------------------------------------------
