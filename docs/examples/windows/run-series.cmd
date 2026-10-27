@@ -99,12 +99,29 @@ REM The raw JSON under _raw\tradingview never rides along: both scripts exclude
 REM _raw by name at any depth, for databento's paid raw store. Keep the directory
 REM name exactly _raw or both exclusions silently stop applying.
 call "REPLACE_WITH_SCHEDULER_DIR\sync-store.cmd"
-if errorlevel 1 exit /b %ERRORLEVEL%
+set "SYNC_RC=%ERRORLEVEL%"
 
 call "REPLACE_WITH_SCHEDULER_DIR\push-to-server.cmd"
-if errorlevel 1 exit /b %ERRORLEVEL%
+set "PUSH_RC=%ERRORLEVEL%"
+
+REM The push is NOT gated on the sync. An `if errorlevel 1 exit /b` used to sit
+REM between these two calls, so a failed SMB mirror to the Mac also starved the
+REM remote replica, the one with actual readers. That is the mistake sync-store.cmd
+REM already refuses to make between its own two store passes: one broken thing
+REM presenting as two. Run both deliveries, then report.
+REM
+REM The two empty-guards are not paranoia: cmd aborts the whole file on a numeric
+REM IF with an empty operand, which would skip the exit below and report success.
+if "%SYNC_RC%"=="" set "SYNC_RC=1"
+if "%PUSH_RC%"=="" set "PUSH_RC=1"
+set "WORST=%SYNC_RC%"
+if %PUSH_RC% GTR %WORST% set "WORST=%PUSH_RC%"
+if not "%WORST%"=="0" echo series: delivery incomplete ^(sync %SYNC_RC%, push %PUSH_RC%^).
 
 REM The build's code, not the push's: a partial build that synced cleanly is still
 REM a run with a refusal in it, and the operator and the verifier both want to see
-REM that rather than a 0.
-exit /b %RC%
+REM that rather than a 0. A clean build with a broken delivery is still a failure,
+REM though, so when the build has nothing to say the delivery's code is what exits.
+REM The echo above is why a partial build cannot hide a failed mirror.
+if not "%RC%"=="0" exit /b %RC%
+exit /b %WORST%

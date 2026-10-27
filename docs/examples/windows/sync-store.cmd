@@ -28,6 +28,35 @@ set "BAR_SRC=REPLACE_WITH_MARKETDATA_STORE_PATH"
 set "BAR_DEST=REPLACE_WITH_MARKETDATA_DEST_PATH"
 
 REM ---------------------------------------------------------------------------
+REM THE RETRY BUDGET: /R:6 /W:10, six attempts over sixty seconds per failure.
+REM
+REM It was /R:2 /W:5, which gives up in about ten seconds, and on 2026-10-23 that
+REM lost a COT release. The SMB destination took a new DHCP lease at 15:30:19 and
+REM the capture pass called this script seconds later; the copy failed, and the
+REM Friday poller's guard then read the store as already current and skipped every
+REM remaining repeat. The identical copy ran clean ninety minutes later: 156 files,
+REM nothing failed. Ten seconds is simply less than a wireless re-association on
+REM the far end, and that destination roams between mesh access points.
+REM
+REM Sixty seconds rides out a re-association without pretending to ride out an
+REM outage. Know the ceiling before raising it further: /R and /W are PER FAILURE,
+REM so on a destination that is reachable but flaky enough to fail file after file,
+REM the budget multiplies by the file count. It is bounded here because an
+REM unreachable share fails at the directory level once, not per file, so a
+REM powered-off replica costs about a minute per pass rather than hours.
+REM
+REM Two consequences worth knowing before you tune this:
+REM   - The exit codes below are unchanged, so a failure after six attempts still
+REM     reports exactly as it did before. The budget buys attempts, not silence.
+REM   - run-cot.cmd --poll repeats every 2 min, and Task Scheduler will not start a
+REM     second instance while one runs. During a real outage both passes burn their
+REM     budget, so the effective poll cadence stretches by a minute or two. That is
+REM     only true while something is broken, and the guard retries either way.
+REM
+REM If a failure ever shows ERROR 67 (network name not found) that these retries do
+REM not catch, /TBD is the flag for it: it waits for share names to be defined.
+REM Not added here because nothing has produced that error to test it against.
+REM ---------------------------------------------------------------------------
 REM Pass 1 — the COT store.
 REM
 REM /MIR mirrors (copies new + deletes removed). /XD excludes directories:
@@ -50,7 +79,7 @@ REM matches by NAME AT ANY DEPTH, so had it been called manifest.json this sync 
 REM have silently delivered raw bytes with no index.
 REM /XF also drops partial-write temps (*.tmp from parquet/JSON writes, *.part from
 REM in-flight raw downloads) so a sync mid-capture never lands a truncated file.
-robocopy "%COT_SRC%" "%COT_DEST%" /MIR /R:2 /W:5 /NFL /NDL /NP ^
+robocopy "%COT_SRC%" "%COT_DEST%" /MIR /R:6 /W:10 /NFL /NDL /NP ^
   /XD _cache _raw citpy ^
   /XF manifest.json *.tmp *.part
 set "COT_RC=%ERRORLEVEL%"
@@ -77,7 +106,7 @@ REM   replica has no use for it and re-fetching it costs money.
 REM
 REM Both stores commit parquet with an atomic replace, so *.tmp / *.part are the
 REM same partial-write guard as above.
-robocopy "%BAR_SRC%" "%BAR_DEST%" /MIR /R:2 /W:5 /NFL /NDL /NP ^
+robocopy "%BAR_SRC%" "%BAR_DEST%" /MIR /R:6 /W:10 /NFL /NDL /NP ^
   /XD _raw ^
   /XF *.tmp *.part
 set "BAR_RC=%ERRORLEVEL%"
