@@ -118,11 +118,36 @@ this table is out of date.
 ## What a good night looks like
 
 The first routine reports exit code 0 and one `+1 bar(s)` line per symbol (or `already
-current` on a symbol the vendor has not updated yet). The second reports exit code 0 and
-`already current` for every symbol. A `REFUSED` line names the file and the bar; leave the
-file where it is and read the message, because the build never rewrites a stored bar and the
-disagreement is either a vendor restatement or a transcription slip, and only a person can say
-which. Next morning `verify-scheduling.ps1` reports the series freshness row green.
+current` on a symbol the vendor has not updated yet). The bar it adds is the PREVIOUS
+session's, which tonight's capture confirms. Tonight's own bar is that capture's newest, and
+the build holds a capture's newest bar back as provisional (marketdata 0.3.3), because the
+vendor revises the evening value of the day's bar after the pull: 54 of 226 newest bars from
+2026-09-16 to 2026-10-23, against none of about 215 bars it had already served once as
+settled. So the store trails the latest capture by one session by design, and that lag is not
+a missed night. The second routine reports exit code 0 and `already current` for every
+symbol.
+
+A `REFUSED` line names the file and the bar; leave the file where it is and read the message.
+Since the newest bar is never compared, a refusal means a bar the vendor had already served as
+settled has changed, or a transcription slip, and only a person can say which. A genuine
+restatement is taken with `marketdata-update --build-tradingview --accept-restatement
+<INTERNAL>`, which overwrites only the bars that disagree. Next morning `verify-scheduling.ps1`
+reports the series freshness row green.
+
+## When a night is missed
+
+The routines run only while Claude Desktop is open and signed in on this box. When it is not,
+nothing runs, and nothing records that it did not: no raw file, no wrapper exit code, no log
+line, no Task Scheduler result. That happened on 2026-10-26, with the app signed out, and the
+only trace was the replica's series dates failing to advance. `verify-scheduling.ps1` flags the
+series only once the store is four days old, so watch those dates from the machine that reads
+them.
+
+A missed night loses nothing. The next capture's ten bars carry up to nine missed sessions; an
+outage longer than that needs one pull with a larger `count`. To recover at once, open
+Routines and use Run now on either routine. Run in the morning, it stores through the session
+BEFORE the latest one, since the latest is that capture's provisional bar, and the evening
+routine stores the rest.
 
 ## Backfill, once, and not through the routine
 
@@ -157,4 +182,4 @@ The registry anchors are checked on that build: for `NASDAQ_FOMO_5D` the 2026-07
 read 48.05. Two vendor conventions the build handles on its own, seen on that first fill: a
 count of zero is printed as 0.01 and is stored as 0, and a put/call ratio bar with a zero
 close is a vendor hole, dropped and named in the output. Then let the evening routines take
-over; from the next night on they only ever add today's bar.
+over; from the next night on they only ever add the previous session's bar.
