@@ -98,21 +98,38 @@ def manifest_path() -> Path:
 # ── Sources ─────────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class Source:
-    """One fetchable CFTC file. ``report_year`` is None for the current-week static."""
+    """One fetchable CFTC file. ``report_year`` is None for the current-week static.
+
+    ``combined`` is the basis: False for a futures-only file, True for a
+    futures-and-options combined one. It is recorded on every snapshot and handed to the
+    canonicaliser, because the Legacy files carry no in-file statement of basis (the
+    Disaggregated and TFF files do, and ``_canonicalisers`` checks the two agree). The
+    Supplemental is combined-only, so its sources always say True.
+    """
     report_type: str          # legacy | disaggregated | tff | supplemental
     source_kind: str          # annual_zip | weekly_static
     ext: str                  # zip | txt
     url: str
     report_year: int | None = None
+    combined: bool = False
 
 
 # Annual-zip URL builders. The Legacy naming convention changed in 2004; disagg/TFF
 # history starts in 2006. Duplicated from providers/ deliberately — capture stays
 # decoupled from the parse path (non-goal: do not refactor existing fetch logic).
-def _legacy_zip_url(year: int) -> str:
+def _legacy_zip_url(year: int, combined: bool = False) -> str:
+    if combined:
+        if year < 2004:
+            return f"https://www.cftc.gov/files/dea/history/deacom_xls_{year}.zip"
+        return f"https://www.cftc.gov/files/dea/history/dea_com_xls_{year}.zip"
     if year < 2004:
         return f"https://www.cftc.gov/files/dea/history/deafut_xls_{year}.zip"
     return f"https://www.cftc.gov/files/dea/history/dea_fut_xls_{year}.zip"
+
+
+# The Legacy futures-and-options COMBINED annual zips start in 1995 (CFTC's "new format"
+# from March 1995; deacom_xls_1995.zip is the first one served, verified live 2026-10-31).
+_LEGACY_COMBINED_FIRST_YEAR = 1995
 
 
 # Disaggregated and TFF history at these URLs starts in 2010, NOT 2006. The reports
@@ -130,15 +147,27 @@ _SUPPLEMENTAL_FIRST_YEAR = 2006
 
 
 def annual_sources(year: int) -> list[Source]:
+    """Every annual CFTC COT zip for ``year``: the futures-only Legacy, Disaggregated and
+    TFF files, the Supplemental (combined by nature), and the futures-and-options COMBINED
+    variants of the first three. The combined Disaggregated/TFF years start where the
+    futures-only ones do (com_disagg_txt_2010 and com_fin_txt_2010 both serve 200, and
+    the 2006-2009 years are bundle-only on both bases)."""
+    hist = "https://www.cftc.gov/files/dea/history"
     out = [Source("legacy", "annual_zip", "zip", _legacy_zip_url(year), year)]
+    if year >= _LEGACY_COMBINED_FIRST_YEAR:
+        out.append(Source("legacy", "annual_zip", "zip", _legacy_zip_url(year, combined=True),
+                          year, combined=True))
     if year >= _DISAGG_TFF_FIRST_YEAR:
         out.append(Source("disaggregated", "annual_zip", "zip",
-                          f"https://www.cftc.gov/files/dea/history/fut_disagg_txt_{year}.zip", year))
-        out.append(Source("tff", "annual_zip", "zip",
-                          f"https://www.cftc.gov/files/dea/history/fut_fin_txt_{year}.zip", year))
+                          f"{hist}/fut_disagg_txt_{year}.zip", year))
+        out.append(Source("disaggregated", "annual_zip", "zip",
+                          f"{hist}/com_disagg_txt_{year}.zip", year, combined=True))
+        out.append(Source("tff", "annual_zip", "zip", f"{hist}/fut_fin_txt_{year}.zip", year))
+        out.append(Source("tff", "annual_zip", "zip", f"{hist}/com_fin_txt_{year}.zip", year,
+                          combined=True))
     if year >= _SUPPLEMENTAL_FIRST_YEAR:
         out.append(Source("supplemental", "annual_zip", "zip",
-                          f"https://www.cftc.gov/files/dea/history/dea_cit_txt_{year}.zip", year))
+                          f"{hist}/dea_cit_txt_{year}.zip", year, combined=True))
     return out
 
 
@@ -147,6 +176,25 @@ def annual_sources(year: int) -> list[Source]:
 # `observed` release-date mechanism from poll-accurate to publication-accurate.
 WEEKLY_STATIC = Source("legacy", "weekly_static", "txt",
                        "https://www.cftc.gov/dea/newcot/deafut.txt", None)
+
+# CFTC publishes one current-week static per series, all seven within the same few
+# seconds (Last-Modified 19:27:43 to 19:27:46 on 2026-10-30). Each is a headerless
+# positional CSV holding exactly one report date in field 2, checked on all seven, which
+# is what `vintage_schedule.report_date_of_weekly_static` reads. Capturing all of them
+# makes the retained bytes complete per release; the publication timestamp they
+# contribute is the same one the Legacy static already supplies, deduped per report date.
+_NEWCOT = "https://www.cftc.gov/dea/newcot"
+WEEKLY_STATICS = (
+    WEEKLY_STATIC,
+    Source("legacy", "weekly_static", "txt", f"{_NEWCOT}/deacom.txt", None, combined=True),
+    Source("disaggregated", "weekly_static", "txt", f"{_NEWCOT}/f_disagg.txt", None),
+    Source("disaggregated", "weekly_static", "txt", f"{_NEWCOT}/c_disagg.txt", None,
+           combined=True),
+    Source("tff", "weekly_static", "txt", f"{_NEWCOT}/FinFutWk.txt", None),
+    Source("tff", "weekly_static", "txt", f"{_NEWCOT}/FinComWk.txt", None, combined=True),
+    Source("supplemental", "weekly_static", "txt", f"{_NEWCOT}/deacit.txt", None,
+           combined=True),
+)
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────────
@@ -564,6 +612,7 @@ def capture_source(source: Source, *, snapshots: list[dict], http_get, now: dt.d
         "source_kind": source.source_kind,
         "report_type": source.report_type,
         "report_year": source.report_year,
+        "combined": source.combined,
         "retrieved_at": retrieved_at,
         "parse_status": "pending",
         "parse_error": None,
@@ -657,12 +706,12 @@ def fetch(year: int | None = None, *, all_years: bool = False,
           http_get=_http_get, rate_limit_s: float = _RATE_LIMIT_S, now_fn=_utcnow) -> dict:
     """Capture the release-critical CFTC files into the immutable landing zone.
 
-    Default: the current year's three annual zips (which carry the newest release), the
-    PRIOR year's three (the frozen-year tripwire, see the block comment above
-    ``capture_expectation``), plus the Legacy weekly static (for its true-publication
-    Last-Modified). ``all_years`` walks 1986→current for a cold-start backfill of raw
-    bytes. An explicit ``sources`` list overrides the year/weekly derivation (targeted
-    capture; used in tests).
+    Default: the current year's annual zips (which carry the newest release; seven
+    series, both bases), the PRIOR year's (the frozen-year tripwire, see the block
+    comment above ``capture_expectation``), plus the seven current-week statics (for
+    their true-publication Last-Modified). ``all_years`` walks 1986→current for a
+    cold-start backfill of raw bytes. An explicit ``sources`` list overrides the
+    year/weekly derivation (targeted capture; used in tests).
 
     The prior year is in the DEFAULT set rather than only on ``--all`` because the
     tripwire is worth nothing if it only runs when someone remembers to run it manually.
@@ -687,7 +736,7 @@ def fetch(year: int | None = None, *, all_years: bool = False,
         for y in years:
             sources.extend(annual_sources(y))
         if include_weekly:
-            sources.append(WEEKLY_STATIC)
+            sources.extend(WEEKLY_STATICS)
 
     m = _read_manifest()
     m["schema_version"] = SCHEMA_VERSION
@@ -744,6 +793,7 @@ def _failure_record(source: Source, now: dt.datetime, error: Exception,
         "source_kind": source.source_kind,
         "report_type": source.report_type,
         "report_year": source.report_year,
+        "combined": source.combined,
         "retrieved_at": retrieved_at,
         "snapshot_id": _snapshot_id(retrieved_at, source.url, "failed"),
         "http_status": None,

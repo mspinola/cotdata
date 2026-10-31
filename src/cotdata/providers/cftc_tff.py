@@ -1,8 +1,11 @@
 """CFTC COT Traders in Financial Futures (TFF) producer — cross-platform.
 
-Downloads fut_fin_txt_{year}.zip, parses losslessly (preserving all Traders_*
-and detailed entity columns), and writes per-code weekly positioning tables to
-the store via store.write_cot_tff().
+Downloads fut_fin_txt_{year}.zip (futures-only), parses losslessly (preserving all
+Traders_* and detailed entity columns), and writes per-code weekly positioning tables
+to the store via store.write_cot_tff(). With ``combined=True`` it downloads
+com_fin_txt_{year}.zip (futures-and-options combined) into
+store.write_cot_tff_combined() instead; the file's own ``FutOnly_or_Combined`` column
+is checked against the basis asked for.
 """
 import datetime as dt
 import zipfile
@@ -16,6 +19,13 @@ from .. import config, store
 from ..registry import all_symbols, codes_for
 
 URL_PREFIX = "https://www.cftc.gov/files/dea/history/fut_fin_txt_"
+# Futures-and-options COMBINED basis: same report, same columns, same 2006 start, and the
+# file says which it is (``FutOnly_or_Combined``), which ``_assert_basis`` checks so a URL
+# mix-up can never write one basis into the other's directory. Both the annual zips and
+# the 2006-2016 bundle exist for the combined basis (verified live 2026-10-31).
+URL_PREFIX_COMBINED = "https://www.cftc.gov/files/dea/history/com_fin_txt_"
+BUNDLE_URL = "https://www.cftc.gov/files/dea/history/fin_fut_txt_2006_2016.zip"
+BUNDLE_URL_COMBINED = "https://www.cftc.gov/files/dea/history/fin_com_txt_2006_2016.zip"
 FIRST_YEAR = 2006  # TFF futures history start
 
 # CFTC TXT column names we must coerce/standardize (others pass through losslessly)
@@ -23,10 +33,26 @@ REPORT_DATE = "Report_Date_as_MM_DD_YYYY"
 CONTRACT_CODE = "CFTC_Contract_Market_Code"
 
 
-def _cache_dir() -> Path:
-    d = config.store_root() / "_cache" / "cot_tff"
+def _cache_dir(combined: bool = False) -> Path:
+    d = config.store_root() / "_cache" / ("cot_tff_combined" if combined else "cot_tff")
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _assert_basis(df: pd.DataFrame, combined: bool, what: str) -> None:
+    """Refuse a file whose own ``FutOnly_or_Combined`` disagrees with the basis asked for.
+
+    The column is the file's statement of which series it is. A silent mismatch would put
+    combined open interest beside futures-only rows in one directory, which is exactly the
+    merge the separate domains exist to make impossible.
+    """
+    if "FutOnly_or_Combined" not in df.columns:
+        return  # older bundles may omit it; the URL is then the only evidence, as for Legacy
+    vals = {str(v).strip().lower() for v in df["FutOnly_or_Combined"].dropna().unique()}
+    want = "combined" if combined else "futonly"
+    if vals and vals != {want}:
+        raise ValueError(f"{what}: file says FutOnly_or_Combined={sorted(vals)}, "
+                         f"but this run is fetching the {'combined' if combined else 'futures-only'} basis")
 
 
 def _standardize_code(val) -> str:
@@ -35,9 +61,9 @@ def _standardize_code(val) -> str:
     return s.zfill(6) if s.isdigit() else s
 
 
-def _download_url(url: str, filename: str):
+def _download_url(url: str, filename: str, combined: bool = False):
     """Download a zip to the cache; skip if the server copy isn't newer."""
-    zip_path = _cache_dir() / filename
+    zip_path = _cache_dir(combined) / filename
     try:
         if zip_path.exists():
             head = requests.head(url, timeout=30)
@@ -49,7 +75,7 @@ def _download_url(url: str, filename: str):
         zip_path.write_bytes(r.content)
         return zip_path
     except Exception as e:  # noqa: BLE001
-        print(f"  {filename} (tff): download failed — {e}")
+        print(f"  {filename} (tff{' combined' if combined else ''}): download failed — {e}")
         return zip_path if zip_path.exists() else None
 
 
@@ -85,13 +111,21 @@ def _parse_zip(zip_path: Path) -> pd.DataFrame:
     return df
 
 
-def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> dict:
-    """Download + parse CFTC TFF futures COT; write full per-code history.
+def update(codes=None, first_year: int = FIRST_YEAR, last_year=None, *,
+           combined: bool = False) -> dict:
+    """Download + parse CFTC TFF COT; write full per-code history.
 
     codes: iterable of CFTC codes; default = all registry codes.
+    combined: False (default) fetches the futures-only files into ``cot_tff``; True
+    fetches the futures-and-options combined files into ``cot_tff_combined``.
     Rebuilds the complete per-code table each run. Returns {"kind", "ok", "wrote"};
     ``ok`` is False only on a hard failure to fetch the current year.
     """
+    kind = "cot_tff_combined" if combined else "cot_tff"
+    tag = "tff combined" if combined else "tff"
+    write = store.write_cot_tff_combined if combined else store.write_cot_tff
+    prefix = URL_PREFIX_COMBINED if combined else URL_PREFIX
+    bundle_url = BUNDLE_URL_COMBINED if combined else BUNDLE_URL
     code_to_sym = {}
     for s in all_symbols():
         for c in codes_for(s):            # primary + hist_codes + sum_codes
@@ -107,36 +141,39 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> dict:
 
     # The CFTC bundles 2006-2016 in a single historical file
     if first_year <= 2016:
-        url = "https://www.cftc.gov/files/dea/history/fin_fut_txt_2006_2016.zip"
-        zp = _download_url(url, "fin_fut_txt_2006_2016.zip")
+        zp = _download_url(bundle_url, bundle_url.rsplit("/", 1)[-1], combined)
         if zp:
             try:
                 df = _parse_zip(zp)
+                _assert_basis(df, combined, bundle_url.rsplit("/", 1)[-1])
                 # Filter down to the requested year range so we don't accidentally pull earlier
                 # than first_year if the user explicitly wanted a shorter window.
                 df = df[(df[REPORT_DATE].dt.year >= first_year) & (df[REPORT_DATE].dt.year <= 2016)]
                 frames.append(df)
             except Exception as e:
-                print(f"  hist_2006_2016 (tff): parse failed — {e}")
+                print(f"  hist_2006_2016 ({tag}): parse failed — {e}")
 
     # Fetch individual years for 2017+ (or first_year if it's > 2016)
     latest_ok = True
     for year in range(max(2017, first_year), last_year + 1):
-        zp = _download_url(f"{URL_PREFIX}{year}.zip", f"fut_fin_txt_{year}.zip")
+        zp = _download_url(f"{prefix}{year}.zip", f"{prefix.rsplit('/', 1)[-1]}{year}.zip",
+                           combined)
         if not zp:
             if year == last_year:
                 latest_ok = False  # couldn't fetch current year — may have missed a release
             continue
         try:
-            frames.append(_parse_zip(zp))
+            df = _parse_zip(zp)
+            _assert_basis(df, combined, f"{prefix.rsplit('/', 1)[-1]}{year}.zip")
+            frames.append(df)
         except Exception as e:  # noqa: BLE001
-            print(f"  {year} (tff): parse failed — {e}")
+            print(f"  {year} ({tag}): parse failed — {e}")
             if year == last_year:
                 latest_ok = False
 
     if not frames:
-        print("cftc_tff: no data parsed")
-        return {"kind": "cot_tff", "ok": False, "wrote": 0}
+        print(f"cftc_tff ({tag}): no data parsed")
+        return {"kind": kind, "ok": False, "wrote": 0}
 
     allrows = pd.concat(frames, ignore_index=True)
 
@@ -155,7 +192,7 @@ def update(codes=None, first_year: int = FIRST_YEAR, last_year=None) -> dict:
         sub = sub.sort_values(REPORT_DATE).set_index(REPORT_DATE)
         sym_name = code_to_sym.get(code)
         file_name = f"{sym_name}_{code}" if sym_name else code
-        store.write_cot_tff(file_name, sub, source="cftc_tff")
+        write(file_name, sub, source="cftc_tff")
         wrote += 1
-        print(f"{file_name}: {len(sub):5d} weeks (tff) -> store")
-    return {"kind": "cot_tff", "ok": latest_ok, "wrote": wrote}
+        print(f"{file_name}: {len(sub):5d} weeks ({tag}) -> store")
+    return {"kind": kind, "ok": latest_ok, "wrote": wrote}

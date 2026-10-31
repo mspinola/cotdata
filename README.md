@@ -73,8 +73,9 @@ The **store is the API boundary** — not Python imports. Producers write Parque
                                       ▼   write parquet + manifest
         ┌────────────────────────────────────────────────────────────┐
         │ CANONICAL STORE   ($COTDATA_STORE)                         │
-        │   cot_legacy/   cot_disagg/   cot_tff/                     │
-        │   cot_supplemental/                                        │
+        │   cot_legacy/   cot_disagg/   cot_tff/   cot_supplemental/ │
+        │   cot_legacy_combined/  cot_disagg_combined/               │
+        │   cot_tff_combined/                                        │
         │   manifests/   status.json                                 │
         └────────────────────────────────────────────────────────────┘
                                       │   read  (offline, any OS)
@@ -93,7 +94,8 @@ The store layout:
 - `cot_legacy/{symbol}_{code}.parquet` — weekly CFTC Legacy positioning.
 - `cot_disagg/{symbol}_{code}.parquet` — weekly CFTC Disaggregated positioning.
 - `cot_tff/{symbol}_{code}.parquet` — weekly CFTC Traders in Financial Futures positioning.
-- `cot_supplemental/{symbol}_{code}.parquet` — weekly CFTC Supplemental (Commodity Index Trader) positioning, 13 agricultural markets. **Futures-and-options combined**, unlike the three above.
+- `cot_supplemental/{symbol}_{code}.parquet` — weekly CFTC Supplemental (Commodity Index Trader) positioning, 13 agricultural markets. **Futures-and-options combined**; the CFTC publishes no futures-only variant.
+- `cot_legacy_combined/`, `cot_disagg_combined/`, `cot_tff_combined/` — the same three reports as the first three rows, on the **futures-and-options combined** basis (Legacy from 1995, the other two from 2006). Same columns, same `{symbol}_{code}.parquet` naming, a different quantity: combined open interest counts delta-weighted option equivalents, so on 2026-10-27 ES is 2,843,639 combined against 1,955,711 futures-only. The two bases never share a directory. Read with `get_cot(..., combined=True)`.
 - `manifests/{cot,prices}.json` — per-table `last_date`, `n_rows`, `source`, `updated_at`, `schema_version`, one file per producer half.
 - `status.json` — machine-readable new-data signal for downstream tools (see [Operations](#operations)).
 - `vintage/` — optional as-published (vintage) capture: retained raw CFTC downloads plus
@@ -107,17 +109,23 @@ Set `COTDATA_STORE` to the synced store directory, then:
 ```python
 import cotdata
 
-# COT — four CFTC report families:
+# COT — four CFTC report families, futures-only by default:
 legacy  = cotdata.get_cot("ES", report="legacy")   # Commercial / Non-Commercial
 disagg  = cotdata.get_cot("ES", report="disagg")   # Managed Money, Swap Dealers, ... (commodities)
 tff     = cotdata.get_cot("ES", report="tff")      # Leveraged Funds, Asset Managers, ... (financials)
 cit     = cotdata.get_cot("CC", report="supplemental")  # Index Traders (13 ags, combined basis)
+
+# ...and the futures-and-options COMBINED basis of the first three:
+legacy_fo = cotdata.get_cot("ES", report="legacy", combined=True)
+tff_fo    = cotdata.get_cot("ES", report="tff", combined=True)
 ```
 
 > [!WARNING]
-> `supplemental` is **futures-and-options combined** and the other three are futures-only, so
-> its `Open_Interest_All` is a different quantity for the same market and week. Do not
-> difference or ratio across reports without accounting for that.
+> `combined=None` (the default) is each report's natural basis: futures-only for `legacy`,
+> `disagg` and `tff`, combined for `supplemental`, which is published on no other basis
+> (`combined=False` on it raises). Combined `Open_Interest_All` is a different quantity from
+> futures-only for the same market and week. Do not difference or ratio across bases, or
+> across reports on different bases, without accounting for that.
 
 Daily **bars** come from the sibling package, against its own store:
 
@@ -153,7 +161,10 @@ COTDATA_STORE=/store  cotdata-update --cot-legacy                # CFTC Legacy (
 COTDATA_STORE=/store  cotdata-update --cot-disagg                # CFTC Disaggregated (any OS)
 COTDATA_STORE=/store  cotdata-update --cot-tff                   # CFTC Traders in Financial Futures (any OS)
 COTDATA_STORE=/store  cotdata-update --cot-supplemental          # CFTC Supplemental / index traders (any OS)
-COTDATA_STORE=/store  cotdata-update --cot-all                   # all four CFTC COT reports
+COTDATA_STORE=/store  cotdata-update --cot-legacy-combined       # Legacy, futures-and-options combined (from 1995)
+COTDATA_STORE=/store  cotdata-update --cot-disagg-combined       # Disaggregated, combined (from 2006)
+COTDATA_STORE=/store  cotdata-update --cot-tff-combined          # TFF, combined (from 2006)
+COTDATA_STORE=/store  cotdata-update --cot-all                   # all seven: four reports + three combined
 COTDATA_STORE=/store  cotdata-vintage fetch                      # optional: capture as-published COT (any OS)
 ```
 
@@ -240,10 +251,10 @@ cotdata-update --reconcile   # prune stale manifest entries (see below)
 `--check` reports per-domain row counts, newest data date, last write, and any entries lagging behind their peers (a partial-run signal):
 
 ```
-domain             entries         rows   newest data      last write (UTC)  behind
-prices                  98      954,524    2026-08-07  2026-08-08T15:40:20Z     14d  ← RETIRED
-cot_legacy              53       81,821    2026-08-11  2026-08-21T12:10:42Z     10d
-cot_disagg              29       29,187    2026-08-11  2026-08-21T12:10:51Z     10d
+domain               entries         rows   newest data      last write (UTC)  behind
+prices                    98      954,524    2026-08-07  2026-08-08T15:40:20Z     14d  ← RETIRED
+cot_legacy                53       81,821    2026-08-11  2026-08-21T12:10:42Z     10d
+cot_disagg                29       29,187    2026-08-11  2026-08-21T12:10:51Z     10d
 ...
 
 ⚠ prices, metadata: RETIRED — this store still holds the files, but cotdata stopped writing
@@ -435,7 +446,7 @@ Moved to `marketdata`'s store (`metadata/contract_specs.parquet` under
 Legacy positioning data (CFTC Legacy Futures Report). **History starts in 1986.** Indexed by tz-naive `Report_Date_as_MM_DD_YYYY`.
 
 > [!NOTE]
-> **Legacy Reports**: broken down by exchange, with futures-only and combined futures-and-options variants. Legacy classifies reportable open interest into non-commercial and commercial traders. The `cotdata` pipeline strictly downloads the **Futures-only** reports (`https://www.cftc.gov/files/dea/history/dea_fut_xls_{YEAR}.zip`).
+> **Legacy Reports**: broken down by exchange, with futures-only and combined futures-and-options variants. Legacy classifies reportable open interest into non-commercial and commercial traders. This directory holds the **futures-only** files (`dea_fut_xls_{YEAR}.zip`); the combined files (`dea_com_xls_{YEAR}.zip`, from 1995) land in `cot_legacy_combined/` with the same columns.
 
 > [!NOTE]
 > **Column Subset**: The raw CFTC `.xls` files contain [well over 100 columns](https://www.cftc.gov/MarketReports/CommitmentsofTraders/HistoricalViewable/cotvariableslegacy.html); the pipeline keeps the focused 15-column subset below to keep files small. To include more, add the exact CFTC column name to `TARGET_COLS` in `src/cotdata/providers/cftc.py`.
@@ -473,6 +484,9 @@ Entity-specific positioning and trader counts for financial markets (CFTC TFF Fu
 > [!NOTE]
 > **Lossless Image**: Like Disaggregated, TFF parquets are a **lossless image** of the source CFTC `txt` files — the financial entity groups (`Dealer`, `Asset_Mgr`, `Lev_Money`, `Other_Rept`) and their `Traders_*` counts.
 
+### COT combined-basis data (`cot_legacy_combined/`, `cot_disagg_combined/`, `cot_tff_combined/`)
+The three reports above on the CFTC's **futures-and-options combined** basis (`dea_com_xls_*`, `com_disagg_txt_*`, `com_fin_txt_*`). Same parsers, same columns, same per-code files; Legacy combined starts in **1995**, the other two in 2006. The Disaggregated and TFF files state their basis in `FutOnly_or_Combined` and the producer refuses a file whose statement disagrees with the directory it is writing to; the Legacy files carry no such column, so for them the URL is the only evidence and the two bases are kept apart by construction (separate zip names, caches and writers behind one flag). Measured on 2026-10-27: ES **2,843,639 combined / 1,955,711 futures-only**, GC 518,784 / 396,810, CL 2,606,478 / 1,886,280. See [ADR-0003](docs/adr/ADR-0003-combined-basis-is-in-scope.md).
+
 ### COT Supplemental Data (`cot_supplemental/{symbol}_{code}.parquet`)
 Index-trader positioning for 13 select agricultural markets (CFTC Supplemental / Commodity Index Trader Report). **History starts in January 2006**, and the covered set was **12 markets until Soybean Meal entered in 2013**. Indexed by tz-naive `Report_Date_as_MM_DD_YYYY` (renamed at parse from CFTC's `As_of_Date_In_Form_*`, whose own name changed in 2013).
 
@@ -487,7 +501,7 @@ Index-trader positioning for 13 select agricultural markets (CFTC Supplemental /
 
 ## Reference: COT formats explained
 
-The CFTC publishes positioning data in four formats; `cotdata` manages all four for complete coverage and the deepest history.
+The CFTC publishes positioning data in four formats, the first three of them on two bases (futures-only and futures-and-options combined); `cotdata` manages all seven series for complete coverage and the deepest history.
 
 1. **Legacy (1986–Present)** — *all markets.* Divides traders into **Commercial** (hedgers) and **Non-Commercial** (large speculators). The only format with pre-2006 data, so it's essential for long-term backtesting.
 2. **Disaggregated / DIS (2006–Present)** — *physical commodities only* (Agriculture, Energy, Metals). Splits traders into **Producer/Merchant**, **Swap Dealers**, **Managed Money**, and **Other Reportables** — a clearer view of "smart money" (Managed Money) in commodities.
