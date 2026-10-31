@@ -65,24 +65,45 @@ def _snapshot_path(local_path: str):
     return config.store_root().joinpath(*raw.replace("\\", "/").split("/"))
 
 
-# Each report type maps to (parser, canonicaliser). Legacy is indexed by report date
-# because that is the shape ``providers/cftc.py`` emits; disagg and TFF keep it as a
-# column, and the canonicalisers accept either.
+# Each report type maps to (parser, canonicaliser), called with the snapshot's recorded
+# basis. Legacy is indexed by report date because that is the shape ``providers/cftc.py``
+# emits; disagg and TFF keep it as a column, and the canonicalisers accept either.
+#
+# The basis flows differently per report, on purpose. The Legacy files say nothing about
+# their basis, so the snapshot's ``combined`` (set from the URL at capture) is the only
+# evidence and is passed straight in. The Disaggregated and TFF files DO say
+# (``FutOnly_or_Combined``), so their canonicalisers read the file and the result is then
+# checked against the snapshot: a disagreement means a URL was recorded under the wrong
+# basis, and ingesting it would file combined open interest as futures-only.
 def _canonicalisers():
     from . import vintage_ingest
     from .providers import cftc, cftc_cit, cftc_disagg, cftc_tff
 
-    def legacy(path):
+    def legacy(path, combined):
         wide = cftc._parse_zip(path).set_index(cftc.REPORT_DATE)
-        return vintage_ingest.canonicalize_legacy(wide)
+        return vintage_ingest.canonicalize_legacy(wide, combined=combined)
 
-    return {
-        "legacy": legacy,
-        "disaggregated": lambda p: vintage_ingest.canonicalize_disagg(cftc_disagg._parse_zip(p)),
-        "tff": lambda p: vintage_ingest.canonicalize_tff(cftc_tff._parse_zip(p)),
-        "supplemental": lambda p: vintage_ingest.canonicalize_supplemental(
-            cftc_cit._parse_zip(p)),
-    }
+    def _checked(canonical, combined, what):
+        got = set(canonical["combined"].unique()) if not canonical.empty else set()
+        if got and got != {bool(combined)}:
+            raise vintage_ingest.ValidationError(
+                f"{what}: the file says combined={sorted(got)} but the snapshot was "
+                f"captured as combined={bool(combined)}; refusing to file one basis as the other")
+        return canonical
+
+    def disagg(path, combined):
+        return _checked(vintage_ingest.canonicalize_disagg(cftc_disagg._parse_zip(path)),
+                        combined, "disaggregated")
+
+    def tff(path, combined):
+        return _checked(vintage_ingest.canonicalize_tff(cftc_tff._parse_zip(path)),
+                        combined, "tff")
+
+    def supplemental(path, combined):
+        return vintage_ingest.canonicalize_supplemental(cftc_cit._parse_zip(path))
+
+    return {"legacy": legacy, "disaggregated": disagg, "tff": tff,
+            "supplemental": supplemental}
 
 
 def _cmd_ingest(args) -> int:
@@ -146,7 +167,10 @@ def _cmd_ingest(args) -> int:
             continue
         path = _snapshot_path(s["local_path"])
         try:
-            canonical = fn(path)
+            # Snapshots recorded before the basis was captured have no ``combined`` key.
+            # Every one of them was a futures-only fetch, or the Supplemental, whose
+            # canonicaliser asserts its own basis and ignores the argument.
+            canonical = fn(path, bool(s.get("combined", False)))
             # observed_at is the snapshot's OWN retrieval time, not the clock at ingest.
             # "When did we observe this value" is a property of the capture, so a late or
             # repeated ingest of retained bytes must not move it: doing so would let a
@@ -278,14 +302,18 @@ def _cmd_coverage(args) -> int:
     # Derive BEFORE writing. Writing first meant that pointing COTDATA_STORE at the wrong
     # root truncated a perfectly good artifact to empty and then printed "nothing ingested
     # yet" — destroying the thing it was asked to report on.
-    cov = vintage_ingest.derive_coverage(args.report_type)
+    # The flag is tri-state underneath: absent means the report's NATURAL basis (so the
+    # Supplemental, combined-only, keeps working with no flag), present means combined.
+    combined = True if args.combined else None
+    basis = " (combined)" if combined else ""
+    cov = vintage_ingest.derive_coverage(args.report_type, combined=combined)
     if cov.empty:
-        print(f"coverage: no {args.report_type} observations ingested yet, so nothing to "
-              f"emit (the existing artifact, if any, is left alone). Run "
+        print(f"coverage: no {args.report_type}{basis} observations ingested yet, so nothing "
+              f"to emit (the existing artifact, if any, is left alone). Run "
               f"'cotdata-vintage fetch' then 'cotdata-vintage ingest' first.")
         return 0
-    path, cov = vintage_ingest.write_coverage(args.report_type)
-    print(f"coverage: {args.report_type} -> {path}")
+    path, cov = vintage_ingest.write_coverage(args.report_type, combined=combined)
+    print(f"coverage: {args.report_type}{basis} -> {path}")
     per_year = cov.groupby("report_year")["market_code"].nunique()
     lo, hi = int(per_year.min()), int(per_year.max())
     print(f"  {len(cov)} (year, market) pairs across {len(per_year)} report year(s); "
@@ -409,6 +437,10 @@ def main(argv=None) -> int:
                      choices=("legacy", "disaggregated", "tff", "supplemental"),
                      help="Default 'supplemental', the one report whose covered set has "
                           "changed (Soybean Meal entered in 2013, 12 markets -> 13).")
+    cvg.add_argument("--combined", action="store_true",
+                     help="Cover the futures-and-options COMBINED series of legacy/"
+                          "disaggregated/tff instead of futures-only. Ignored for "
+                          "supplemental, which is combined-only.")
     cvg.add_argument("--detail", action="store_true",
                      help="Print the full per-(year, market) table, not just entries "
                           "and exits.")

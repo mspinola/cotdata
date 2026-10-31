@@ -95,9 +95,18 @@ column we populate with nulls. A caller that aggregates `spread_contracts` for L
 ## 4. Supplemental against everything else: a different basis
 
 The Supplemental (Commodity Index Trader) report is **futures-and-options COMBINED**, where
-Legacy, Disaggregated and TFF are all futures-only. Its `Open_Interest_All` is therefore a
-different quantity for the same market and week: WHEAT-SRW on 2026-07-28 is **566,358
-combined against 463,502 futures-only**.
+the default series of Legacy, Disaggregated and TFF are all futures-only. Its
+`Open_Interest_All` is therefore a different quantity for the same market and week: WHEAT-SRW
+on 2026-07-28 is **566,358 combined against 463,502 futures-only**.
+
+> **Since 2026-10-31 the store holds both bases of the other three** (`cot_*_combined/`,
+> [ADR-0003](../adr/ADR-0003-combined-basis-is-in-scope.md)), so the basis is no longer a
+> property of the report but of the series you read. The Supplemental's open interest IS
+> comparable with `cot_legacy_combined/` for the same market-week (that is the 390/390 match
+> below, now reproducible from inside the store), and is NOT comparable with `cot_legacy/`.
+> Across the three reports, combined-against-combined behaves like futures-only against
+> futures-only in §5. Measured 2026-10-27: ES 2,843,639 combined against 1,955,711, GC
+> 518,784 against 396,810, CL 2,606,478 against 1,886,280.
 
 **Nothing in the file says so.** It is the one report with no `FutOnly_or_Combined` column, so
 `cotdata` asserts the flag rather than reading it, established by matching open interest
@@ -122,10 +131,13 @@ Detail: [`../analysis/2026-08-03-cit-supplemental-measurements.md`](../analysis/
 The enumerated safe comparisons, so that a consumer does not have to infer them from the
 prohibitions:
 
-- **Open interest, Legacy against TFF**: identical, exactly, always. Safe.
-- **`nonreportable`, Legacy against TFF**: identical, exactly, always. Safe.
-- **Open interest, any futures-only report against the Supplemental**: **not** safe, different
-  basis.
+- **Open interest, Legacy against TFF, same basis**: identical, exactly, always. Safe.
+- **`nonreportable`, Legacy against TFF, same basis**: identical, exactly, always. Safe.
+- **Open interest, any futures-only series against the Supplemental**: **not** safe, different
+  basis. Against `cot_legacy_combined/`: safe, the two agree 390/390.
+- **Anything across the two bases of one report** (`cot_legacy/` against
+  `cot_legacy_combined/`): not safe as a difference or ratio without knowing it measures the
+  option book, which is what the comparison is for if you make it deliberately.
 - **Anything above the reportable line, across any two reports**: not safe.
 - **Within one report, across weeks**: safe, subject to the gap rule (§6).
 

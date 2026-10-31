@@ -113,12 +113,34 @@ def _add_listings(base: pd.DataFrame, sym, read_fn) -> pd.DataFrame:
     return out
 
 
-def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
+# Each report's natural basis. Legacy, Disaggregated and TFF are published on both bases
+# and default to futures-only, which is what every existing consumer reads; the
+# Supplemental exists only on the combined basis. ``combined=None`` means "the natural one".
+NATURAL_BASIS = {"legacy": False, "disagg": False, "tff": False, "supplemental": True}
+
+# (report, combined) -> the store reader's NAME, resolved on each call so a test that
+# monkeypatches ``store.read_cot_legacy`` is honoured.
+_READERS = {
+    ("legacy", False): "read_cot_legacy",
+    ("disagg", False): "read_cot_disagg",
+    ("tff", False): "read_cot_tff",
+    ("supplemental", True): "read_cot_supplemental",
+    ("legacy", True): "read_cot_legacy_combined",
+    ("disagg", True): "read_cot_disagg_combined",
+    ("tff", True): "read_cot_tff_combined",
+}
+
+
+def get_cot(name: str, report: str = "legacy", combined: bool | None = None) -> pd.DataFrame:
     """Read a symbol's weekly COT history with predecessor code stitching.
 
     name: the internal pipeline symbol, e.g. 'ES' or 'GC'.
-    report: 'legacy' (default), 'disagg' (commodity futures only), 'tff' (financial
-    futures only), or 'supplemental' (13 agricultural markets, index traders split out).
+    report: 'legacy' (default), 'disagg' (commodities), 'tff' (financials), or
+    'supplemental' (13 agricultural markets, index traders split out).
+    combined: which basis. None (default) is the report's natural basis: futures-only
+    for legacy/disagg/tff, futures-and-options combined for supplemental. True reads the
+    combined series of legacy/disagg/tff (``cot_*_combined/``); False on 'supplemental'
+    raises, because the CFTC publishes no futures-only Supplemental.
 
     Returns:
     DataFrame indexed by date. The columns depend on the `report` requested:
@@ -129,23 +151,25 @@ def get_cot(name: str, report: str = "legacy") -> pd.DataFrame:
         NComm_Positions_Long_All_NoCIT, Comm_Positions_Long_All_NoCIT, etc.
     If no data exists, returns an empty DataFrame.
 
-    'supplemental' is futures-and-options COMBINED and the other three are futures-only,
-    so its Open_Interest_All is a different quantity for the same market and week. Do not
-    difference or ratio across reports without accounting for that.
+    Futures-and-options COMBINED open interest is a different quantity from futures-only
+    for the same market and week (it counts delta-weighted option equivalents), so do not
+    difference or ratio across bases, or across reports on different bases, without
+    accounting for that. By default 'supplemental' is the only combined read.
     """
     sym = REGISTRY.get(name)
     if sym is None:                       # allow lookup by primary CFTC code, not just symbol
         sym = next((s for s in REGISTRY.values() if s.cftc_code == name), None)
 
-    read_fn = {
-        "legacy": store.read_cot_legacy,
-        "disagg": store.read_cot_disagg,
-        "tff": store.read_cot_tff,
-        "supplemental": store.read_cot_supplemental,
-    }.get(report)
-    if not read_fn:
+    if report not in NATURAL_BASIS:
         raise ValueError(f"Unknown report type: {report}. Expected 'legacy', 'disagg', "
                          f"'tff', or 'supplemental'")
+    if combined is None:
+        combined = NATURAL_BASIS[report]
+    reader = _READERS.get((report, bool(combined)))
+    if reader is None:
+        raise ValueError(f"report={report!r} is published only on the futures-and-options "
+                         f"combined basis; there is no futures-only series to read")
+    read_fn = getattr(store, reader)
 
     if sym is None or not sym.cftc_code:
         return read_fn(name)
