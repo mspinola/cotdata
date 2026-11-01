@@ -183,7 +183,8 @@ def test_capture_includes_supplemental_from_2006(store_env):
     """History starts in January 2006, and unlike disagg/TFF there is no 2006-2016 bundle
     and no 404 window: every year from 2006 is served as its own zip."""
     from cotdata import vintage
-    assert [s.report_type for s in vintage.annual_sources(2005)] == ["legacy"]
+    # Both bases of Legacy exist in 2005 (combined from 1995); nothing else does yet.
+    assert {s.report_type for s in vintage.annual_sources(2005)} == {"legacy"}
     assert "supplemental" in [s.report_type for s in vintage.annual_sources(2006)]
     src = next(s for s in vintage.annual_sources(2026) if s.report_type == "supplemental")
     assert src.url.endswith("dea_cit_txt_2026.zip")

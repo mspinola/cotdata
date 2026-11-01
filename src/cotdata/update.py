@@ -1,4 +1,4 @@
-"""Producer CLI:  cotdata-update --cot-all
+"""Producer CLI:  cotdata-update --cot-all      # all seven CFTC COT series
                   cotdata-update --check        # read-only store status
                   cotdata-update --reconcile    # prune stale manifest ghosts
 Writes to $COTDATA_STORE. Schedule COT weekly (Friday, after the CFTC release).
@@ -22,8 +22,19 @@ def _parser() -> argparse.ArgumentParser:
                    help="Update the CFTC Supplemental (Commodity Index Trader) COT "
                         "(cross-platform). 13 agricultural markets, and futures-and-options "
                         "COMBINED: its open interest is not comparable with the other three.")
+    p.add_argument("--cot-legacy-combined", action="store_true",
+                   help="Update CFTC COT Legacy on the futures-and-options COMBINED basis "
+                        "(cross-platform, from 1995) into cot_legacy_combined/.")
+    p.add_argument("--cot-disagg-combined", action="store_true",
+                   help="Update CFTC COT Disaggregated on the futures-and-options COMBINED "
+                        "basis (cross-platform, from 2006) into cot_disagg_combined/.")
+    p.add_argument("--cot-tff-combined", action="store_true",
+                   help="Update Traders in Financial Futures (TFF) COT on the "
+                        "futures-and-options COMBINED basis (cross-platform, from 2006) "
+                        "into cot_tff_combined/.")
     p.add_argument("--cot-all", action="store_true",
-                   help="Update all COT pipelines (Legacy, Disagg, TFF, Supplemental).")
+                   help="Update every COT pipeline: Legacy, Disagg, TFF and Supplemental, "
+                        "plus the combined basis of the first three (seven domains).")
     p.add_argument("--symbols", nargs="+", default=None, help="Internal symbols; default = all in registry.")
     p.add_argument("--check", action="store_true",
                    help="Print store status (row counts, newest data, staleness) from "
@@ -81,9 +92,11 @@ def main(argv=None) -> None:
         return
 
     if not (args.cot_legacy or args.cot_disagg or args.cot_tff
-            or args.cot_supplemental or args.cot_all):
+            or args.cot_supplemental or args.cot_legacy_combined
+            or args.cot_disagg_combined or args.cot_tff_combined or args.cot_all):
         p.error("nothing to do — pass --check, --cot-legacy, --cot-disagg, --cot-tff, "
-                "--cot-supplemental or --cot-all. Every price producer moved to "
+                "--cot-supplemental, --cot-legacy-combined, --cot-disagg-combined, "
+                "--cot-tff-combined or --cot-all. Every price producer moved to "
                 "marketdata (ADR-0007): use 'marketdata-update --bars', or "
                 "'--ingest-databento'/'--build-databento' there.")
 
@@ -124,6 +137,22 @@ def main(argv=None) -> None:
             per_year = cov.groupby("report_year")["market_code"].nunique()
             print(f"cot_supplemental coverage: {int(per_year.min())}-{int(per_year.max())} "
                   f"markets per year over {len(per_year)} year(s).")
+
+    # The combined basis of the three reports above, each into its own domain. Run
+    # AFTER the futures-only passes so that a store whose consumers read only
+    # futures-only is current before the extra downloads start; a hard failure here is
+    # still a failed run, since --cot-all promises all seven.
+    for flag, mod_name, domain in (
+            (args.cot_legacy_combined, "cftc", "cot_legacy_combined"),
+            (args.cot_disagg_combined, "cftc_disagg", "cot_disagg_combined"),
+            (args.cot_tff_combined, "cftc_tff", "cot_tff_combined")):
+        if flag or args.cot_all:
+            import importlib
+            mod = importlib.import_module(f".providers.{mod_name}", package=__package__)
+            r = mod.update(combined=True)
+            kinds.append(domain)
+            if not (r or {}).get("ok", True):
+                failed_kinds.append(domain)
 
     # Structured heartbeat for downstream tools: rebuild status.json from the now-
     # updated manifest. Pollers detect new data via newest_data[<domain>].

@@ -75,6 +75,41 @@ def read_cot_supplemental(name: str) -> pd.DataFrame:
     return pd.read_parquet(p) if p.exists() else pd.DataFrame()
 
 
+# ── COT futures-and-options COMBINED basis (Legacy, Disaggregated, TFF) ────
+# The same three reports, on the basis the Supplemental already uses. Each lives in its
+# own domain so the futures-only tables above are untouched, and so a consumer must name
+# the basis it wants: there is no path by which a combined row reaches a futures-only
+# reader. See docs/adr/ADR-0003-combined-basis-is-in-scope.md.
+def write_cot_legacy_combined(name: str, df: pd.DataFrame, source: str) -> None:
+    _atomic_write_parquet(df, config.cot_legacy_combined_dir() / f"{name}.parquet")
+    _touch_manifest("cot_legacy_combined", name, df, source)
+
+
+def read_cot_legacy_combined(name: str) -> pd.DataFrame:
+    p = config.cot_legacy_combined_dir() / f"{name}.parquet"
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
+
+
+def write_cot_disagg_combined(name: str, df: pd.DataFrame, source: str) -> None:
+    _atomic_write_parquet(df, config.cot_disagg_combined_dir() / f"{name}.parquet")
+    _touch_manifest("cot_disagg_combined", name, df, source)
+
+
+def read_cot_disagg_combined(name: str) -> pd.DataFrame:
+    p = config.cot_disagg_combined_dir() / f"{name}.parquet"
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
+
+
+def write_cot_tff_combined(name: str, df: pd.DataFrame, source: str) -> None:
+    _atomic_write_parquet(df, config.cot_tff_combined_dir() / f"{name}.parquet")
+    _touch_manifest("cot_tff_combined", name, df, source)
+
+
+def read_cot_tff_combined(name: str) -> pd.DataFrame:
+    p = config.cot_tff_combined_dir() / f"{name}.parquet"
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
+
+
 
 # ── Manifest ──────────────────────────────────────────────────────────────
 # ── The COT / price seam ──────────────────────────────────────────────────
@@ -99,6 +134,9 @@ _DOMAIN_HALF = {
     "cot_disagg": "cot",
     "cot_tff": "cot",
     "cot_supplemental": "cot",
+    "cot_legacy_combined": "cot",
+    "cot_disagg_combined": "cot",
+    "cot_tff_combined": "cot",
 }
 
 
@@ -119,7 +157,8 @@ def _empty_manifest() -> dict:
     # specs (both live in marketdata). Legacy stores that have them still read fine —
     # load_manifest() overlays whatever domains it finds on disk.
     return {"schema_version": config.SCHEMA_VERSION,
-            "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}, "cot_supplemental": {}}
+            "cot_legacy": {}, "cot_disagg": {}, "cot_tff": {}, "cot_supplemental": {},
+            "cot_legacy_combined": {}, "cot_disagg_combined": {}, "cot_tff_combined": {}}
 
 
 def _read_json(p) -> dict:
@@ -285,6 +324,9 @@ _DOMAIN_DIRS = {
     "cot_disagg": config.cot_disagg_dir,
     "cot_tff": config.cot_tff_dir,
     "cot_supplemental": config.cot_supplemental_dir,
+    "cot_legacy_combined": config.cot_legacy_combined_dir,
+    "cot_disagg_combined": config.cot_disagg_combined_dir,
+    "cot_tff_combined": config.cot_tff_combined_dir,
 }
 
 

@@ -166,6 +166,13 @@ fixtures.
 
 ## 3c. Decision: futures-only, `combined` is constant-False for now
 
+> **Amended 2026-10-31 ([ADR-0003](../adr/ADR-0003-combined-basis-is-in-scope.md)).** The
+> carry-forward below ended. `annual_sources` now emits both bases of every annual zip
+> (Legacy combined from 1995, Disaggregated/TFF combined from 2006), `Source` and every
+> snapshot record carry `combined`, and the fetch default captures all seven current-week
+> statics. The natural key needed no migration, exactly as predicted here. The section is
+> kept as written for the history of the decision.
+
 `annual_sources` fetches `dea_fut_xls` / `fut_disagg_txt` / `fut_fin_txt` — all
 **futures-only**. The futures-and-options-combined files are NOT fetched, so the
 `combined` dimension of the natural key is `False` for every row today.
@@ -554,9 +561,11 @@ same cry-wolf rate §7 finding 2 was corrected for.
 ### `combined` is now read from the file
 
 Both reports carry a `FutOnly_or_Combined` column. It is read rather than hardcoded, and a
-file mixing the two is refused. Today it is constant-`FutOnly`, so nothing changes, but
-adding the combined files becomes purely a fetch-list change with the canonicaliser already
-correct. §3c's carry-forward stands; the code no longer assumes it.
+file mixing the two is refused. When this was written it was constant-`FutOnly`; since
+2026-10-31 the combined files are fetched too, and the ingest additionally checks the value
+read from the file against the basis the snapshot was captured under, refusing a mismatch
+(`vintage_cli._canonicalisers`). The Legacy files carry no such column, so for them the
+snapshot's `combined` flag, set from the URL at capture, is passed straight through.
 
 ### `canonicalize_legacy` was deliberately left alone
 

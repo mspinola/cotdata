@@ -51,6 +51,22 @@ def cot_supplemental_dir() -> Path:
     return store_root() / "cot_supplemental"
 
 
+# Futures-and-options COMBINED basis of the three reports above. A separate directory per
+# basis, never a column: the two bases are different series for the same market and week
+# (combined open interest counts delta-weighted option equivalents), and a consumer that
+# reads `cot_legacy/` must keep getting exactly what it got before these were added.
+def cot_legacy_combined_dir() -> Path:
+    return store_root() / "cot_legacy_combined"
+
+
+def cot_disagg_combined_dir() -> Path:
+    return store_root() / "cot_disagg_combined"
+
+
+def cot_tff_combined_dir() -> Path:
+    return store_root() / "cot_tff_combined"
+
+
 def manifest_path() -> Path:
     """The legacy aggregate manifest, written by BOTH halves.
 

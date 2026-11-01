@@ -817,9 +817,13 @@ def ingest_canonical(canonical: pd.DataFrame, *, snapshot_id: str,
 
 
 # ── Point-in-time read (§4 / acceptance §4) ─────────────────────────────────
-def asof(t, *, report_date=None, market_code=None, report_type=None) -> pd.DataFrame:
+def asof(t, *, report_date=None, market_code=None, report_type=None,
+         combined=None) -> pd.DataFrame:
     """The dataset as known at timestamp ``t``: for each natural key, the row with the
-    greatest ``observed_at`` <= t. Rows first observed after ``t`` are absent."""
+    greatest ``observed_at`` <= t. Rows first observed after ``t`` are absent.
+
+    ``combined`` filters to one basis (True / False); None returns both. ``combined`` is
+    in the natural key, so both bases of one market-week are two rows, never one."""
     obs = read_observations()
     if obs.empty:
         return obs
@@ -831,6 +835,8 @@ def asof(t, *, report_date=None, market_code=None, report_type=None) -> pd.DataF
         obs = obs[obs["market_code"] == str(market_code)]
     if report_type is not None:
         obs = obs[obs["report_type"] == report_type]
+    if combined is not None:
+        obs = obs[obs["combined"].astype(bool) == bool(combined)]
     return _latest_by_key(obs).reset_index(drop=True)
 
 
@@ -843,13 +849,32 @@ def asof(t, *, report_date=None, market_code=None, report_type=None) -> pd.DataF
 COVERAGE_COLUMNS = ["report_type", "report_year", "market_code", "market_name",
                     "first_report_date", "last_report_date", "weeks"]
 
+# Each report's natural basis, mirroring ``cot.NATURAL_BASIS``. Coverage is derived per
+# (report_type, basis) because the two bases are different series and can cover
+# different markets (a market with options open interest but no futures trades appears
+# on the combined basis only). ``combined=None`` means the natural one, so every call
+# written before the combined series existed keeps its meaning.
+NATURAL_BASIS = {"legacy": False, "disaggregated": False, "tff": False, "supplemental": True}
+
+
+def _resolve_basis(report_type: str, combined) -> bool:
+    if combined is None:
+        return NATURAL_BASIS.get(report_type, False)
+    if report_type == "supplemental" and not combined:
+        raise ValueError("the Supplemental report is published only on the combined basis")
+    return bool(combined)
+
 
 def _coverage_dir() -> Path:
     return vintage.vintage_root() / "coverage"
 
 
-def coverage_path(report_type: str) -> Path:
-    return _coverage_dir() / f"{report_type}.parquet"
+def coverage_path(report_type: str, combined=None) -> Path:
+    """``{report_type}.parquet`` on the natural basis (unchanged from before the combined
+    series existed), ``{report_type}_combined.parquet`` for the non-natural one."""
+    basis = _resolve_basis(report_type, combined)
+    suffix = "_combined" if basis != NATURAL_BASIS.get(report_type, False) else ""
+    return _coverage_dir() / f"{report_type}{suffix}.parquet"
 
 
 def clean_market_name(v) -> str | None:
@@ -913,8 +938,9 @@ def _coverage_from(df: pd.DataFrame, report_type: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=COVERAGE_COLUMNS)
 
 
-def derive_coverage(report_type: str) -> pd.DataFrame:
-    """Which markets appear in the observation store for ``report_type``, per report year.
+def derive_coverage(report_type: str, combined=None) -> pd.DataFrame:
+    """Which markets appear in the observation store for ``report_type`` on one basis
+    (``combined`` None = the report's natural basis), per report year.
 
     Change-only writes do not lose coverage: a market-week's first sighting is always
     written, so every (report_year, market_code) that was ever ingested has at least one
@@ -925,15 +951,16 @@ def derive_coverage(report_type: str) -> pd.DataFrame:
     which is a snapshot with no freshness guarantee: prefer this one when correctness
     matters and the artifact when you want what was published.
     """
+    basis = _resolve_basis(report_type, combined)
     obs = read_observations()
     if obs.empty:
         return pd.DataFrame(columns=COVERAGE_COLUMNS)
-    obs = obs[obs["report_type"] == report_type]
+    obs = obs[(obs["report_type"] == report_type) & (obs["combined"].astype(bool) == basis)]
     return _coverage_from(obs[["report_date", "market_code", "market_name"]], report_type)
 
 
-def write_coverage(report_type: str) -> tuple[Path, pd.DataFrame]:
-    """Emit the coverage artifact for ``report_type``. Rewritten in full each time,
+def write_coverage(report_type: str, combined=None) -> tuple[Path, pd.DataFrame]:
+    """Emit the coverage artifact for ``report_type`` on one basis. Rewritten in full each time,
     because it is a derived view of the observations and never a log.
 
     Takes the same single-writer lock as ingest. Not for the write, which is atomic, but
@@ -943,8 +970,8 @@ def write_coverage(report_type: str) -> tuple[Path, pd.DataFrame]:
     answer everywhere else the two writers could interleave.
     """
     with _WriteLock(vintage.vintage_root()):
-        cov = derive_coverage(report_type)
-        path = coverage_path(report_type)
+        cov = derive_coverage(report_type, combined)
+        path = coverage_path(report_type, combined)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".parquet.tmp")
         cov.to_parquet(tmp, index=False)
@@ -952,8 +979,8 @@ def write_coverage(report_type: str) -> tuple[Path, pd.DataFrame]:
     return path, cov
 
 
-def read_coverage(report_type: str) -> pd.DataFrame:
-    p = coverage_path(report_type)
+def read_coverage(report_type: str, combined=None) -> pd.DataFrame:
+    p = coverage_path(report_type, combined)
     return pd.read_parquet(p) if p.exists() else pd.DataFrame(columns=COVERAGE_COLUMNS)
 
 

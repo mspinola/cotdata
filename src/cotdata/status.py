@@ -19,7 +19,8 @@ def status_path():
 
 # Domains shown by --check, in report order.
 _DOMAINS = ["prices", "metadata", "cot", "cot_legacy", "cot_disagg", "cot_tff",
-            "cot_supplemental"]
+            "cot_supplemental",
+            "cot_legacy_combined", "cot_disagg_combined", "cot_tff_combined"]
 
 # Domains this package no longer writes. ADR-0007 moved bars and contract specs to
 # marketdata, and `store._DOMAIN_HALF` keeps them declared so a pre-move store can
@@ -149,11 +150,11 @@ def format_report(manifest: dict, root: str = "", today: Optional[dt.date] = Non
         L.append("store is empty — no data written yet.")
         return "\n".join(L)
 
-    L.append(f"{'domain':<18}{'entries':>8}{'rows':>13}{'newest data':>14}"
+    L.append(f"{'domain':<20}{'entries':>8}{'rows':>13}{'newest data':>14}"
              f"{'last write (UTC)':>22}{'behind':>8}")
     for domain, d in s["domains"].items():
         behind = "—" if d["behind_today"] is None else f"{d['behind_today']}d"
-        L.append(f"{domain:<18}{d['entries']:>8}{d['rows']:>13,}"
+        L.append(f"{domain:<20}{d['entries']:>8}{d['rows']:>13,}"
                  f"{str(d['newest']):>14}{str(d['last_write']):>22}{behind:>8}"
                  f"{'  ← RETIRED' if d['retired'] else ''}")
 

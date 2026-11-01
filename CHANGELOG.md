@@ -8,6 +8,50 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The futures-and-options COMBINED basis of Legacy, Disaggregated and TFF**, in three new
+  store domains `cot_legacy_combined/`, `cot_disagg_combined/`, `cot_tff_combined/`
+  ([ADR-0003](docs/adr/ADR-0003-combined-basis-is-in-scope.md)). Until now cotdata fetched
+  one basis per report, futures-only for these three and combined for the Supplemental,
+  which has no other. The CFTC publishes the three on both: `dea_com_xls_{year}.zip` from
+  1995 (`deacom_xls_` before 2004), `com_disagg_txt_{year}.zip` and `com_fin_txt_{year}.zip`
+  from 2006 with their own 2006-2016 bundles. Same parsers, same columns, a different
+  quantity: on 2026-10-27 ES open interest is 2,843,639 combined against 1,955,711
+  futures-only. Producer flags `--cot-legacy-combined`, `--cot-disagg-combined`,
+  `--cot-tff-combined`; **`--cot-all` now runs all seven**, so every scheduled launcher
+  picks the new domains up on its next run (the first such run downloads about 32 years
+  of Legacy combined zips plus two bundles, once; afterwards the usual HEAD-check skip
+  applies). Read with `get_cot(name, report, combined=True)`; `combined=None`, the
+  default, is each report's natural basis, so every existing call returns what it did.
+  `combined=False` on `supplemental` raises. The Disaggregated and TFF producers check the
+  file's own `FutOnly_or_Combined` against the basis they were asked for and refuse a
+  mismatch; the Legacy files carry no such column, so the two bases are kept apart by
+  construction there (separate zip names, caches and writers behind one flag).
+- **`cotdata.cit`: the Supplemental joined to Legacy combined.** `cit.decompose(name)` reads a
+  market's Supplemental and Legacy COMBINED rows and, week by week, splits each Legacy bucket
+  into its ex-index part (the Supplemental's `_NoCIT` column) and the index position carved
+  out of it; `cit.check(name)` counts how the join holds. It never reads futures-only Legacy
+  (nothing lines up on that basis) and refuses a market where open interest or
+  non-reportable disagree between the two reports, since those agree exactly on the combined
+  basis and a breach is a basis, stitching or vintage error. Measured over the whole history
+  from the store: exact on 13,753 of 13,753 shared market-weeks, 187 carve-outs at -1 from
+  rounding and none below; between a fifth and two thirds of Legacy's commercial longs in
+  these markets is index money
+  ([docs/analysis/2026-10-31-cit-legacy-combined-decomposition.md](docs/analysis/2026-10-31-cit-legacy-combined-decomposition.md)).
+  Same doc corrects Soybean Meal's first Supplemental report to 2013-04-02 (the 2026-08-03
+  measurements doc gave the 2013 file's first date, 2013-01-08).
+- **Vintage capture covers every CFTC COT file.** `annual_sources` emits both bases of
+  every annual zip (seven per year from 2010), `Source` and every snapshot record carry a
+  `combined` flag, and the fetch default captures **all seven current-week statics**
+  (`deafut`, `deacom`, `f_disagg`, `c_disagg`, `FinFutWk`, `FinComWk`, `deacit`), each of
+  which holds its report date in the same field the schedule reader already uses, so the
+  `published` release date is unchanged and the retained bytes are now complete per
+  release. Ingest passes the snapshot's basis to the Legacy canonicaliser and, for
+  Disaggregated and TFF, checks the file's own flag against it. `derive_coverage`,
+  `write_coverage`, `read_coverage` and `asof` take `combined`; the coverage artifact for
+  a report's natural basis keeps its name and `{report}_combined.parquet` holds the other.
+  `cotdata-vintage coverage --combined`.
+- `cotdata-update --check` widens the domain column to fit the new names.
+
 - **RB stitches `111652` (NY Harbor unleaded gasoline) back to 1986.** A product change,
   unleaded to RBOB, on the same 42,000 gal contract and the same hedger base: a 43-week
   migration through 2006 in which combined open interest holds between 127k and 172k and
