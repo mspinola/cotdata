@@ -26,6 +26,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file's own `FutOnly_or_Combined` against the basis they were asked for and refuse a
   mismatch; the Legacy files carry no such column, so the two bases are kept apart by
   construction there (separate zip names, caches and writers behind one flag).
+- **`cotdata.cit`: the Supplemental joined to Legacy combined.** `cit.decompose(name)` reads a
+  market's Supplemental and Legacy COMBINED rows and, week by week, splits each Legacy bucket
+  into its ex-index part (the Supplemental's `_NoCIT` column) and the index position carved
+  out of it; `cit.check(name)` counts how the join holds. It never reads futures-only Legacy
+  (nothing lines up on that basis) and refuses a market where open interest or
+  non-reportable disagree between the two reports, since those agree exactly on the combined
+  basis and a breach is a basis, stitching or vintage error. Measured over the whole history
+  from the store: exact on 13,753 of 13,753 shared market-weeks, 187 carve-outs at -1 from
+  rounding and none below; between a fifth and two thirds of Legacy's commercial longs in
+  these markets is index money
+  ([docs/analysis/2026-10-31-cit-legacy-combined-decomposition.md](docs/analysis/2026-10-31-cit-legacy-combined-decomposition.md)).
+  Same doc corrects Soybean Meal's first Supplemental report to 2013-04-02 (the 2026-08-03
+  measurements doc gave the 2013 file's first date, 2013-01-08).
 - **Vintage capture covers every CFTC COT file.** `annual_sources` emits both bases of
   every annual zip (seven per year from 2010), `Source` and every snapshot record carry a
   `combined` flag, and the fetch default captures **all seven current-week statics**

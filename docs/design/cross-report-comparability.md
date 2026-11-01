@@ -117,7 +117,9 @@ Legacy, not Disaggregated, so the two cannot be differenced to isolate levered s
 index book is carved out of commercial, non-commercial **and non-commercial spreading**, three
 buckets where CFTC's own prose names two.
 
-**Coverage is 12 markets, then 13 from 2013**, when Soybean Meal entered. Both counts circulate
+**Coverage is 12 markets, then 13 from 2013-04-02**, when Soybean Meal entered (the
+2026-08-03 analysis gives 2013-01-08, the 2013 file's first date; corrected in the
+2026-10-31 analysis). Both counts circulate
 because both are right for part of the history, and six markets were renamed without changing
 code. `cotdata-vintage coverage` derives the covered set from the data and prints every entry
 and exit.
@@ -134,7 +136,15 @@ prohibitions:
 - **Open interest, Legacy against TFF, same basis**: identical, exactly, always. Safe.
 - **`nonreportable`, Legacy against TFF, same basis**: identical, exactly, always. Safe.
 - **Open interest, any futures-only series against the Supplemental**: **not** safe, different
-  basis. Against `cot_legacy_combined/`: safe, the two agree 390/390.
+  basis. Against `cot_legacy_combined/`: safe, the two agree 390/390 (13,753/13,753 over the
+  full history, 2026-10-31).
+- **The Supplemental against `cot_legacy_combined/`, bucket by bucket**: safe, and the one
+  subtraction across two reports that IS interpretable, because the Supplemental's `_NoCIT`
+  buckets are Legacy combined's buckets with the index traders removed: same traders, same
+  week, same classification. Legacy bucket minus `_NoCIT` bucket is the index position carved
+  from it, to one contract of rounding per bucket. `cotdata.cit.decompose` makes it and
+  refuses when open interest or non-reportable disagree. Measurements:
+  [`../analysis/2026-10-31-cit-legacy-combined-decomposition.md`](../analysis/2026-10-31-cit-legacy-combined-decomposition.md).
 - **Anything across the two bases of one report** (`cot_legacy/` against
   `cot_legacy_combined/`): not safe as a difference or ratio without knowing it measures the
   option book, which is what the comparison is for if you make it deliberately.

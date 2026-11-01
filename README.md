@@ -118,6 +118,11 @@ cit     = cotdata.get_cot("CC", report="supplemental")  # Index Traders (13 ags,
 # ...and the futures-and-options COMBINED basis of the first three:
 legacy_fo = cotdata.get_cot("ES", report="legacy", combined=True)
 tff_fo    = cotdata.get_cot("ES", report="tff", combined=True)
+
+# ...and, for the 13 Supplemental markets, Legacy combined joined to the Supplemental
+# week by week, so each Legacy bucket splits into "ex index" and "index traders from it":
+from cotdata import cit
+parts = cit.decompose("ZW")   # comm_long, comm_long_nocit, cit_from_comm_long, ... (cotdata/cit.py)
 ```
 
 > [!WARNING]
@@ -488,13 +493,16 @@ Entity-specific positioning and trader counts for financial markets (CFTC TFF Fu
 The three reports above on the CFTC's **futures-and-options combined** basis (`dea_com_xls_*`, `com_disagg_txt_*`, `com_fin_txt_*`). Same parsers, same columns, same per-code files; Legacy combined starts in **1995**, the other two in 2006. The Disaggregated and TFF files state their basis in `FutOnly_or_Combined` and the producer refuses a file whose statement disagrees with the directory it is writing to; the Legacy files carry no such column, so for them the URL is the only evidence and the two bases are kept apart by construction (separate zip names, caches and writers behind one flag). Measured on 2026-10-27: ES **2,843,639 combined / 1,955,711 futures-only**, GC 518,784 / 396,810, CL 2,606,478 / 1,886,280. See [ADR-0003](docs/adr/ADR-0003-combined-basis-is-in-scope.md).
 
 ### COT Supplemental Data (`cot_supplemental/{symbol}_{code}.parquet`)
-Index-trader positioning for 13 select agricultural markets (CFTC Supplemental / Commodity Index Trader Report). **History starts in January 2006**, and the covered set was **12 markets until Soybean Meal entered in 2013**. Indexed by tz-naive `Report_Date_as_MM_DD_YYYY` (renamed at parse from CFTC's `As_of_Date_In_Form_*`, whose own name changed in 2013).
+Index-trader positioning for 13 select agricultural markets (CFTC Supplemental / Commodity Index Trader Report). **History starts in January 2006**, and the covered set was **12 markets until Soybean Meal entered on 2013-04-02**. Indexed by tz-naive `Report_Date_as_MM_DD_YYYY` (renamed at parse from CFTC's `As_of_Date_In_Form_*`, whose own name changed in 2013).
 
 > [!WARNING]
 > **Combined basis, and the file does not say so.** This is the only report with no futures-only variant, and unlike Disaggregated and TFF it carries no `FutOnly_or_Combined` column. Verified by matching open interest against both Legacy series: 390/390 against futures-and-options combined, 0/390 against futures-only. Its open interest is therefore **not** comparable with the other three for the same market and week.
 
 > [!NOTE]
 > **Positions are net of index traders.** `Comm_Positions_Long_All_NoCIT` is commercial *minus* the index book, not Legacy's commercial. The index book is carved out of commercial, non-commercial **and non-commercial spreading** — three buckets, where CFTC's own prose names two. Non-Reportable is untouched, because index traders are reportable by definition.
+
+> [!TIP]
+> **It joins to Legacy combined, exactly.** The `_NoCIT` buckets are `cot_legacy_combined/`'s buckets with the index traders removed, for the same market and week, and open interest and non-reportable agree to the contract on all 13,753 shared weeks 2006-2026. `cotdata.cit.decompose(name)` makes the join and splits each Legacy bucket into its ex-index part and the index position carved from it (spreading as the residual, since the store does not keep Legacy's spread column); it refuses a market where the exact identities fail, which is a basis or vintage error. Measurements, including how much of Legacy's "commercial" is index money per market: [docs/analysis/2026-10-31-cit-legacy-combined-decomposition.md](docs/analysis/2026-10-31-cit-legacy-combined-decomposition.md).
 
 > [!NOTE]
 > **Lossless Image**: Like Disaggregated and TFF, these parquets are a lossless image of the source CFTC `txt` files, including CFTC's own header typos (`NComm_Postions_Spread_All_NoCIT`).
