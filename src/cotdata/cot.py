@@ -131,7 +131,8 @@ _READERS = {
 }
 
 
-def get_cot(name: str, report: str = "legacy", combined: bool | None = None) -> pd.DataFrame:
+def get_cot(name: str, report: str = "legacy", combined: bool | None = None,
+            listing: str | None = None) -> pd.DataFrame:
     """Read a symbol's weekly COT history with predecessor code stitching.
 
     name: the internal pipeline symbol, e.g. 'ES' or 'GC'.
@@ -155,6 +156,15 @@ def get_cot(name: str, report: str = "legacy", combined: bool | None = None) -> 
     for the same market and week (it counts delta-weighted option equivalents), so do not
     difference or ratio across bases, or across reports on different bases, without
     accounting for that. By default 'supplemental' is the only combined read.
+
+    listing: which of the symbol's listings to read. None (default) is the whole market:
+    the primary code, its hist_codes predecessors stitched behind it, and its sum_codes
+    listings (full-size, micro) added in primary units. "primary" drops the sum_codes
+    listings and keeps the stitched primary alone (the E-mini by itself, as most
+    published COT indexes read it). A CFTC code from the symbol's sum_codes returns that
+    one listing in its OWN contract units, unscaled and unstitched (e.g. ES "13874U", the
+    Micro E-mini), so its counts must not be added to or differenced against another
+    listing's.
     """
     sym = REGISTRY.get(name)
     if sym is None:                       # allow lookup by primary CFTC code, not just symbol
@@ -172,10 +182,20 @@ def get_cot(name: str, report: str = "legacy", combined: bool | None = None) -> 
     read_fn = getattr(store, reader)
 
     if sym is None or not sym.cftc_code:
+        if listing is not None:
+            raise ValueError(f"listing= needs a registry symbol; {name!r} is not one")
         return read_fn(name)
+    if listing not in (None, "primary"):
+        codes = {code for code, _, _ in sum_code_scales(sym.sum_codes)}
+        if listing not in codes:
+            raise ValueError(f"{listing!r} is not a sum_codes listing of {sym.internal} "
+                             f"(listings: {sorted(codes) or 'none'}; or None / 'primary')")
+        return read_fn(f"{sym.internal}_{listing}")
     primary = read_fn(f"{sym.internal}_{sym.cftc_code}")
     stitched = _stitch_predecessors(primary, sym, read_fn) if sym.hist_codes else primary
-    return _add_listings(stitched, sym, read_fn) if sym.sum_codes else stitched
+    if listing == "primary" or not sym.sum_codes:
+        return stitched
+    return _add_listings(stitched, sym, read_fn)
 
 
 def _stitch_predecessors(primary: pd.DataFrame, sym, read_fn) -> pd.DataFrame:
