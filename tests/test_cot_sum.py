@@ -110,3 +110,24 @@ def test_hist_scale_leaves_trader_counts_alone(monkeypatch):
     assert out.loc["1997-12-30", "Open_Interest_All"] == 200
     assert out.loc["1997-12-30", "Comm_Positions_Long_All"] == 100
     assert out.loc["1997-12-30", "Traders_Tot_All"] == 366
+
+
+def test_listing_primary_drops_the_summed_listings(summed):
+    out = cot.get_cot("XX", report="tff", listing="primary")
+    assert list(out.index) == list(D[1:])
+    assert list(out["Open_Interest_All"]) == [100, 200]
+
+
+def test_listing_code_reads_that_listing_alone_unscaled(summed):
+    out = cot.get_cot("XX", report="tff", listing="BIG")
+    assert list(out.index) == list(D[:2])
+    assert list(out["Open_Interest_All"]) == [30, 40]      # own units, no x5 / x2
+
+
+def test_listing_default_is_unchanged(summed):
+    assert cot.get_cot("XX", report="tff").equals(cot.get_cot("XX", report="tff", listing=None))
+
+
+def test_listing_rejects_a_code_that_is_not_a_listing(summed):
+    with pytest.raises(ValueError, match="not a sum_codes listing"):
+        cot.get_cot("XX", report="tff", listing="NOPE")

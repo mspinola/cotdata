@@ -8,6 +8,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`get_cot(..., listing=)`** reads one listing of a symbol that sums several. `None`
+  (default, unchanged) is the whole market: primary, stitched predecessors and `sum_codes`
+  listings added in primary units. `"primary"` drops the `sum_codes` listings (the equity
+  E-mini alone, which is how CMR's published index reads it). A `sum_codes` CFTC code
+  returns that one listing in its own contract units, unscaled (e.g. ES `"13874U"`, the
+  Micro E-mini). Additive; no existing call changes.
+
 - **The futures-and-options COMBINED basis of Legacy, Disaggregated and TFF**, in three new
   store domains `cot_legacy_combined/`, `cot_disagg_combined/`, `cot_tff_combined/`
   ([ADR-0003](docs/adr/ADR-0003-combined-basis-is-in-scope.md)). Until now cotdata fetched
