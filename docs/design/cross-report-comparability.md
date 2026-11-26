@@ -6,6 +6,11 @@ reports. The pattern is always the same: two reports describe the same market an
 week, a category in one looks like a category in the other, and the difference or ratio
 between them is computed. **The result is not interpretable, and nothing in the data says so.**
 
+The opposite error has been made too: generalising the Legacy-against-TFF finding to every pair
+of reports. **Disaggregated against Legacy is the exception**: on the same basis the
+Disaggregated groups are an exact split of the Legacy buckets (§3). A fourth recorded error,
+in npf on 2026-11-25, was this one.
+
 `cotdata` serves all four reports, so this is its fact to hold. Consumers that computed one of
 these quantities did not do anything careless; they read two columns with plausible names.
 
@@ -14,8 +19,9 @@ these quantities did not do anything careless; they read two columns with plausi
 ## 1. The rule, before the cases
 
 > **Two categories from two different reports may only be compared when both reports partition
-> open interest the same way AND count spreading the same way. In practice that is almost
-> never, and the exceptions are enumerated below rather than inferred.**
+> open interest the same way AND count spreading the same way. Across most pairs that is
+> never, and the exceptions are enumerated below rather than inferred. The one pair where the
+> partition nests is Disaggregated inside Legacy (§3).**
 
 Three things can differ independently, and each alone is enough to break a comparison:
 
@@ -66,14 +72,88 @@ TFF asset_manager + leveraged + other_reportable   = 15,278
 
 ### The consequence
 
-**Any quantity built by subtracting one report's category from another's mixes a
+**Any quantity built by subtracting a TFF category from a Legacy one (or the reverse) mixes a
 classification difference with a spreading-convention difference, and neither is recoverable
-from published data. The only quantities that carry across are open interest and
-`nonreportable`.**
+from published data. The only quantities that carry between those two reports are open
+interest and `nonreportable`.** This is a fact about Legacy and TFF, not about every pair:
+§3 is the counter-case.
 
 ---
 
-## 3. The `spread_contracts` trap, which is ours
+## 3. Disaggregated against Legacy: an exact split, to the contract
+
+The opposite of §2. **On the same basis, the Disaggregated report re-partitions each Legacy
+bucket and never moves a contract across the Legacy commercial line:**
+
+```
+Prod_Merc long  + Swap long  + Swap spread           = Legacy Comm long
+Prod_Merc short + Swap short + Swap spread           = Legacy Comm short
+M_Money long    + Other_Rept long                    = Legacy NonComm long
+M_Money short   + Other_Rept short                   = Legacy NonComm short
+M_Money spread  + Other_Rept spread                  = Legacy NonComm spread
+Open_Interest_All, NonRept long, NonRept short       identical
+```
+
+Swap spreading appears on BOTH commercial sides because Legacy nets commercial spreading into
+long and short (the convention of §2), so a swap dealer's spread position is a long and a short
+there. Managed money and other reportable keep their spreading broken out, as Legacy
+non-commercial does.
+
+Measured 2026-11-25 on the futures-only series (`get_cot(sym, "disagg")` against
+`get_cot(sym, "legacy")`, the defaults), every registry symbol with a Disaggregated series:
+**28 markets, 2006-06-13 to 2026-11-17, 29,562 shared market-weeks.** (The npf universe's 23
+commodity markets are among them; the other five are DC, WBS, KE, ZO, ZR.)
+
+| result | markets |
+|---|---|
+| every identity above holds on **100.00%** of weeks, maximum residual **0** | 27 |
+| RB: **98.97%**, 11 failing weeks, 2006-06-13 to 2006-08-22 | 1 |
+
+**The RB weeks are a stitching effect, not a report fact.** Open interest disagrees on the same
+11 weeks, by up to 43k contracts. RBOB (`111659`) was listed in 2006 beside the unleaded
+gasoline contract it replaced (`111652`, an RB `hist_codes` entry). Legacy's history holds both
+codes, so on overlap weeks `get_cot` keeps the larger open interest, which until 2006-08-29 is
+the old contract. The Disaggregated store has no `111652` file, so it reads RBOB alone. Against
+the primary code's own Legacy file (`store.read_cot_legacy("RB_111659")`, no stitch) every
+identity holds on all 11 weeks. The fact to carry: **a stitched Legacy series and an
+unstitched Disaggregated series can be different contracts on hand-off weeks**, so check
+open interest before trusting a cross-report identity on a market with `hist_codes`.
+
+Three things to know before using it:
+
+- **Non-commercial spreading is derived, not read.** The store's Legacy table has no
+  non-commercial spreading column (§4), so the Legacy side of the spreading identity is the
+  closure residual `Open_Interest_All - Comm long - NonComm long - NonRept long`. That it
+  closes exactly against the Disaggregated spreading columns is itself the evidence that the
+  residual is the spreading.
+- **Trader counts do not add.** A trader is counted once in a Legacy bucket but can appear in
+  several Disaggregated categories (swap long and swap spread, say). `Traders_Prod_Merc_Long + Traders_Swap_Long == Traders_Comm_Long` holds on 0%
+  of weeks in CL, NG, GC, HG, SI and WBS and at most 61% (OJ) anywhere. Use positions.
+- **Combined basis: exact only to option-delta rounding.** On `cot_disagg_combined/` against
+  `cot_legacy_combined/` open interest and non-reportable still agree on every week, but the
+  bucket identities close exactly on only 13% to 64% of weeks, because each report rounds its
+  delta-weighted option equivalents separately. The residual is never more than **2
+  contracts** (LBR 8, which is 2 at the 4.0 `hist_codes` scale of its predecessor; RB aside
+  for the stitch above). Run the reproducer with `--combined`.
+
+### The consequence
+
+Disaggregated groups can be read as a decomposition of Legacy: producer/merchant plus swap
+dealer IS the commercial bucket, and managed money plus other reportable IS the non-commercial
+bucket, the same traders on the same week. **Legacy bucket minus its Disaggregated components
+is zero, not a residual to interpret**, and a share such as "managed money as a fraction of
+Legacy non-commercial" is a genuine within-bucket share. What does not follow: that a
+Disaggregated group behaves like the Legacy bucket containing it. Producers alone and swap
+dealers alone are different series: in every grain and livestock market, swap dealers are net
+long on at least 86% of weeks and producers net short on at least 69% (2006-2026, same run),
+so the split is exact while the components pull opposite ways.
+
+Reproducer: [`../../scripts/disagg_legacy_split.py`](../../scripts/disagg_legacy_split.py).
+Applies to commodity markets only: financial futures have TFF, not Disaggregated.
+
+---
+
+## 4. The `spread_contracts` trap, which is ours
 
 **`canonicalize_legacy` sets `spread_contracts` to `NA` on every row.** Summing an all-null
 column returns **0**, which prints as a measurement of zero spreading and is not one. The
@@ -92,7 +172,7 @@ column we populate with nulls. A caller that aggregates `spread_contracts` for L
 
 ---
 
-## 4. Supplemental against everything else: a different basis
+## 5. Supplemental against everything else: a different basis
 
 The Supplemental (Commodity Index Trader) report is **futures-and-options COMBINED**, where
 the default series of Legacy, Disaggregated and TFF are all futures-only. Its
@@ -105,7 +185,7 @@ on 2026-07-28 is **566,358 combined against 463,502 futures-only**.
 > comparable with `cot_legacy_combined/` for the same market-week (that is the 390/390 match
 > below, now reproducible from inside the store), and is NOT comparable with `cot_legacy/`.
 > Across the three reports, combined-against-combined behaves like futures-only against
-> futures-only in §5. Measured 2026-10-27: ES 2,843,639 combined against 1,955,711, GC
+> futures-only in §6. Measured 2026-10-27: ES 2,843,639 combined against 1,955,711, GC
 > 518,784 against 396,810, CL 2,606,478 against 1,886,280.
 
 **Nothing in the file says so.** It is the one report with no `FutOnly_or_Combined` column, so
@@ -128,11 +208,16 @@ Detail: [`../analysis/2026-08-03-cit-supplemental-measurements.md`](../analysis/
 
 ---
 
-## 5. What this permits
+## 6. What this permits
 
 The enumerated safe comparisons, so that a consumer does not have to infer them from the
 prohibitions:
 
+- **Disaggregated against Legacy, same basis, bucket by bucket** (§3): safe. Producer plus
+  swap (swap spreading on both sides) is Legacy commercial, managed money plus other
+  reportable is Legacy non-commercial, exactly on futures-only, to 2 contracts on combined.
+  Check open interest on a market with `hist_codes`, where a stitched Legacy week can be the
+  predecessor contract. Positions only, not trader counts.
 - **Open interest, Legacy against TFF, same basis**: identical, exactly, always. Safe.
 - **`nonreportable`, Legacy against TFF, same basis**: identical, exactly, always. Safe.
 - **Open interest, any futures-only series against the Supplemental**: **not** safe, different
@@ -148,12 +233,13 @@ prohibitions:
 - **Anything across the two bases of one report** (`cot_legacy/` against
   `cot_legacy_combined/`): not safe as a difference or ratio without knowing it measures the
   option book, which is what the comparison is for if you make it deliberately.
-- **Anything above the reportable line, across any two reports**: not safe.
-- **Within one report, across weeks**: safe, subject to the gap rule (§6).
+- **Anything above the reportable line, across any other two reports** (Legacy against TFF,
+  the Supplemental against Disaggregated, Disaggregated against TFF): not safe.
+- **Within one report, across weeks**: safe, subject to the gap rule (§7).
 
 ---
 
-## 6. A related trap that is not about reports but bites the same callers
+## 7. A related trap that is not about reports but bites the same callers
 
 **Gaps in a market's series come from thin markets falling out of the report**, not from data
 loss. Oats (`004603`) has a **294-day interval ending 2025-09-09** and five more over 50 days:
@@ -170,18 +256,19 @@ that window is resting on a guess.
 
 ## Provenance
 
-Sections 2, 3 and 6 were measured in `crowdmon` and are restated here because `cotdata` owns
+Sections 2, 4 and 7 were measured in `crowdmon` and are restated here because `cotdata` owns
 the facts and crowdmon is deprecated. The original sections, with their reproducers and the
 dates they were established, are:
 
-- §2, §3: `crowdmon/docs/design/amendments-2026-08-04.md` §D7, reproducer
+- §2, §4: `crowdmon/docs/design/amendments-2026-08-04.md` §D7, reproducer
   `crowdmon/docs/analysis/reproduce_single_number.py::d7_legacy_and_tff_share_two_things`
-- §6, gaps: `crowdmon/docs/design/amendments-2026-08-01.md` §A2
-- §6, shutdown: `crowdmon/docs/design/amendments-2026-08-01.md` §A1
+- §7, gaps: `crowdmon/docs/design/amendments-2026-08-01.md` §A2
+- §7, shutdown: `crowdmon/docs/design/amendments-2026-08-01.md` §A1
 
 They are **restated rather than moved**: those files are point-in-time records under that
 repo's doc lifecycle and are not edited by this harvest. See
 `crowdmon/docs/HARVEST.md` for the full map of what was ported, what was already resolved, and
 what was parked with the hypothesis.
 
-Section 4 was authored here from the start and is summarised rather than moved.
+Section 5 was authored here from the start and is summarised rather than moved. Section 3
+was measured here on 2026-11-25, reproducer `scripts/disagg_legacy_split.py`.
