@@ -148,6 +148,12 @@ prohibitions:
 - **Anything across the two bases of one report** (`cot_legacy/` against
   `cot_legacy_combined/`): not safe as a difference or ratio without knowing it measures the
   option book, which is what the comparison is for if you make it deliberately.
+  Measured for Legacy, every market, 2016 to 2026: a positioning index reads the same on
+  both bases in most markets and differently in nine, through real options exposure in four
+  (HE, ZW, DC, WBS) and through the open-interest denominator alone in five (GC, CC, SB, CL,
+  CT). Which basis to index on is therefore a per-market question, and for a normalized index
+  it is partly a question about the denominator.
+  [`../analysis/2026-11-27-legacy-options-impact.md`](../analysis/2026-11-27-legacy-options-impact.md).
 - **Anything above the reportable line, across any two reports**: not safe.
 - **Within one report, across weeks**: safe, subject to the gap rule (§6).
 
